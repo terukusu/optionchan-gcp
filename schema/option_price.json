@@ -1,0 +1,123 @@
+[{
+  "description":"CALL(1) or PUT(2)",
+  "name":"type",
+  "type":"INTEGER"
+},
+{
+  "description":"権利行使価格",
+  "name":"target_price",
+  "type":"INTEGER",
+  "mode":"REQUIRED"
+},
+{
+  "description":"ATMかどうか。ATMならばTRUE",
+  "name":"is_atm",
+  "type":"BOOLEAN"
+},
+{
+  "description":"オプションプレミアム",
+  "name":"price",
+  "type":"INTEGER"
+},
+{
+  "description":"値がついた時刻",
+  "name":"price_time",
+  "type":"DATETIME"
+},
+{
+  "description":"前日比",
+  "name":"diff",
+  "type":"INTEGER"
+},
+{
+  "description":"騰落率",
+  "name":"diff_rate",
+  "type":"FLOAT"
+},
+{
+  "description":"インプライド・ボラティリティ",
+  "name":"iv",
+  "type":"FLOAT"
+},
+{
+  "description":"買い呼び値",
+  "name":"bid",
+  "type":"INTEGER"
+},
+{
+  "description":"買い注文量",
+  "name":"bid_volume",
+  "type":"INTEGER"
+},
+{
+  "description":"買い呼び値のIV",
+  "name":"bid_iv",
+  "type":"FLOAT"
+},
+{
+  "description":"売り呼び値",
+  "name":"ask",
+  "type":"INTEGER"
+},
+{
+  "description":"売り注文量",
+  "name":"ask_volume",
+  "type":"INTEGER"
+},
+{
+  "description":"売り呼び値のIV",
+  "name":"ask_iv",
+  "type":"FLOAT"
+},
+{
+  "description":"取引高",
+  "name":"volume",
+  "type":"INTEGER"
+},
+{
+  "description":"建玉残",
+  "name":"positions",
+  "type":"INTEGER"
+},
+{
+  "description":"清算値",
+  "name":"quotation",
+  "type":"INTEGER"
+},
+{
+  "description":"精算日",
+  "name":"quotation_date",
+  "type":"DATE"
+},
+{
+  "description":"デルタ",
+  "name":"delta",
+  "type":"FLOAT"
+},
+{
+  "description":"ガンマ",
+  "name":"gamma",
+  "type":"FLOAT"
+},
+{
+  "description":"セータ",
+  "name":"theta",
+  "type":"FLOAT"
+},
+{
+  "description":"ベガ",
+  "name":"vega",
+  "type":"FLOAT"
+},
+{
+  "description":"最終取引日",
+  "name":"last_trading_day",
+  "type":"DATE",
+  "mode":"REQUIRED"
+},
+{
+  "description":"情報取得時刻",
+  "name":"created_at",
+  "type":"TIMESTAMP",
+  "mode":"REQUIRED"
+}]

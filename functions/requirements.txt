@@ -1,0 +1,7 @@
+google-cloud-bigquery
+google-cloud-storage
+dataclasses_json
+marshmallow
+pytz
+pyquery
+requests

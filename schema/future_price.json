@@ -1,0 +1,40 @@
+[
+ {
+   "description": "現在値",
+   "name": "price",
+   "type": "FLOAT",
+   "mode": "REQUIRED"
+ },
+ {
+   "description": "値がついた時刻",
+   "name": "price_time",
+   "type": "DATETIME"
+ },
+ {
+   "description": "前日比",
+   "name": "diff",
+   "type": "FLOAT"
+ },
+ {
+   "description": "騰落率",
+   "name": "diff_rate",
+   "type": "FLOAT"
+ },
+ {
+   "description": "ヒストリカルボラティリティ",
+   "name": "hv",
+   "type": "FLOAT"
+ },
+ {
+   "description": "限月",
+   "name": "contract_month",
+   "type": "DATE",
+   "mode": "REQUIRED"
+ },
+ {
+   "description": "情報取得時刻",
+   "name": "created_at",
+   "type": "TIMESTAMP",
+   "mode": "REQUIRED"
+ }
+]
