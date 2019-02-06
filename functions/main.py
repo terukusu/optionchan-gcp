@@ -120,13 +120,15 @@ def download_jpx(data, context):
     created_at = jpx1.created_at
     future_price_time = jpx1.future_price.price_time
 
-    # BigQueryに先物価格が既に存在する(＝値が動いてない＝取引時間外)場合は処理スキップ
-    is_exists = is_exists_future_price(future_price_time)
+    # ↓ 小さなクエリでも最小単位の10MB課金されるのでダメー
 
-    if is_exists:
-        log.debug('future_price already exists. '
-                  'skipping..: price_time={}'.format(future_price_time.isoformat()))
-        return
+    # BigQueryに先物価格が既に存在する(＝値が動いてない＝取引時間外)場合は処理スキップ
+    # is_exists = is_exists_future_price(future_price_time)
+    #
+    # if is_exists:
+    #     log.debug('future_price already exists. '
+    #               'skipping..: price_time={}'.format(future_price_time.isoformat()))
+    #     return
 
     # created_at は1限月にDLしたものに統一する
     # 1限月、２限月合わせてとある時刻のスナップショットとして扱うため
