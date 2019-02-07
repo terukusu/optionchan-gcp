@@ -2,11 +2,13 @@ import base64
 import gzip
 import re
 
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from pytz import timezone
 
 # 3rd party modules
 from google.cloud import bigquery
+from google.cloud import datastore
 from google.cloud import storage
 
 # my modules
@@ -19,6 +21,8 @@ log = getLogger(__name__)
 GCP_PROJECT_ID = 'optionchan-222710'
 GCS_BUCKET_NAME = 'jikken'
 BQ_DATASET_NAME = 'jikken'
+GCD_TYPE = 'optionchan'
+GCD_KEY_ID = 'prev_future_price'
 
 TZ_JST = timezone('Asia/Tokyo')
 TZ_UTC = timezone('UTC')
@@ -118,17 +122,14 @@ def download_jpx(data, context):
     jpx2 = jpx_loader.load_jpx_nearby_month_2nd()
 
     created_at = jpx1.created_at
-    future_price_time = jpx1.future_price.price_time
 
-    # ↓ 小さなクエリでも最小単位の10MB課金されるのでダメー
+    is_changed = update_prev_future_price_if_changed(jpx1.future_price)
 
-    # BigQueryに先物価格が既に存在する(＝値が動いてない＝取引時間外)場合は処理スキップ
-    # is_exists = is_exists_future_price(future_price_time)
-    #
-    # if is_exists:
-    #     log.debug('future_price already exists. '
-    #               'skipping..: price_time={}'.format(future_price_time.isoformat()))
-    #     return
+    # 先物価格が値が動いてない場合は処理スキップ
+    if not is_changed:
+        log.debug('future_price is not changed. '
+                  'skipping..: price_time={}'.format(jpx1.future_price.price_time.isoformat()))
+        return
 
     # created_at は1限月にDLしたものに統一する
     # 1限月、２限月合わせてとある時刻のスナップショットとして扱うため
@@ -168,6 +169,28 @@ def upload_to_gcs_from_string(data, filename):
     file_blob = bucket.blob('{}.gz'.format(filename))
     file_blob.content_encoding = 'gzip'
     file_blob.upload_from_string(gzipped_data, content_type='application/json')
+
+
+# 先物の最新取引時刻が前回のものより新しければ保存します。
+# 新しかった場合は True を返します。
+def update_prev_future_price_if_changed(future_price):
+    client = datastore.Client()
+
+    with client.transaction():
+        key = client.key(GCD_TYPE, GCD_KEY_ID)
+        prev_future_price = client.get(key)
+
+        if prev_future_price is not None and future_price.price_time == prev_future_price['price_time']:
+            # 値動きなし
+            return False
+
+        if prev_future_price is None:
+            prev_future_price = datastore.Entity(key)
+
+        prev_future_price.update(asdict(future_price))
+        client.put(prev_future_price)
+
+    return True
 
 
 def main():
