@@ -89,12 +89,17 @@ def download_jpx(data, context):
 
     created_at = jpx1.created_at
 
-    is_changed = update_prev_future_price_if_changed(jpx1.future_price)
+    is_changed = jpx1.future_price.price_time is not None and update_prev_future_price_if_changed(jpx1.future_price)
 
     # 先物価格が値が動いてない場合は処理スキップ
     if not is_changed:
+        if jpx1.future_price.price_time is not None:
+            log_price_time = jpx1.future_price.price_time.isoformat()
+        else:
+            log_price_time = 'None'
+
         log.debug('future_price is not changed. '
-                  'skipping..: price_time={}'.format(jpx1.future_price.price_time.isoformat()))
+                  f'skipping..: price_time={log_price_time}')
         return
 
     # created_at は1限月にDLしたものに統一する
