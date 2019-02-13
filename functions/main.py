@@ -3,15 +3,19 @@ import gzip
 import re
 
 from dataclasses import asdict
-from pytz import timezone
+from datetime import datetime
 
 # 3rd party modules
+import pandas as pd
+
+from flask import make_response
 from google.cloud import bigquery
 from google.cloud import datastore
 from google.cloud import storage
+from pytz import timezone
 
 # my modules
-import jpx_loader, config
+import config, jpx_loader, optionchan_dao as od
 from my_logging import getLogger
 
 log = getLogger(__name__)
@@ -24,28 +28,51 @@ TZ_UTC = timezone('UTC')
 REGEX_PRICE_FILE = re.compile(r'((?:spot|future|option)_price)_\d+.json.gz')
 
 
-def json_on_gcs_into_bq(bucket_name, file_name, table_name):
+# entry point of Cloud Functions
+# trigger = http
+# スマイルカーブ用のデータをCSVで返す
+def smile_data(request):
+    future = od.find_latest_future_price()
+    df = od.find_option_price_by_created_at(future.created_at)
 
-    uri = 'gs://%s/%s' % (bucket_name, file_name)
+    log.debug(f'number of matched options: {len(df)}')
 
-    client = bigquery.Client()
+    # ATMの行使価格を検索
+    o1_atm = df[df['o1_put_is_atm'] == True]['target_price'].iloc[0]
 
-    table_fqn = '{}.{}.{}'.format(config.gcp_project_id, config.gcp_bq_dataset_name, table_name)
+    # 不要カラム削除
+    df = df.drop(['o1_put_is_atm', 'o2_put_is_atm'], axis=1)
 
-    dataset_ref = client.dataset(config.gcp_bq_dataset_name)
-    client.get_dataset(dataset_ref)
+    # CSV化
+    line1 = f'{int(future.created_at.timestamp())},{o1_atm}\n'
+    option_list_csv = line1 + df.to_csv(index=False, header=False, date_format='%s')
 
-    job_config = bigquery.LoadJobConfig()
-    job_config.autodetect = False
-    job_config.create_disposition = 'CREATE_NEVER'
-    job_config.source_format = 'NEWLINE_DELIMITED_JSON'
+    print(option_list_csv)
 
-    try:
-        load_job = client.load_table_from_uri(uri, table_fqn, job_config=job_config)
-        log.debug('Load job: {} [{}]'.format(load_job.job_id,table_fqn))
-    except Exception as e:
-        log.error('Failed to create load job: {}'.format(e))
-        raise e
+    res = make_response(option_list_csv, 200)
+    res.headers['Content-type'] = 'text/csv; charset=utf-8'
+    return res
+
+
+# entry point of Cloud Functions
+# trigger = http
+# ATM IV推移用のデータをCSVで返す
+def atm_data(request):
+
+    today = datetime.now(TZ_JST)
+
+    df = od.find_recent_iv_and_price_of_atm_options(today)
+    log.debug(f'number of matched record: {len(df)}')
+
+    latest_created_at_str = str(df['time'].iloc[-1])
+
+    # CSV化
+    line1 = f'{latest_created_at_str}\n'
+    option_list_csv = line1 + df.to_csv(index=False, header=False)
+
+    res = make_response(option_list_csv, 200)
+    res.headers['Content-type'] = 'text/csv; charset=utf-8'
+    return res
 
 
 # entry point of Cloud Functions
@@ -162,6 +189,30 @@ def update_prev_future_price_if_changed(future_price):
         client.put(prev_future_price)
 
     return True
+
+
+def json_on_gcs_into_bq(bucket_name, file_name, table_name):
+
+    uri = 'gs://%s/%s' % (bucket_name, file_name)
+
+    client = bigquery.Client()
+
+    table_fqn = '{}.{}.{}'.format(config.gcp_project_id, config.gcp_bq_dataset_name, table_name)
+
+    dataset_ref = client.dataset(config.gcp_bq_dataset_name)
+    client.get_dataset(dataset_ref)
+
+    job_config = bigquery.LoadJobConfig()
+    job_config.autodetect = False
+    job_config.create_disposition = 'CREATE_NEVER'
+    job_config.source_format = 'NEWLINE_DELIMITED_JSON'
+
+    try:
+        load_job = client.load_table_from_uri(uri, table_fqn, job_config=job_config)
+        log.debug('Load job: {} [{}]'.format(load_job.job_id,table_fqn))
+    except Exception as e:
+        log.error('Failed to create load job: {}'.format(e))
+        raise e
 
 
 def main():

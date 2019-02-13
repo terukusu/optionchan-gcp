@@ -71,7 +71,13 @@ def find_option_price_by_created_at(created_at):
     query_job = client.query(query)
     rows = query_job.result()
 
-    return rows.to_dataframe()
+    df = rows.to_dataframe()
+
+    # 取引時刻カラムの日付はnative JST なのでタイムゾーンを付加
+    df['o1_put_price_time'].apply(lambda x: x.tz_localize(tz=TZ_JST) if x is not None else None)
+    df['o2_put_price_time'].apply(lambda x: x.tz_localize(tz=TZ_JST) if x is not None else None)
+
+    return df
 
 
 # target_date: この日の前７日間のデータを返す. aware なもので。
