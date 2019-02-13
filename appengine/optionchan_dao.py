@@ -1,6 +1,7 @@
 from google.cloud import bigquery
 from google.cloud import datastore
-from datetime import datetime
+from datetime import datetime, timedelta
+from pytz import timezone
 
 import models
 from my_logging import getLogger
@@ -8,6 +9,8 @@ from config import Config
 
 log = getLogger(__name__)
 config = Config()
+
+TZ_JST = timezone('Asia/Tokyo')
 
 
 # これだけは Cloud Datastore からデータとってくるやつ。
@@ -68,5 +71,43 @@ def find_option_price_by_created_at(created_at):
     query_job = client.query(query)
     rows = query_job.result()
 
-    # 値リストのリストにしちゃう
+    return rows.to_dataframe()
+
+
+# target_date: この日の前７日間のデータを返す. aware なもので。
+def find_recent_iv_and_price_of_atm_options(target_date):
+
+    last_trading_day_from = target_date.astimezone(TZ_JST).strftime('%Y-%m-%d')
+    created_at_from = (target_date - timedelta(days=7)).isoformat()
+    table = f'{config.gcp_bq_dataset_name}.option_price'
+
+    query = (f'''
+    WITH t1 AS (
+        SELECT min(last_trading_day) AS l_min FROM `{table}`
+        WHERE last_trading_day >= "{last_trading_day_from}"
+    ),
+    t2 AS (
+        SELECT
+            target_price, iv, price, TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/600) AS INT64) * 600) AS time 
+        FROM
+            `{table}`
+        WHERE
+            created_at > "{created_at_from}" AND last_trading_day=(SELECT l_min FROM t1) AND is_atm = TRUE
+    )
+    SELECT
+        UNIX_SECONDS(time) AS time, ROUND(AVG(target_price), 1) AS target_price, 
+        ROUND(AVG(iv), 1) AS iv, ROUND(AVG(price), 1) AS price
+    FROM t2 GROUP BY time ORDER BY time
+    ''')
+
+    result = __do_bq_query(query)
+    return result
+
+
+# 文字列でqueryを受け取って、pandas.DataFrameを返す
+def __do_bq_query(query):
+    client = bigquery.Client()
+    query_job = client.query(query)
+    rows = query_job.result()
+
     return rows.to_dataframe()

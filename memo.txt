@@ -21,3 +21,5 @@ gcloud beta functions deploy load_jpx_into_bq --runtime=python37 --region=us-eas
 # Cloud Scheduler
 gcloud beta scheduler jobs create pubsub minutely_task --time-zone=Asia/Tokyo --schedule="* * * * *" --topic=minutely_task --message-body=minutely_task
 
+# App Engine
+gcloud app deploy
