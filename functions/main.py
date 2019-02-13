@@ -3,7 +3,6 @@ import gzip
 import re
 
 from dataclasses import asdict
-from datetime import datetime, timedelta
 from pytz import timezone
 
 # 3rd party modules
@@ -12,17 +11,11 @@ from google.cloud import datastore
 from google.cloud import storage
 
 # my modules
-import jpx_loader
+import jpx_loader, config
 from my_logging import getLogger
 
 log = getLogger(__name__)
-
-# GCP info
-GCP_PROJECT_ID = 'optionchan-222710'
-GCS_BUCKET_NAME = 'jikken'
-BQ_DATASET_NAME = 'jikken'
-GCD_TYPE = 'optionchan'
-GCD_KEY_ID = 'prev_future_price'
+config = config.Config()
 
 TZ_JST = timezone('Asia/Tokyo')
 TZ_UTC = timezone('UTC')
@@ -31,42 +24,15 @@ TZ_UTC = timezone('UTC')
 REGEX_PRICE_FILE = re.compile(r'((?:spot|future|option)_price)_\d+.json.gz')
 
 
-#
-# 既にBigQueryに指定時刻(created_at)の先物価格が格納されているかを取得します。
-# price_time はタイムゾーンが JST な aware なdatetime
-#
-def is_exists_future_price(price_time):
-    client = bigquery.Client()
-
-    table_fqn = '{}.future_price'.format(BQ_DATASET_NAME)
-    price_time_str = price_time.strftime('%Y-%m-%d %H:%M:%S')
-
-    # price_time の前後１時間のcreated_atの範囲で検索。
-    # (つまり価格情報の記録頻度は１時間以上空けてはダメー)
-    from_date = (price_time - timedelta(hours=1)).isoformat()
-    to_date = (price_time + timedelta(hours=1)).isoformat()
-
-    query = (
-        'SELECT count(*) > 0 as is_exists FROM `{}` '
-        'WHERE created_at >= "{}" AND created_at < "{}" AND price_time="{}"')\
-        .format(table_fqn, from_date, to_date, price_time_str)
-
-    query_job = client.query(query)
-    rows = query_job.result()
-    is_exists = next(iter(rows)).is_exists
-
-    return is_exists
-
-
 def json_on_gcs_into_bq(bucket_name, file_name, table_name):
 
     uri = 'gs://%s/%s' % (bucket_name, file_name)
 
     client = bigquery.Client()
 
-    table_fqn = '{}.{}.{}'.format(GCP_PROJECT_ID, GCS_BUCKET_NAME, table_name)
+    table_fqn = '{}.{}.{}'.format(config.gcp_project_id, config.gcp_bq_dataset_name, table_name)
 
-    dataset_ref = client.dataset(BQ_DATASET_NAME)
+    dataset_ref = client.dataset(config.gcp_bq_dataset_name)
     client.get_dataset(dataset_ref)
 
     job_config = bigquery.LoadJobConfig()
@@ -163,7 +129,7 @@ def download_jpx(data, context):
 # コンテンツはgzip圧縮して、.gz を末尾に付加したファイル名でアップロードします。
 def upload_to_gcs_from_string(data, filename):
     client = storage.Client()
-    bucket = client.get_bucket(GCS_BUCKET_NAME)
+    bucket = client.get_bucket(config.gcp_cs_bucket_name)
 
     gzipped_data = gzip.compress(data.encode('utf-8'))
     file_blob = bucket.blob('{}.gz'.format(filename))
@@ -177,7 +143,7 @@ def update_prev_future_price_if_changed(future_price):
     client = datastore.Client()
 
     with client.transaction():
-        key = client.key(GCD_TYPE, GCD_KEY_ID)
+        key = client.key(config.gcp_ds_kind, config.gcp_ds_key_id)
         prev_future_price = client.get(key)
 
         if prev_future_price is not None and future_price.price_time == prev_future_price['price_time']:
