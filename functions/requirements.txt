@@ -1,11 +1,12 @@
-flask
+dataclasses-json
+Flask
 google-cloud-bigquery
 google-cloud-datastore
 google-cloud-storage
-dataclasses_json
-marshmallow >= 3.0.0rc4
+grpcio
+marshmallow>=3.0.0rc4
+numpy
+pandas
 pytz
 pyquery
 requests
-pandas
-grpcio

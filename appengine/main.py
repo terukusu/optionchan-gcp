@@ -12,6 +12,9 @@ config = Config()
 log = getLogger(__name__)
 app = Flask(__name__)
 
+# TODO Config に逃がす
+with open('auth.txt', 'r') as f:
+    cf_token = f.readline().rstrip('\r\n')
 
 @app.route('/')
 def hello():
@@ -57,7 +60,8 @@ def load_content_from_cloud_functions(url):
 
     headers = {
         'Pragma': 'no-cache',
-        'Cache-Control': 'no-cache'
+        'Cache-Control': 'no-cache',
+        'Authorization': f'Bearer {cf_token}'
     }
 
     response = requests.get(url, headers=headers)

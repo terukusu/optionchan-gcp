@@ -21,6 +21,10 @@ from my_logging import getLogger
 log = getLogger(__name__)
 config = config.Config()
 
+# TODO Config に逃がす
+with open('auth.txt', 'r') as f:
+    cf_token = f.readline().rstrip('\r\n')
+
 TZ_JST = timezone('Asia/Tokyo')
 TZ_UTC = timezone('UTC')
 
@@ -32,6 +36,10 @@ REGEX_PRICE_FILE = re.compile(r'((?:spot|future|option)_price)_\d+.json.gz')
 # trigger = http
 # スマイルカーブ用のデータをCSVで返す
 def smile_data(request):
+
+    if not check_auth(request):
+        return 'Forbidden', 403
+
     future = od.find_latest_future_price()
     df = od.find_option_price_by_created_at(future.created_at)
 
@@ -43,11 +51,17 @@ def smile_data(request):
     # 不要カラム削除
     df = df.drop(['o1_put_is_atm', 'o2_put_is_atm'], axis=1)
 
+    # 取引時刻カラムの日付は native JST なのでタイムゾーンを付加してからUnixtimeに変換
+    def apply_tz(x):
+        return int(x.tz_localize(TZ_JST).timestamp()) if not pd.isnull(x) else x
+    df['o1_call_price_time'] = df['o1_call_price_time'].apply(apply_tz, )
+    df['o2_call_price_time'] = df['o2_call_price_time'].apply(apply_tz)
+    df['o1_put_price_time'] = df['o1_put_price_time'].apply(apply_tz)
+    df['o2_put_price_time'] = df['o2_put_price_time'].apply(apply_tz)
+
     # CSV化
     line1 = f'{int(future.created_at.timestamp())},{o1_atm}\n'
-    option_list_csv = line1 + df.to_csv(index=False, header=False, date_format='%s')
-
-    print(option_list_csv)
+    option_list_csv = line1 + df.to_csv(index=False, header=False)
 
     res = make_response(option_list_csv, 200)
     res.headers['Content-type'] = 'text/csv; charset=utf-8'
@@ -58,6 +72,9 @@ def smile_data(request):
 # trigger = http
 # ATM IV推移用のデータをCSVで返す
 def atm_data(request):
+
+    if not check_auth(request):
+        return 'Forbidden', 403
 
     today = datetime.now(TZ_JST)
 
@@ -79,11 +96,19 @@ def atm_data(request):
 # trigger = bucket
 # filename format: <tablename>_yyyymmddhhmmssSSS.json
 def load_jpx_into_bq(data, context):
+    event_type = context.event_type
+
+    if event_type != 'google.storage.object.finalize':
+        log.info(f'not target event_type. skipping...: event_type={event_type}')
+        return
+
     bucket = data['bucket']
     name = data['name']
     time_created = data['timeCreated']
 
     log.debug('file received: bucket={}, name={}, timeCreated={}'.format(bucket, name, time_created))
+
+    return
 
     m = REGEX_PRICE_FILE.match(name)
     if m is None:
@@ -171,6 +196,7 @@ def upload_to_gcs_from_string(data, filename):
 
 # 先物の最新取引時刻が前回のものより新しければ保存します。
 # 新しかった場合は True を返します。
+# future_price は aware を渡して。
 def update_prev_future_price_if_changed(future_price):
     client = datastore.Client()
 
@@ -178,9 +204,16 @@ def update_prev_future_price_if_changed(future_price):
         key = client.key(config.gcp_ds_kind, config.gcp_ds_key_id)
         prev_future_price = client.get(key)
 
-        if prev_future_price is not None and future_price.price_time == prev_future_price['price_time']:
-            # 値動きなし
-            return False
+        if prev_future_price is not None:
+            # 時分が同じならば同じ時刻とみなす。
+            # 土日は24時間以上価格が動かないが、JPXのサイトには時分表示しか無く
+            # 何日の時刻なのか正確に判定できないため。
+            prev_future_price_hhmm = prev_future_price['price_time'].astimezone(TZ_JST).strftime('%H:%M')
+            future_price_hhmm = future_price.price_time.astimezone(TZ_JST).strftime('%H:%M')
+
+            if prev_future_price_hhmm == future_price_hhmm:
+                # 値動きなし。
+                return False
 
         if prev_future_price is None:
             prev_future_price = datastore.Entity(key)
@@ -213,6 +246,17 @@ def json_on_gcs_into_bq(bucket_name, file_name, table_name):
     except Exception as e:
         log.error('Failed to create load job: {}'.format(e))
         raise e
+
+
+def check_auth(request):
+    auth_header = request.headers.get("Authorization")
+
+    req_cf_token = None
+
+    if auth_header is not None:
+        req_cf_token = auth_header.split(' ')[1]
+
+    return req_cf_token == cf_token
 
 
 def main():

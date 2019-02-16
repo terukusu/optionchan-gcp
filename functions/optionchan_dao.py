@@ -1,3 +1,5 @@
+import pandas as pd
+
 from google.cloud import bigquery
 from google.cloud import datastore
 from datetime import datetime, timedelta
@@ -11,6 +13,7 @@ log = getLogger(__name__)
 config = Config()
 
 TZ_JST = timezone('Asia/Tokyo')
+TZ_UTC = timezone('UTC')
 
 
 # これだけは Cloud Datastore からデータとってくるやつ。
@@ -73,14 +76,10 @@ def find_option_price_by_created_at(created_at):
 
     df = rows.to_dataframe()
 
-    # 取引時刻カラムの日付はnative JST なのでタイムゾーンを付加
-    df['o1_put_price_time'].apply(lambda x: x.tz_localize(tz=TZ_JST) if x is not None else None)
-    df['o2_put_price_time'].apply(lambda x: x.tz_localize(tz=TZ_JST) if x is not None else None)
-
     return df
 
 
-# target_date: この日の前７日間のデータを返す. aware なもので。
+# target_date: この日の前７日間のデータを返す. aware なものを渡してください。
 def find_recent_iv_and_price_of_atm_options(target_date):
 
     last_trading_day_from = target_date.astimezone(TZ_JST).strftime('%Y-%m-%d')
@@ -94,7 +93,7 @@ def find_recent_iv_and_price_of_atm_options(target_date):
     ),
     t2 AS (
         SELECT
-            target_price, iv, price, TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/600) AS INT64) * 600) AS time 
+            target_price, iv, price, TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/300) AS INT64) * 300) AS time 
         FROM
             `{table}`
         WHERE
