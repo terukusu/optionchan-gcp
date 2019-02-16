@@ -108,8 +108,6 @@ def load_jpx_into_bq(data, context):
 
     log.debug('file received: bucket={}, name={}, timeCreated={}'.format(bucket, name, time_created))
 
-    return
-
     m = REGEX_PRICE_FILE.match(name)
     if m is None:
         log.debug('not price info file: {}'.format(name))
