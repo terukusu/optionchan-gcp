@@ -19,8 +19,8 @@ exports.stackdriverLineNotify = (req, res) => {
     + '状況: ' + i.state + '\n'
     + '対象: ' + i.resource_name + '\n'
     + 'ポリシー: ' + i.policy_name + '\n'
-    + '発生時刻: ' + getJstMmddhhmm(i.started_at) + '\n'
-    + '収束時刻: ' + getJstMmddhhmm(i.ended_at) + '\n'
+    + '発生日時: ' + getJstMmddhhmm(i.started_at) + '\n'
+    + '収束日時: ' + getJstMmddhhmm(i.ended_at) + '\n'
     + 'サマリ: ' + i.summary + '\n'
     + '詳細: ' + i.url;
 
