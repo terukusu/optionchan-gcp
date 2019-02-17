@@ -4,6 +4,7 @@ Cloud Functionsとかでガーッと価格情報を取ってきて、BigQueryに
 
 * appengine
   * ビューアー用のウェブアプリ。とりあえず Chart.js でATMのIV推移と直近のスマイルカーブを可視化している
+
 * functions
   * ４個の Cloud Functionが含まれる 
     * データ取り込み用
@@ -16,6 +17,10 @@ Cloud Functionsとかでガーッと価格情報を取ってきて、BigQueryに
         * ATM オプションの IV 推移表示用のデータを返す WebAPI
       * smile_data
         * 直近のスマイルカーブ表示用のデータを返す WebAPI
+
 * js_functions
   * 細々とした Cloud Functionsが入ってる
     * Stackdriverから受け取った通知をLineへ通知する関数
+
+* schema
+  * BigQueryのスキーマ
