@@ -7,15 +7,15 @@ Stackdriverから通知を受けとるためのWebhook用 Cloud Function。受�
 
 ```
 {
-  "access_token": "aaaaaaaaaaaaaaaa",
+  "auth_token": "aaaaaaaaaaaaaaaa",
   "line_token": "bbbbbbbbbbbbbbbb",
   "line_user_id": "cccccccccccccccc"
 }
 
 ```
 
-* access_token
-  * Stackdriver からクエリ文字列で送る access_token パラメータ  
+* auth_token
+  * Stackdriver からクエリ文字列で送る auth_token パラメータ  
 * line_token
   * Line Messaging API にアクセスするためのトークン。 Line Developers Console から取得しておく。  
 * line_user_id
