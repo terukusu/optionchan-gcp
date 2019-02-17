@@ -8,6 +8,7 @@ exports.stackdriverLineNotify = (req, res) => {
 
   if (!auth_token || auth_token !== auth.auth_token) {
     res.status(403).send('Forbidden');
+    return;
   }
 
   // Stackdriverからのメッセージ
