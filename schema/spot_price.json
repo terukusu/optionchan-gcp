@@ -22,8 +22,7 @@
  {
    "description": "ヒストリカルボラティリティ",
    "name": "hv",
-   "type": "FLOAT",
-   "mode": ""
+   "type": "FLOAT"
  },
  {
    "description": "情報取得時刻",

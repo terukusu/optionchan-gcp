@@ -8,22 +8,24 @@ BQ容量
 # Cloud Pub/Sub
 gcloud pubsub topics create minutely_task
 
+gcloud pubsub topics create minutely15_task
+
 # Cloud Storage
-gsutil mb -l us-east1 -c regional gs://jikken/
+gsutil mb -l us-east1 -c regional gs://optionchan/
 
 # BigQuery
-bq mk --data_location=us jikken
+bq mk --data_location=us optionchan
 
-bq mk --time_partitioning_field=created_at --clustering_fields=last_trading_day --schema=./schema/option_price.json jikken.option_price
+bq mk --time_partitioning_field=created_at --clustering_fields=last_trading_day --schema=./schema/option_price.json optionchan.option_price
 
-bq mk --time_partitioning_field=created_at --clustering_fields=contract_month --schema=./schema/future_price.json jikken.future_price
+bq mk --time_partitioning_field=created_at --clustering_fields=contract_month --schema=./schema/future_price.json optionchan.future_price
 
-bq mk --time_partitioning_field=created_at --schema=./schema/spot_price.json=jikken.spot_price
+bq mk --time_partitioning_field=created_at --schema=./schema/spot_price.json optionchan.spot_price
 
 # Cloud Functions
 gcloud functions deploy download_jpx --runtime=python37 --region=us-east1 --trigger-topic minutely_task
 
-gcloud functions deploy load_jpx_into_bq --runtime=python37 --region=us-east1 --trigger-resource jikken --trigger-event google.storage.object.finalize
+gcloud functions deploy load_jpx_into_bq --runtime=python37 --region=us-east1 --trigger-resource optionchan --memory=128 --trigger-event google.storage.object.finalize
 
 gcloud functions deploy smile_data --runtime=python37 --region=us-east1 --trigger-http
 
@@ -31,6 +33,8 @@ gcloud functions deploy atm_data --runtime=python37 --region=us-east1 --trigger-
 
 # Cloud Scheduler
 gcloud beta scheduler jobs create pubsub minutely_task --time-zone=Asia/Tokyo --schedule="* * * * *" --topic=minutely_task --message-body=minutely_task
+
+gcloud beta scheduler jobs create pubsub minutely_task --time-zone=Asia/Tokyo --schedule="*/15 * * * *" --topic=15minutely_task --message-body=15minutely_task
 
 # App Engine
 gcloud app deploy

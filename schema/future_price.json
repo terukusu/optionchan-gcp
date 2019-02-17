@@ -2,8 +2,7 @@
  {
    "description": "現在値",
    "name": "price",
-   "type": "FLOAT",
-   "mode": "REQUIRED"
+   "type": "FLOAT"
  },
  {
    "description": "値がついた時刻",
