@@ -1,7 +1,7 @@
 const request = require('request');
 
-auth = require('./auth.json');
-config = require('./config.json');
+const auth = require('./auth.json');
+const config = require('./config.json');
 
 exports.stackdriverLineNotify = (req, res) => {
   let auth_token = req.query.auth_token;
