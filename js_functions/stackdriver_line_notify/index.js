@@ -40,10 +40,13 @@ exports.stackdriverLineNotify = (req, res) => {
   };
 
   // Line へメッセージ送信！
-  request.post(options, (e, r, b) => {
-    if (e || r.statusCode != 200) {
-      console.log(e + r + b);
+  request.post(options, (error, response, body) => {
+    if (error) {
+      console.log(error.message);
+      return;
     }
+    console.log('statusCode=' + response.statusCode + ', body=' + body);
+    console.dir(body);
   });
 
   res.status(200).send('OK');

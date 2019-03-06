@@ -134,9 +134,6 @@ def download_jpx(data, context):
     # 1限月をDL
     jpx1 = jpx_loader.load_jpx_nearby_month()
 
-    # 2限月をDL
-    jpx2 = jpx_loader.load_jpx_nearby_month_2nd()
-
     created_at = jpx1.created_at
 
     is_changed = jpx1.future_price.price_time is not None and update_prev_future_price_if_changed(jpx1.future_price)
@@ -151,6 +148,9 @@ def download_jpx(data, context):
         log.debug('future_price is not changed. '
                   f'skipping..: price_time={log_price_time}')
         return
+
+    # 2限月をDL
+    jpx2 = jpx_loader.load_jpx_nearby_month_2nd()
 
     # created_at は1限月にDLしたものに統一する
     # 1限月、２限月合わせてとある時刻のスナップショットとして扱うため
