@@ -15,7 +15,7 @@ exports.stackdriverLineNotify = (req, res) => {
   let sd_json = req.body;
   let i = sd_json.incident;
 
-  let message = '【SVR1】Stackdriverからのお知らせでです。\n'
+  let message = 'Stackdriverからのお知らせでです。\n'
     + '状況: ' + i.state + '\n'
     + '対象: ' + i.resource_name + '\n'
     + 'ポリシー: ' + i.policy_name + '\n'
