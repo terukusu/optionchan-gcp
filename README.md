@@ -1,12 +1,12 @@
 # optionchan for GCP
-日経225オプションの価格情報を蓄積していくツール。の、Google Cloud Platform版
-Cloud Functionsとかでガーッと価格情報を取ってきて、BigQueryにヴァッと蓄積していきます。
+日経225オプションの価格情報を蓄積していくツール。の、Google Cloud Platform 版
+Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery にヴァッと蓄積していきます。
 
 * appengine
   * ビューアー用のウェブアプリ。とりあえず Chart.js でATMのIV推移と直近のスマイルカーブを可視化している
 
 * functions
-  * ４個の Cloud Functionが含まれる 
+  * ４個の Cloud Functionが含まれる
     * データ取り込み用
       * download_jpx
         * スクレーピング → json化 → Cloud Storageへ保存するもの
@@ -17,10 +17,6 @@ Cloud Functionsとかでガーッと価格情報を取ってきて、BigQueryに
         * ATM オプションの IV 推移表示用のデータを返す WebAPI
       * smile_data
         * 直近のスマイルカーブ表示用のデータを返す WebAPI
-
-* js_functions
-  * 細々とした Cloud Functionsが入ってる
-    * Stackdriverから受け取った通知をLineへ通知する関数
 
 * schema
   * BigQueryのスキーマ
