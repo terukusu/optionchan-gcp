@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="ja">
+	<head>
+        <meta http-equiv="Pragma" content="no-cache">
+        <meta http-equiv="Cache-Control" content="no-cache">
+        <meta http-equiv="Expires" content="0">
+		<title>ATM IVの推移</title>
+		<script src="https://moment.github.io/luxon/global/luxon.min.js"></script>
+		<script src="https://cdn.jsdelivr.net/npm/chart.js@2.8.0"></script>
+		<script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-luxon@0.1.1"></script>
+		<script src="/static/chartjs-chart-financial.js" type="text/javascript"></script>
+        <style>
+        #loading{
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            -webkit-transform: translate(-50%,-50%);
+            -moz-transform: translate(-50%,-50%);
+            -ms-transform: translate(-50%,-50%);
+            -o-transform: translate(-50%,-50%);
+            transform: translate(-50%,-50%);
+        }
+        </style>
+	</head>
+	<body>
+        <div style="width: 100%; height: 70%;">
+            <canvas id="chartCanvas"></canvas>
+        </div><br />
+        <div id="loading">
+          <img src="/static/loading.gif" />
+        </div>
+		<div id="control" style="display: none;">
+			Bar Type:
+			<select id="type">
+				<option value="candlestick" selected>Candlestick</option>
+				<option value="ohlc">OHLC</option>
+			</select>
+			Color Scheme:
+			<select id="color-scheme">
+				<option value="muted" selected>Muted</option>
+				<option value="neon">Neon</option>
+			</select>
+			Border:
+			<select id="border">
+				<option value="true" selected>Yes</option>
+				<option value="false">No</option>
+			</select>
+			Days:
+			<select id="days">
+				<option value="10">10</option>
+				<option value="15">15</option>
+				<option value="20" selected>20</option>
+				<option value="25">25</option>
+				<option value="30">30</option>
+				<option value="30">40</option>
+				<option value="30">50</option>
+				<option value="30">60</option>
+			</select>
+			<button id="update">Update</button>
+		</div>
+		<script src="/static/atm_iv.js" type="text/javascript"></script>
+	</body>
+</html>

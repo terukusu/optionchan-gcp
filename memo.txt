@@ -44,7 +44,7 @@ gcloud beta scheduler jobs create pubsub minutely_task --time-zone=Asia/Tokyo --
 
 gcloud beta scheduler jobs create pubsub minutely_task --time-zone=Asia/Tokyo --schedule="*/15 * * * *" --topic=15minutely_task --message-body=15minutely_task
 
-gcloud beta scheduler jobs create pubsub create_timeframe --time-zone=UTC --schedule="30 0 * * *" --topic=create_timeframe --message-body=create_timeframe
+gcloud beta scheduler jobs create pubsub create_timeframe --time-zone=UTC --schedule="1 0 * * *" --topic=create_timeframe --message-body=create_timeframe
 
 # App Engine
 gcloud app deploy
@@ -57,8 +57,6 @@ appengine と functions フォルダに用意する。
 bq mk --time_partitioning_field=started_at --clustering_fields=last_trading_day --schema=./schema/atm_option_price.json optionchan.atm_option_price
 bq mk --time_partitioning_field=started_at --clustering_fields=last_trading_day --schema=./schema/atm_target_price.json optionchan.atm_target_price
 bq mk --time_partitioning_field=started_at --clustering_fields=last_trading_day --schema=./schema/atm_iv.json optionchan.atm_iv
-
-INSERT optionchan.atm_target_price (open, high, low, close, last_trading_day, time_frame, started_at)
 
 
 ## 初期データ投入。target_prie の部分を (atm_iv, iv), (target_price, target_price),

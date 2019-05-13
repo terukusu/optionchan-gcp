@@ -1,6 +1,5 @@
-**/.idea/
-auth.txt
-auth.json
+.idea/
+.gcloudignore
 
 # Created by https://www.gitignore.io/api/venv,macos,flask,python,windows
 # Edit at https://www.gitignore.io/?templates=venv,macos,flask,python,windows

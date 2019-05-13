@@ -18,10 +18,10 @@ def insert_ohlc_iv():
         
         WITH t1 as (
             SELECT  
-                (array_agg(iv ORDER BY created_at ASC))[OFFSET(0)] open,
+                (array_agg(iv IGNORE NULLS ORDER BY created_at ASC))[OFFSET(0)] open,
                 MAX(iv) high,
                 MIN(iv) low,
-                (array_agg(iv ORDER BY created_at DESC))[OFFSET(0)] close,
+                (array_agg(iv IGNORE NULLS ORDER BY created_at DESC))[OFFSET(0)] close,
                 last_trading_day,
                 3600 time_frame,
                 TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/3600) AS INT64) * 3600) AS started_at
@@ -48,10 +48,10 @@ def insert_ohlc_option_price():
 
         WITH t1 as (
             SELECT  
-                (array_agg(price ORDER BY created_at ASC))[OFFSET(0)] open,
+                (array_agg(price IGNORE NULLS ORDER BY created_at ASC))[OFFSET(0)] open,
                 MAX(price) high,
                 MIN(price) low,
-                (array_agg(price ORDER BY created_at DESC))[OFFSET(0)] close,
+                (array_agg(price IGNORE NULLS ORDER BY created_at DESC))[OFFSET(0)] close,
                 last_trading_day,
                 3600 time_frame,
                 TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/3600) AS INT64) * 3600) AS started_at
@@ -78,10 +78,10 @@ def insert_ohlc_target_price():
 
         WITH t1 as (
             SELECT  
-                (array_agg(target_price ORDER BY created_at ASC))[OFFSET(0)] open,
+                (array_agg(target_price IGNORE NULLS ORDER BY created_at ASC))[OFFSET(0)] open,
                 MAX(target_price) high,
                 MIN(target_price) low,
-                (array_agg(target_price ORDER BY created_at DESC))[OFFSET(0)] close,
+                (array_agg(target_price IGNORE NULLS ORDER BY created_at DESC))[OFFSET(0)] close,
                 last_trading_day,
                 3600 time_frame,
                 TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/3600) AS INT64) * 3600) AS started_at
