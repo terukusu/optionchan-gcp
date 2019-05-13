@@ -1,0 +1,40 @@
+[
+ {
+   "description": "始値",
+   "name": "open",
+   "type": "FLOAT"
+ },
+ {
+   "description": "高値",
+   "name": "high",
+   "type": "FLOAT"
+ },
+ {
+   "description": "安値",
+   "name": "low",
+   "type": "FLOAT"
+ },
+ {
+   "description": "終値",
+   "name": "close",
+   "type": "FLOAT"
+ },
+ {
+   "description":"最終取引日",
+   "name":"last_trading_day",
+   "type":"DATE",
+   "mode":"REQUIRED"
+ },
+ {
+   "description": "時間枠（秒数）",
+   "name": "time_frame",
+   "type": "INTEGER",
+   "mode": "REQUIRED"
+ },
+ {
+   "description": "開始時刻",
+   "name": "started_at",
+   "type": "TIMESTAMP",
+   "mode": "REQUIRED"
+ }
+]
