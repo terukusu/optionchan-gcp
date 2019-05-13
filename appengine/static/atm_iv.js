@@ -17,6 +17,8 @@ function drawChart(data) {
     document.getElementById("control").style.display = "block";
 
     var ctx = document.getElementById('chartCanvas').getContext('2d');
+	var type = document.getElementById('type').value;
+	var defaultOpts = Chart.defaults.global.elements[type];
 
     chart = new Chart(ctx, {
         type: 'candlestick',
@@ -24,7 +26,12 @@ function drawChart(data) {
             datasets: [{
                 label: 'iv',
                 data: data,
-                spanGaps: false
+                spanGaps: false,
+                borderColor: {
+                    up: defaultOpts.color.up,
+                    down: defaultOpts.color.down,
+                    unchanged: defaultOpts.color.up
+                }
             }]
         },
         options: {
