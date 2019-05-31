@@ -76,3 +76,6 @@ WITH t1 as (
     GROUP BY last_trading_day, started_at
 )
 SELECT * FROM t1;
+
+# bucketに3日で削除設定
+gsutil lifecycle set lifecycle.json gs://optionchan/
