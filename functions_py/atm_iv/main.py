@@ -19,8 +19,9 @@ def atm_iv_data(request):
         return 'Forbidden', 403
 
     num_days = request.args.get('d', default='7')
+    n_th_contract_month = request.args.get('n', default='0')
 
-    df = query_atm_iv(num_days)
+    df = query_atm_iv(num_days, n_th_contract_month)
 
     # CSV化
     atm_iv_csv = df.to_csv(index=False, header=False)
@@ -30,14 +31,14 @@ def atm_iv_data(request):
     return res
 
 
-def query_atm_iv(num_days):
+def query_atm_iv(num_days, n_th_contract_month=0):
     table_iv = f'{config.gcp_bq_dataset_name}.atm_iv'
     table_option_price = f'{config.gcp_bq_dataset_name}.option_price'
 
     query = (f'''
         WITH t1 AS (
             SELECT
-                MIN(last_trading_day) as last_trading_day
+                (ARRAY_AGG(DISTINCT(last_trading_day) IGNORE NULLS ORDER BY last_trading_day ASC))[OFFSET({n_th_contract_month})] AS last_trading_day
             FROM
                 {table_iv}
             WHERE

@@ -63,7 +63,8 @@ def atm_iv():
 @app.route('/atm_iv_data')
 def atm_iv_data():
     num_days = request.args.get('d', default='7')
-    url = f'{config.gcp_cf_url_base}/atm_iv_data?d={num_days}'
+    n_th_contract_month = request.args.get('n', default='0')
+    url = f'{config.gcp_cf_url_base}/atm_iv_data?d={num_days}&n={n_th_contract_month}'
     option_list_csv = load_content_from_cloud_functions(url)
 
     res = make_response(option_list_csv, 200)

@@ -106,8 +106,9 @@ var update = function() {
     document.getElementById("loading").style.display = "block";
 
 	var num_days = document.getElementById('days').value;
+	var n_th_contract_month = document.getElementById('nmonth').value;
 
-    getCsvData(num_days, function(ohlcData) {
+    getCsvData(num_days, n_th_contract_month, function(ohlcData) {
     document.getElementById("loading").style.display = "none";
         chart.data.datasets[0].data = ohlcData;
     	chart.update();
@@ -116,9 +117,9 @@ var update = function() {
 };
 
 
-function getCsvData(days='10', callback) {
+function getCsvData(days='10', nmonth='0', callback) {
     var req = new XMLHttpRequest();
-    var filePath = '/atm_iv_data?d=' + days;
+    var filePath = '/atm_iv_data?d=' + days + '&n=' + nmonth;
 
     if (Number(days) > 100) {
         // upper limit
@@ -145,7 +146,7 @@ function getCsvData(days='10', callback) {
 }
 
 function main() {
-    getCsvData(20,function(ohlcData) {
+    getCsvData(20, 0, function(ohlcData) {
         drawChart(ohlcData);
     });
 }
