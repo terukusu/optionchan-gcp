@@ -24,8 +24,7 @@ class JpxOptionPriceInfo:
     put_option_list: List[OptionPrice]
     created_at: datetime
 
-
-REGEX_PRICE = re.compile(r'([\d\.]+)[^\d]*(\d+:\d+)?')
+REGEX_PRICE = re.compile(r'([\d\.]+)\(\d{2}/\d{2} (\d{2}:\d{2})\)')
 REGEX_ORDER = re.compile(r'([\d\-]+)\s*\(([\d\-]+)\)\s*([\d\-]+)\s*\(([\d\-]+)\)')
 REGEX_DIFF = re.compile(r'([+\-\d\.]+)\s*([+\-\d\.]+)%')
 REGEX_ORDER_IV = re.compile(r'(?:\-|([\d\.]+)%)\s*(?:\-|([\d\.]+)%)')
@@ -304,13 +303,13 @@ def parse_jpx_html(html):
             future_price_time -= timedelta(days=1)
 
     future_price_diff_str = future_price_web.find('td').eq(2).text()
-    future_price_diff = int(future_price_diff_str) if future_price_diff_str is not '-' else None
+    future_price_diff = int(future_price_diff_str) if future_price_diff_str != '-' else None
 
     future_price_diff_rate_str = future_price_web.find('td').eq(3).text().replace('%', '')
-    future_price_diff_rate = float(future_price_diff_rate_str) if future_price_diff_rate_str is not '-' else None
+    future_price_diff_rate = float(future_price_diff_rate_str) if future_price_diff_rate_str != '-' else None
 
     future_price_hv_str = future_price_web.find('td').eq(4).text().replace('%', '')
-    future_price_hv = float(future_price_hv_str) if future_price_hv_str is not '-' else None
+    future_price_hv = float(future_price_hv_str) if future_price_hv_str != '-' else None
 
     # 先物の限月
     m = REGEX_CONTRACT_MONTH.search(future_price_web.find('td').eq(0).text())

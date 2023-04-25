@@ -37,7 +37,7 @@ gcloud functions deploy smile_data --runtime=python37 --region=us-east1 --trigge
 
 gcloud functions deploy atm_data --runtime=python37 --region=us-east1 --trigger-http
 
-gcloud functions deploy atm_iv_data --runtime=python37 --region=us-east1 --memory=128 --trigger-http
+gcloud functions deploy atm_iv_data --runtime=python37 --region=us-east1 --memory=256 --trigger-http
 
 # Cloud Scheduler
 gcloud beta scheduler jobs create pubsub minutely_task --time-zone=Asia/Tokyo --schedule="* * * * *" --topic=minutely_task --message-body=minutely_task
