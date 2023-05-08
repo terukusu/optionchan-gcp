@@ -24,7 +24,9 @@ class JpxOptionPriceInfo:
     put_option_list: List[OptionPrice]
     created_at: datetime
 
+
 REGEX_PRICE = re.compile(r'([\d\.]+)\(\d{2}/\d{2} (\d{2}:\d{2})\)')
+REGEX_OPTION_PRICE = re.compile(r'([0-9\.]+)\s*\d{2}/\d{2} (\d{2}:\d{2})')
 REGEX_ORDER = re.compile(r'([\d\-]+)\s*\(([\d\-]+)\)\s*([\d\-]+)\s*\(([\d\-]+)\)')
 REGEX_DIFF = re.compile(r'([+\-\d\.]+)\s*([+\-\d\.]+)%')
 REGEX_ORDER_IV = re.compile(r'(?:\-|([\d\.]+)%)\s*(?:\-|([\d\.]+)%)')
@@ -104,7 +106,7 @@ def parse_option(option_info):
     is_atm = option_info[next(seq)]
 
     # price
-    m = REGEX_PRICE.search(option_info[next(seq)])
+    m = REGEX_OPTION_PRICE.search(option_info[next(seq)])
 
     price = None
     price_time = None
@@ -279,8 +281,6 @@ def parse_jpx_html(html):
         spot_price_hv,
         created_at,
     )
-
-    # print(spot_price_info)
 
     # 先物価格情報
     future_price_web = price_info.find('tr').filter(lambda idx, e: pq(e).find('td').eq(0).text().find('先物') > -1)
