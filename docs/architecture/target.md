@@ -187,7 +187,7 @@ flowchart LR
   - `ingest_runs` の行数・テーブル別行数 = 各テーブルの実件数（GCS raw と `ingest_runs` の突き合わせは SQL ではできないので、ingest の回収処理が行う）
   - 3 テーブルに同じスナップショットがある、`created_at` の重複が無い、2 限月ともある、限月ごとに ATM がちょうど 1 つ
   - `price_time` が未来でない・30 日以上前でない、日曜の日付が無い（直近パーティションのみ。過去は #4 まで違反のまま）。祝日取引・休場・SQ を考慮
-- **コスト**: 予算アラート（80% / 100%）と BigQuery の 1 日あたりクエリ量の上限（カスタムクォータ）。予算アラートは Cloud Monitoring のアラート課金の対象外
+- **コスト**: 予算アラート（50% / 80% / 100%。#21）と BigQuery の 1 日あたりクエリ量の上限（カスタムクォータ）。予算アラートは Cloud Monitoring のアラート課金の対象外
 - ログはすべて JSON の構造化ログ（`severity`、`ingest_run_id`、`snapshot_at`、`rows`、失敗種別）で stdout に出す
 - 通知はメール（D3）
 
@@ -241,11 +241,13 @@ infra/
 - GitHub Actions:
   - PR: テスト・lint・`terraform plan`（`sa-tf-plan`、結果を PR にコメント）
   - `master` へのマージ: ビルド・push → イメージ digest を変数に `terraform apply`（`sa-tf-apply`、Environment `prod` の承認）。デプロイ経路は Terraform 1 本にし、`gcloud run deploy` との二重管理をしない
-- Terraform 管理外（runbook に手順）: bootstrap の apply、IAP 用 OAuth クライアントの事前設定、予算アラート（請求先アカウント側のため。Terraform 化できるかは実装時に判断）
+- Terraform 管理外（runbook に手順）: bootstrap の apply、IAP 用 OAuth クライアントの事前設定、予算アラートと BigQuery の 1 日あたりクエリ量の上限（フェーズ 0 で gcloud で設定、#21。手順は `docs/runbook.md` の「コスト」。予算は請求先アカウント側のリソース、クエリ量上限は Service Usage の consumer override で、Terraform に import するか runbook 管理のままにするかは #10 で判断）
 
 ### 4.1 runbook（`docs/runbook.md`、実装時に作成）
 
 アラート（M1・M2）ごとの一次対応、Scheduler の停止 / 再開、取引カレンダーの更新（年 2 回）、期間指定の再処理、JPX の形式変更時・BigQuery 障害時の対応、tfstate のロック解除・復旧、IAP OAuth クライアントの設定。
+
+「コスト」（予算・クエリ量上限の確認と変更、超過時の一次対応）は #21 で作成済み。
 
 ## 5. リポジトリ構成（After）
 
