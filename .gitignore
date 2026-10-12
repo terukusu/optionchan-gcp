@@ -261,3 +261,13 @@ $RECYCLE.BIN/
 .claude/settings.local.json
 .claude/handoff/
 .claude/worktrees/
+# Terraform (#10)。state・plan・ログはプロジェクト番号やメールを含むのでコミットしない
+*.tfstate
+*.tfstate.*
+.terraform/
+*.tfvars
+tfplan
+*.tfplan
+plan.log
+apply.log
+gha-creds-*.json
