@@ -195,6 +195,142 @@ gcloud alpha services quota delete \
    - 3 つとも 0 件（取引のあった日）なら再実行する: `gcloud pubsub topics publish create_timeframe --message=create_timeframe --project=$P`
    - 一部だけ入っている場合は publish すると入っている分が重複する。入っていないテーブルの INSERT だけを `functions_py/timeframe/main.py` の SQL で `bq query` から実行する
 
+## 監視アラート
+
+現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。Terraform 管理外（#10 で import するか判断する）で、旧系の削除（#14）で消す。
+
+| 表示名 | 条件 | 拾うもの | 定義 |
+|---|---|---|---|
+| `optionchan: M1 生存（download_jpx の起動が 15 分無い）` | `download_jpx` の実行数（status を合算）が 15 分間 無い。24 時間有効 | Scheduler `minutely_task`・Pub/Sub・関数の停止 | `monitoring/m1-liveness.json` |
+| `optionchan: M2 エラー（取り込み関数の失敗）` | `download_jpx` / `load_jpx_into_bq` の失敗（status が `ok` 以外）が関数ごとに 15 分間に 3 件以上、または `insert_ohlc` の失敗が 1 件以上 | crash / timeout / connection error（メモリ上限超過を含む）が続くこと | `monitoring/m2-errors.json` |
+
+M2 を ERROR ログの一致にしないのは、既知のエラー（毎日 04:00 / 04:20 JST の `time data ''`、接続エラー、409 Conflict）が毎日 1〜6 件出て毎日鳴るのと、timeout・connection error では ERROR ログが出ないため。単発の失敗は次の分の実行で取り戻せるので、続いたときだけ通知する。
+
+料金: 2027-09-01 以降（公式の価格ページで 2026-10-12 に確認。"no sooner than"）、メトリクス参照 3 件（M1 1、M2 2）× $0.35 + ポイント料金（約 17 万点 / 月 → 約 $0.09）で月 約 $1.14（約 170 円、税抜き）。それまでに #14 で削除する見込み。
+
+### 変数
+
+「コスト」の「共通の変数」の `P` と `CH` を使う（`echo "$CH" | grep -c .` が 1 であること）。通知チャネル ID はポリシー JSON に書かず、作成時に `--notification-channels` で渡す（ファイルの設定より優先される）。
+
+### 作成
+
+同じ表示名のポリシーがあれば作らない。リポジトリ直下で実行する。
+
+```sh
+for f in monitoring/m1-liveness.json monitoring/m2-errors.json; do
+  n=$(jq -r .displayName "$f")
+  if [ -n "$(gcloud monitoring policies list --project=$P --filter="displayName=\"$n\"" --format='value(name)')" ]; then
+    echo "exists: $n"; continue
+  fi
+  gcloud monitoring policies create --project=$P --policy-from-file="$f" --notification-channels="$CH" --format='value(displayName)'
+done
+```
+
+### 確認
+
+`ok` が `true` であること（`describe` の生の出力は通知チャネル ID を含むので貼らない）。
+
+```sh
+gcloud monitoring policies list --project=$P --format=json \
+  | jq --arg ch "$CH" '[.[] | select(.displayName | startswith("optionchan: M"))]
+      | {count: length, ok: (length == 2 and all(.[]; .enabled == true and .notificationChannels == [$ch]))}'
+gcloud logging metrics list --project=$P --format='value(name)' | grep -c .   # 0（ログ指標は使わない）
+```
+
+### バックテスト
+
+しきい値を変えるときは、先に過去 6 週間（Monitoring の保持期間）の `execution_count` に条件を当てて発火回数を見る。読み取りのみ。しきい値は `monitoring/` の JSON から読む。
+
+```sh
+python3 -I monitoring/backtest.py   # 終了コード 0: 発火なし、1: 発火あり、2: API エラー
+```
+
+2026-10-12 の実行（08-31〜10-12）: M1 の最大の空き 4 分、M2 の 15 分の最大失敗数 `download_jpx` 2・`load_jpx_into_bq` 1・`insert_ohlc` 0 で、発火 0。
+
+### 試験発報
+
+本番の取り込みは止めない。同じ指標・集計で「今発火する」条件にした試験用ポリシーを作り、メールが届いたら消す。
+
+```sh
+T=$(mktemp -d)
+jq '.displayName = "optionchan: 試験 M2" | .documentation.subject = "[optionchan] 試験 M2（削除予定）"
+    | .conditions = [.conditions[0] | .conditionThreshold.filter |= sub("NOT metric.labels.status"; "metric.labels.status")]' \
+  monitoring/m2-errors.json > $T/t2.json
+jq '.displayName = "optionchan: 試験 M1" | .documentation.subject = "[optionchan] 試験 M1（削除予定）"
+    | .conditions[0].conditionAbsent.filter |= sub("\"download_jpx\""; "\"insert_ohlc\"")
+    | .conditions[0].conditionAbsent.duration = "300s"' \
+  monitoring/m1-liveness.json > $T/t1.json
+gcloud monitoring policies create --project=$P --policy-from-file=$T/t2.json --notification-channels="$CH" --format='value(displayName)'
+gcloud monitoring policies create --project=$P --policy-from-file=$T/t1.json --notification-channels="$CH" --format='value(displayName)'
+rm -rf $T
+```
+
+- 試験 M2 は `ok` の実行数（15 分で 15 件前後）で発火するので、数分でメールが届く。いつでもよい
+- 試験 M1 は `insert_ohlc`（毎日 00:01 UTC = 09:01 JST に 1 回だけ実行）の実行が 5 分間 無いことで発火し、5〜10 分でメールが届く。`insert_ohlc` の実行後は値 0 の点が 20 分ほど続くので、09:00〜09:30 JST は避ける。20 分待っても届かなければ、`insert_ohlc` を `load_jpx_into_bq` に変えて、取引の無い時間帯（06:30〜08:30 JST、16:20〜16:50 JST、週末）に作り直す
+- 受信した日時（分まで）を Issue にコメントする（メール本文は貼らない）
+- 削除（表示名が完全一致で 1 件のときだけ消す）:
+
+  ```sh
+  for n in "optionchan: 試験 M1" "optionchan: 試験 M2"; do
+    ids=$(gcloud monitoring policies list --project=$P --filter="displayName=\"$n\"" --format='value(name)')
+    [ "$(echo "$ids" | grep -c .)" = 1 ] && gcloud monitoring policies delete "$ids" --project=$P --quiet
+  done
+  gcloud monitoring policies list --project=$P --filter='displayName:"optionchan: 試験"' --format='value(displayName)' | grep -c .   # 0
+  ```
+
+### M1 を受けたとき
+
+取り込みが止まっている。`execution_count` は最後の実行のあとも値 0 の点を 20 分ほど出し続け、欠落条件はそれを「データあり」とみなすので、実際の停止から通知までは 35 分前後かかる。上から順に見る。
+
+1. Scheduler: `gcloud scheduler jobs describe minutely_task --location=asia-northeast1 --project=$P --format='value(state)'` が `ENABLED` か。実行の失敗が無いか: `gcloud logging read 'resource.type="cloud_scheduler_job" AND resource.labels.job_id="minutely_task"' --project=$P --freshness=30m --limit=5 --format='value(timestamp,severity)'`
+2. 関数: `gcloud functions describe download_jpx --region=us-east1 --project=$P --format='value(status)'` が `ACTIVE` か
+3. 最後の実行時刻: `gcloud logging read 'resource.type="cloud_function" AND resource.labels.function_name="download_jpx"' --project=$P --freshness=30m --limit=5 --format='value(timestamp,severity)'`
+4. Google Cloud のステータスページ（Cloud Functions / Cloud Scheduler / Pub/Sub、us-east1・asia-northeast1）
+
+Scheduler が `PAUSED` なら `gcloud scheduler jobs resume minutely_task --location=asia-northeast1 --project=$P`（本番の変更。オーナーが実行する）。止まっていた間のデータは取り戻せない（JPX のページは最新の値だけ）ので、欠けた時間帯を Issue に記録する。
+
+### M2 を受けたとき
+
+該当する関数のエラーを見る（出力は Issue に貼らず要約する）:
+
+```sh
+gcloud logging read 'resource.type="cloud_function" AND resource.labels.function_name="<関数名>" AND (severity>=ERROR OR textPayload:"finished with status")' \
+  --project=$P --freshness=1h --format='value(timestamp,severity,textPayload)' | head -40
+```
+
+| 関数 | よくある原因 | 対応 |
+|---|---|---|
+| `download_jpx` | JPX の接続エラー・ページ形式の変化 | 接続エラーは収まるのを待つ。ページ構造が変わったなら別 Issue で `jpx_loader` を直す |
+| `download_jpx` | メモリ上限（`Memory limit` の行。指標では `connection error`） | 512MB（D9）。続くなら別 Issue |
+| `load_jpx_into_bq` | BigQuery の 409 Conflict / timeout | BigQuery のステータスを見る。続くなら別 Issue |
+| `insert_ohlc` | クエリ量上限 | 「コスト」の「クエリ量上限を超えたとき」の再実行手順 |
+
+単発で収まっていれば、インシデントは条件を満たさなくなってから自動で閉じる。
+
+### 一時停止・再開
+
+作業で意図的に取り込みを止めるとき（例: Scheduler を止めるメンテナンス）は、M1 を止めておく。
+
+```sh
+ID=$(gcloud monitoring policies list --project=$P --filter='displayName:"optionchan: M1"' --format='value(name)')
+echo "$ID" | grep -c .   # 1 であること
+gcloud monitoring policies update "$ID" --no-enabled --project=$P
+# 戻すとき
+gcloud monitoring policies update "$ID" --enabled --project=$P
+```
+
+### 削除（切り戻し・#14）
+
+「試験発報」の削除と同じループで、表示名を `optionchan: M1 生存（download_jpx の起動が 15 分無い）` と `optionchan: M2 エラー（取り込み関数の失敗）` にする。別サーバー用の既存ポリシーは表示名が `optionchan: ` で始まらないので対象にならない。
+
+### 検知できないもの
+
+- JPX のページが更新されない（`download_jpx` は保存をスキップして `ok` で終わる）
+- load job の非同期の失敗（`load_jpx_into_bq` は投入だけして `ok` で終わる）
+- 行数の欠け・`price_time` の異常などのデータ品質
+
+新系（#11）の鮮度判定と日次の品質クエリで解消する。それまでは閲覧時に気づいたら Issue にする。
+
 ## サービスアカウント鍵
 
 旧 `optionchan` SA のユーザー管理鍵（2019 年発行、2 本）の使用確認と無効化（#23）。鍵の削除・SA の無効化・ロール除去は #15。鍵 ID は先頭 8 文字だけを Issue・PR・ログに書く（全桁・鍵の中身は書かない）。システム管理の鍵（Google が管理）は対象外。

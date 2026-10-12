@@ -1,0 +1,55 @@
+{
+  "displayName": "optionchan: M2 エラー（取り込み関数の失敗）",
+  "documentation": {
+    "subject": "[optionchan] M2 取り込み関数の失敗が続いている",
+    "mimeType": "text/markdown",
+    "content": "取り込み関数の失敗（execution_count の status が ok 以外: crash / timeout / connection error 等）が続いています。\n\n- 条件 1: `download_jpx` または `load_jpx_into_bq` の失敗が 15 分間に 3 件以上\n- 条件 2: `insert_ohlc`（1 時間足の日次生成）の失敗が 1 件以上\n\n一次対応は runbook の「監視アラート」節の「M2 を受けたとき」を参照してください。",
+    "links": [
+      {
+        "displayName": "runbook: 監視アラート",
+        "url": "https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#%E7%9B%A3%E8%A6%96%E3%82%A2%E3%83%A9%E3%83%BC%E3%83%88"
+      }
+    ]
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "download_jpx / load_jpx_into_bq の失敗が 15 分間に 3 件以上（関数ごと）",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_function\" AND resource.labels.function_name = one_of(\"download_jpx\", \"load_jpx_into_bq\") AND metric.type = \"cloudfunctions.googleapis.com/function/execution_count\" AND NOT metric.labels.status = \"ok\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.label.function_name"]
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 2,
+        "duration": "0s",
+        "trigger": {"count": 1}
+      }
+    },
+    {
+      "displayName": "insert_ohlc の失敗が 1 件以上",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_function\" AND resource.labels.function_name = \"insert_ohlc\" AND metric.type = \"cloudfunctions.googleapis.com/function/execution_count\" AND NOT metric.labels.status = \"ok\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.label.function_name"]
+          }
+        ],
+        "comparison": "COMPARISON_GT",
+        "thresholdValue": 0,
+        "duration": "0s",
+        "trigger": {"count": 1}
+      }
+    }
+  ],
+  "severity": "ERROR",
+  "enabled": true
+}

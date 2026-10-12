@@ -1,0 +1,35 @@
+{
+  "displayName": "optionchan: M1 生存（download_jpx の起動が 15 分無い）",
+  "documentation": {
+    "subject": "[optionchan] M1 取り込みが止まっている（download_jpx の起動が 15 分無い）",
+    "mimeType": "text/markdown",
+    "content": "`download_jpx` の実行が 15 分間ありません。Cloud Scheduler `minutely_task`（asia-northeast1）→ Pub/Sub `minutely_task` → `download_jpx`（us-east1）のどこかで取り込みが止まっています。\n\n一次対応は runbook の「監視アラート」節の「M1 を受けたとき」を参照してください。",
+    "links": [
+      {
+        "displayName": "runbook: 監視アラート",
+        "url": "https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#%E7%9B%A3%E8%A6%96%E3%82%A2%E3%83%A9%E3%83%BC%E3%83%88"
+      }
+    ]
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "download_jpx の実行数（status を問わない）が 15 分間 無い",
+      "conditionAbsent": {
+        "filter": "resource.type = \"cloud_function\" AND resource.labels.function_name = \"download_jpx\" AND metric.type = \"cloudfunctions.googleapis.com/function/execution_count\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "60s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.label.function_name"]
+          }
+        ],
+        "duration": "900s",
+        "trigger": {"count": 1}
+      }
+    }
+  ],
+  "severity": "CRITICAL",
+  "enabled": true
+}
