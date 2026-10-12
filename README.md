@@ -21,6 +21,9 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 * schema
   * BigQueryのスキーマ
 
+* monitoring
+  * Cloud Monitoring のアラートポリシー定義（JSON）とバックテスト。作成・試験発報の手順は docs/runbook.md の「監視アラート」
+
 * tests
   * functions のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
 

@@ -206,7 +206,7 @@ BigQuery `optionchan` のテーブル（2026-10-12 時点）:
 ### 4.5 監視・ログ
 
 - ログは Cloud Logging の既定（`_Default` / `_Required`）のみ。エクスポートなし
-- アラートポリシーは別サーバーの死活監視が 1 件あるだけで、optionchan の取り込み停止・エラーを検知するアラートは無い
+- アラートポリシー（#9 で追加）: `optionchan: M1 生存（download_jpx の起動が 15 分無い）`（`download_jpx` の組み込み指標 `execution_count` が 15 分間 無い）と `optionchan: M2 エラー（取り込み関数の失敗）`（`execution_count` の status が `ok` 以外の実行が、`download_jpx` / `load_jpx_into_bq` で関数ごとに 15 分間に 3 件以上、または `insert_ohlc` で 1 件以上）。メール通知チャネルへ通知。ログ指標は使わない。Terraform 管理外で、定義は `monitoring/`、手順は `docs/runbook.md` の「監視アラート」。鮮度（JPX のページが更新されない）・load job の非同期の失敗・データ品質は検知しない。ほかに別サーバーの死活監視のポリシーが 1 件
 - 通知チャネルはメールと LINE Notify（webhook）。LINE Notify は 2025-03-31 にサービスを終了しているため、LINE への通知は届かない状態と考えられる（#20 で webhook チャネルを削除済み、2026-10-12。通知チャネルはメールのみ）
 - 予算アラート（#21 で追加。2026-10-12 に設定）: 表示名 `optionchan: 月額予算`。このプロジェクトのみを対象に暦月 500 円、実績の 50 / 80 / 100% でメール通知チャネルへ通知（請求先アカウントは他プロジェクトと共有のため、IAM ロール保持者への既定メールは無効）。課金は止めない。Terraform 管理外で、手順は `docs/runbook.md` の「コスト」
 - BigQuery の 1 日あたりクエリ量の上限（#21 で追加。2026-10-12 に設定）: プロジェクト単位の `QueryUsagePerDay` を 32 GiB/日（32768 MiB、Service Usage の consumer override。既定は 200 TiB/日）。ユーザー単位は無制限のまま。超えると太平洋時間の 0 時まで `insert_ohlc` とビューアーのクエリが失敗する（毎分の LOAD ジョブは対象外）
@@ -229,7 +229,8 @@ optionchan-gcp/
 │   ├── templates/, static/
 │   └── app.yaml
 ├── schema/                 # BigQuery のテーブルスキーマ (JSON)
-├── tests/                  # pytest (JPX ページの解析。#2 で追加)
+├── monitoring/             # アラートポリシーの定義 (JSON) とバックテスト。#9 で追加
+├── tests/                  # pytest (JPX ページの解析は #2、アラート定義とバックテストの判定は #9 で追加)
 ├── lifecycle.json          # GCS の自動削除設定
 └── memo.txt                # リソース作成・デプロイのコマンド集
 ```
@@ -244,7 +245,7 @@ optionchan-gcp/
 - デプロイは手作業（`memo.txt` のコマンドを手で実行）。IaC・CI/CD は無い
 - リソース（バケット、データセット、トピック、スケジューラ）も手作業で作成
 - 本番と git の差: `download_jpx` / `load_jpx_into_bq` は 2024-08 のデプロイ内容が未コミットだった（2026-10-12 に PR #6 で取り込み、`download_jpx` を再デプロイ）。2024 年のデプロイではローカルの `venv/` などもアップロードされていた。python37 の関数と App Engine は git と本番の照合をしていない
-- 監視はしておらず、異常は閲覧時に気づく運用
+- 監視は取り込みの停止・失敗のアラート 2 本（#9）。鮮度・データ品質の異常は閲覧時に気づく運用
 
 ## 7. 現行の課題（リファクタリングの論点）
 
@@ -254,12 +255,12 @@ optionchan-gcp/
 | 世代 | Cloud Functions はすべて第1世代 |
 | リージョン | 東京・us-east1・US に分散。関数↔BigQuery↔Datastore↔App Engine の通信がリージョンをまたぐ |
 | 構成管理 | IaC なし。リソース作成・デプロイが手作業で、本番と git がずれる（ドリフト） |
-| 品質 | CI なし。自動テストは #2 で `tests/`（JPX ページの解析）を追加したのみ |
+| 品質 | CI なし。自動テストは `tests/`（#2 で JPX ページの解析、#9 でアラート定義）のみ |
 | 認証 | 共通パスワードの平文配布（#3）。HTTP 関数が `allUsers` 公開 |
 | 権限 | 全関数が App Engine デフォルト SA で動作。強い権限を持つ SA に SA 鍵がある（ユーザー管理の 2 本は 2026-10-12 に無効化、#23。削除は #15） |
 | 整合性 | Datastore と BigQuery の更新順のずれで、取り込み直後に表示が失敗する（#5） |
 | データ品質 | `price_time` の日付ずれ（#2）と過去データ（#4） |
-| 監視 | 取り込み停止・エラーのアラートなし。通知先の LINE Notify は終了済みで、#20 で関連リソースを削除（通知先はメールのみ） |
+| 監視 | 取り込み停止・失敗のアラートは #9 で 2 本追加（関数の実行数で判定）。鮮度・データ品質は検知できない。通知先の LINE Notify は終了済みで、#20 で関連リソースを削除（通知先はメールのみ） |
 | コスト | 土日・夜間も毎分起動。`option_price` が 78GB で増え続ける（保持期限なし） |
 | 残骸 | App Engine の旧バージョン 30 個、未使用トピック `minutely15_task`、`jikken`（BigQuery / GCS 約 6.5GB） |
 | フロントエンド | ビューアーが App Engine に同梱。Chart.js のバージョンがページで混在 |
