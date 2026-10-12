@@ -1,0 +1,9 @@
+# 許可リスト方式: すべて除外してから、イメージに必要なものだけを戻す（auth.txt・functions/・.git 等を context に入れない）
+*
+!apps/ingest/pyproject.toml
+!apps/ingest/uv.lock
+!apps/ingest/src/
+!config/trading_calendar.toml
+!schema/tokyo/
+**/__pycache__
+**/*.pyc

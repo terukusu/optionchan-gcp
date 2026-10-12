@@ -1,0 +1,68 @@
+[
+  {
+    "name": "price",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "現在値"
+  },
+  {
+    "name": "price_time",
+    "type": "DATETIME",
+    "mode": "NULLABLE",
+    "description": "値がついた時刻（JST の壁時計。ページの表示に年を補ったもの）"
+  },
+  {
+    "name": "diff",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "前日比"
+  },
+  {
+    "name": "diff_rate",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "騰落率"
+  },
+  {
+    "name": "hv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "ヒストリカルボラティリティ"
+  },
+  {
+    "name": "created_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "スナップショットの時刻（1 限月ページの最終更新時刻）"
+  },
+  {
+    "name": "page_updated_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "この行を取ったページの最終更新時刻。created_at は 1 限月ページの更新時刻に揃えるので、2 限月の行だけ値が違いうる"
+  },
+  {
+    "name": "price_time_raw",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "ページの約定日時の表示（MM/DD HH:MM、年なし）。price_time の元"
+  },
+  {
+    "name": "ingest_run_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "取り込み実行の ID（UUID4）。ingest_runs と結合して最新版を選ぶ"
+  },
+  {
+    "name": "parser_version",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "解析コードの版（例 ingest-1）"
+  },
+  {
+    "name": "source_object",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "元の生 HTML（gs://<bucket>/<name>#<generation>）"
+  }
+]

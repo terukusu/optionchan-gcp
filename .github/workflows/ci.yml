@@ -53,6 +53,41 @@ jobs:
       - name: pytest
         run: python -m pytest -q tests
 
+      # 新しい取り込み（apps/ingest、#32）。Python 3.13 と uv.lock で別の環境を作る（uv は pip で固定版を入れる。新しい Action を足さない）
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: ingest の依存のインストール
+        working-directory: apps/ingest
+        env:
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          python -m pip install uv==0.12.19
+          uv sync --locked --python 3.13
+      - name: ingest の ruff
+        working-directory: apps/ingest
+        run: uv run --locked ruff check
+      - name: ingest の pytest
+        working-directory: apps/ingest
+        run: uv run --locked pytest -q
+
+  # イメージのビルド確認（push しない・認証なし。必須 check にはしない）
+  ingest-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build -f apps/ingest/Dockerfile -t ingest:ci .
+      - name: イメージの中身の確認
+        run: |
+          docker run --rm ingest:ci python -c 'import optionchan_ingest.app'
+          # auth.txt・functions/・テストがイメージに入っていないこと
+          found=$(docker run --rm --entrypoint sh ingest:ci -c \
+            'find / -xdev \( -name auth.txt -o -name auth.json -o -path /app/functions -o -path /app/tests -o -name .git \) 2>/dev/null' | wc -l)
+          test "$found" -eq 0
+
   terraform-plan:
     runs-on: ubuntu-latest
     permissions:

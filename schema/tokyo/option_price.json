@@ -1,0 +1,176 @@
+[
+  {
+    "name": "type",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "CALL(1) or PUT(2)"
+  },
+  {
+    "name": "target_price",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "権利行使価格"
+  },
+  {
+    "name": "is_atm",
+    "type": "BOOLEAN",
+    "mode": "NULLABLE",
+    "description": "ATMかどうか。ATMならばTRUE"
+  },
+  {
+    "name": "price",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "オプションプレミアム"
+  },
+  {
+    "name": "price_time",
+    "type": "DATETIME",
+    "mode": "NULLABLE",
+    "description": "値がついた時刻（JST の壁時計。ページの表示に年を補ったもの）"
+  },
+  {
+    "name": "diff",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "前日比"
+  },
+  {
+    "name": "diff_rate",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "騰落率"
+  },
+  {
+    "name": "iv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "インプライド・ボラティリティ"
+  },
+  {
+    "name": "bid",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "買い呼び値"
+  },
+  {
+    "name": "bid_volume",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "買い注文量"
+  },
+  {
+    "name": "bid_iv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "買い呼び値のIV"
+  },
+  {
+    "name": "ask",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "売り呼び値"
+  },
+  {
+    "name": "ask_volume",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "売り注文量"
+  },
+  {
+    "name": "ask_iv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "売り呼び値のIV"
+  },
+  {
+    "name": "volume",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "取引高"
+  },
+  {
+    "name": "positions",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "建玉残"
+  },
+  {
+    "name": "quotation",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "清算値"
+  },
+  {
+    "name": "quotation_date",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "精算日"
+  },
+  {
+    "name": "delta",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "デルタ"
+  },
+  {
+    "name": "gamma",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "ガンマ"
+  },
+  {
+    "name": "theta",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "セータ"
+  },
+  {
+    "name": "vega",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "ベガ"
+  },
+  {
+    "name": "last_trading_day",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "最終取引日"
+  },
+  {
+    "name": "created_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "スナップショットの時刻（1 限月ページの最終更新時刻）"
+  },
+  {
+    "name": "page_updated_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "この行を取ったページの最終更新時刻。created_at は 1 限月ページの更新時刻に揃えるので、2 限月の行だけ値が違いうる"
+  },
+  {
+    "name": "price_time_raw",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "ページの約定日時の表示（MM/DD HH:MM、年なし）。price_time の元"
+  },
+  {
+    "name": "ingest_run_id",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "取り込み実行の ID（UUID4）。ingest_runs と結合して最新版を選ぶ"
+  },
+  {
+    "name": "parser_version",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "解析コードの版（例 ingest-1）"
+  },
+  {
+    "name": "source_object",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "元の生 HTML（gs://<bucket>/<name>#<generation>）"
+  }
+]
