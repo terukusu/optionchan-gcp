@@ -20,3 +20,15 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 
 * schema
   * BigQueryのスキーマ
+
+* tests
+  * functions のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
+
+## テストの実行
+Python 3.11 の venv を作り、リポジトリ直下で実行する。
+
+```bash
+python3.11 -m venv .venv
+.venv/bin/pip install -r functions/requirements.txt pytest
+.venv/bin/python -m pytest -q tests
+```

@@ -25,9 +25,10 @@ bq mk --time_partitioning_field=created_at --clustering_fields=contract_month --
 bq mk --time_partitioning_field=created_at --schema=./schema/spot_price.json optionchan.spot_price
 
 # Cloud Functions
-gcloud functions deploy download_jpx --runtime=python37 --region=us-east1 --trigger-topic minutely_task
+## データ取り込み (第1世代 / python311。リポジトリ直下で実行。functions/auth.txt を置き、functions/__pycache__ を消してから)
+gcloud functions deploy download_jpx --no-gen2 --project=optionchan-222710 --region=us-east1 --source=functions --runtime=python311 --entry-point=download_jpx --trigger-topic=minutely_task --memory=256MB --timeout=60s --service-account=optionchan-222710@appspot.gserviceaccount.com
 
-gcloud functions deploy load_jpx_into_bq --runtime=python37 --region=us-east1 --trigger-resource optionchan --memory=128 --trigger-event google.storage.object.finalize
+gcloud functions deploy load_jpx_into_bq --no-gen2 --project=optionchan-222710 --region=us-east1 --source=functions --runtime=python311 --trigger-resource=optionchan --trigger-event=google.storage.object.finalize --memory=256MB --timeout=60s --service-account=optionchan-222710@appspot.gserviceaccount.com
 
 ## 時間足生成
 gcloud functions deploy insert_ohlc --runtime=python37 --region=us-east1 --timeout=540s --memory=128 --trigger-topic create_timeframe
