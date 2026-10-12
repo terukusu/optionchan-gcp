@@ -264,13 +264,13 @@ def parse_jpx_html(html):
             # 未来日ということは日マタギなので１日戻しておく
             spot_price_time -= timedelta(days=1)
 
-    spot_price_diff_str = spot_price_web.find('td').eq(2).text()
+    spot_price_diff_str = spot_price_web.find('td').eq(2).text().replace(',', '')
     spot_price_diff = float(spot_price_diff_str) if spot_price_diff_str != '-' else None
 
-    spot_price_diff_rate_str = spot_price_web.find('td').eq(3).text().replace('%', '')
+    spot_price_diff_rate_str = spot_price_web.find('td').eq(3).text().replace('%', '').replace(',', '')
     spot_price_diff_rate = float(spot_price_diff_rate_str) if spot_price_diff_rate_str != '-' else None
 
-    spot_price_hv_str = spot_price_web.find('td').eq(4).text().replace('%', '')
+    spot_price_hv_str = spot_price_web.find('td').eq(4).text().replace('%', '').replace(',', '')
     spot_price_hv = float(spot_price_hv_str) if spot_price_hv_str != '-' else None
 
     spot_price_info = SpotPrice(
@@ -302,13 +302,13 @@ def parse_jpx_html(html):
             # 未来日ということは日マタギなので１日戻しておく
             future_price_time -= timedelta(days=1)
 
-    future_price_diff_str = future_price_web.find('td').eq(2).text()
+    future_price_diff_str = future_price_web.find('td').eq(2).text().replace(',', '')
     future_price_diff = int(future_price_diff_str) if future_price_diff_str != '-' else None
 
-    future_price_diff_rate_str = future_price_web.find('td').eq(3).text().replace('%', '')
+    future_price_diff_rate_str = future_price_web.find('td').eq(3).text().replace('%', '').replace(',', '')
     future_price_diff_rate = float(future_price_diff_rate_str) if future_price_diff_rate_str != '-' else None
 
-    future_price_hv_str = future_price_web.find('td').eq(4).text().replace('%', '')
+    future_price_hv_str = future_price_web.find('td').eq(4).text().replace('%', '').replace(',', '')
     future_price_hv = float(future_price_hv_str) if future_price_hv_str != '-' else None
 
     # 先物の限月
