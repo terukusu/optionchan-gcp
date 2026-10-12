@@ -200,7 +200,7 @@ BigQuery `optionchan` のテーブル（2026-10-12 時点）:
 | ビューアー（App Engine） | IAP で Google ログインを要求 |
 | App Engine → HTTP 関数 | 関数は `allUsers` に invoker を付与（誰でも呼び出せる）。関数内で `Authorization: Bearer` を `auth.txt` の共通パスワードと照合 |
 | 共通パスワード | `auth.txt`（gitignore 済み）を `functions/`・`functions_py/atm_iv/`・`appengine/` に置いてデプロイ。デプロイされたソース zip に平文で含まれる（#3） |
-| サービスアカウント | 実行はすべて App Engine デフォルト SA。別に `optionchan` SA があり（BigQuery 管理者・Datastore オーナー・Storage オブジェクト管理者）、SA 鍵が発行されている（2019 年）。Compute Engine / App Engine のデフォルト SA には `roles/editor` が付いている |
+| サービスアカウント | 実行はすべて App Engine デフォルト SA。別に `optionchan` SA があり（BigQuery 管理者・Datastore オーナー・Storage オブジェクト管理者）、SA 鍵が発行されている（2019 年）。ユーザー管理の鍵 2 本は最終認証の記録が無く、2026-10-12 に無効化（#23。削除は #15、手順は `docs/runbook.md` の「サービスアカウント鍵」）。Compute Engine / App Engine のデフォルト SA には `roles/editor` が付いている |
 | プロジェクト | 組織に属さない（IAP の OAuth クライアントをプログラムで作れない制約に関係） |
 
 ### 4.5 監視・ログ
@@ -256,7 +256,7 @@ optionchan-gcp/
 | 構成管理 | IaC なし。リソース作成・デプロイが手作業で、本番と git がずれる（ドリフト） |
 | 品質 | CI なし。自動テストは #2 で `tests/`（JPX ページの解析）を追加したのみ |
 | 認証 | 共通パスワードの平文配布（#3）。HTTP 関数が `allUsers` 公開 |
-| 権限 | 全関数が App Engine デフォルト SA で動作。強い権限を持つ SA に SA 鍵がある |
+| 権限 | 全関数が App Engine デフォルト SA で動作。強い権限を持つ SA に SA 鍵がある（ユーザー管理の 2 本は 2026-10-12 に無効化、#23。削除は #15） |
 | 整合性 | Datastore と BigQuery の更新順のずれで、取り込み直後に表示が失敗する（#5） |
 | データ品質 | `price_time` の日付ずれ（#2）と過去データ（#4） |
 | 監視 | 取り込み停止・エラーのアラートなし。通知先の LINE Notify は終了済みで、#20 で関連リソースを削除（通知先はメールのみ） |
