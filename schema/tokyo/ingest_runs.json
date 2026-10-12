@@ -1,0 +1,74 @@
+[
+  {
+    "name": "ingest_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "取り込み実行の ID（UUID4）"
+  },
+  {
+    "name": "snapshot_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "スナップショットの時刻（= 各テーブルの created_at、1 限月ページの最終更新時刻）"
+  },
+  {
+    "name": "page2_updated_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "2 限月ページの最終更新時刻"
+  },
+  {
+    "name": "source_object",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "元の生 HTML（gs://<bucket>/<name>#<generation>）"
+  },
+  {
+    "name": "source_generation",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "元の生 HTML の GCS generation"
+  },
+  {
+    "name": "parser_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "解析コードの版"
+  },
+  {
+    "name": "trigger",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "起動のきっかけ（scheduler / recovery / reprocess）"
+  },
+  {
+    "name": "rows_spot",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "spot_price に書いた行数"
+  },
+  {
+    "name": "rows_future",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "future_price に書いた行数"
+  },
+  {
+    "name": "rows_option",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "option_price に書いた行数"
+  },
+  {
+    "name": "started_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "実行の開始時刻（実時刻）"
+  },
+  {
+    "name": "finished_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "3 テーブルへの書き込みが終わった時刻（実時刻）"
+  }
+]

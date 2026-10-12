@@ -670,3 +670,25 @@ $TF -chdir=infra/prod plan -input=false -detailed-exitcode > /dev/null; echo $? 
 - Editor を持つデフォルト SA（4 つ）はプロジェクトの `roles/editor` で両方の tfstate バケットを読み書きできる（バケットの IAM では防げない）。#15 で Editor を外すまで残る
 - `sa-tf-plan` はこのリポジトリのどの workflow・ブランチからも借用できる（PR の plan 用）。push できるのは所有者だけで、fork の PR は secret を受け取れない。fork・Dependabot の PR では `terraform-plan` が失敗して必須 check で止まる（Dependabot を入れるとき（#11 以降）に扱いを決める）
 - `sa-tf-apply` の `roles/artifactregistry.admin` はプロジェクト単位（既存の `gcf-artifacts` も消せる）。apply は承認つきで、Terraform が管理しないリソースには触れない。#11 で見直す
+
+## 取引カレンダーの更新
+
+新しい取り込み（`apps/ingest`、#32）が時間外・休場日の判定に使う `config/trading_calendar.toml` の更新。JPX は毎年 2 月に翌年の祝日取引の実施日（予定）を、6 月と 12 月に翌年の上半期・下半期の実施日（確定）を公表する。**年 2 回（6 月・12 月の公表後）**、確定分まで `covered_until` を延ばす。
+
+- 出典: 大阪取引所「祝日取引」の祝日取引実施日の表（https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html ）
+- `covered_until` の 14 日前から 1 日 1 回（09:00 JST のリクエスト）WARNING `calendar_expiring` を出し、過ぎたら同じく 1 日 1 回 ERROR `calendar_outdated` を出す（新系の M2 で通知。11d）。通知が来たらこの手順で更新する
+- `covered_until` を過ぎても取り込みは止めない。`closed_dates` に書いた日（「予定」の日を含む）は休み、書いていない平日は取引日として扱う（未知の休業日にも JPX を取りに行くだけで、データは増えない）。期限切れの間は休業日を判定できないので鮮度判定（`stale`）をしない
+
+手順:
+
+1. 年末年始の休業日 **12/31・1/1・1/2・1/3**（業務規程の休業日。祝日取引の表に無い日もある）のうち**平日のもの**と、公表の表で「実施しない」日（BCP テスト等）のうち平日のものを `closed_dates` に足す（土日は書かない）。平日の祝日で「実施する」日は書かない（取引日として扱う）。「予定」の日も書いてよい（`covered_until` より後でも使われる）
+2. 大発会の前夜など、直前の夜間セッションが無い取引日が公表されたら `no_night_session_before` に足す（2025-12-30 の大納会は夜間を実施したので、通常は空）
+3. `covered_until` を確定分の最終日に延ばす（予定の日だけで延ばさない）
+4. テストを通して PR を出す。キーは `[sessions]` の表より前に書く（後に書くと `[sessions]` に入り、読み込み時にエラーになる）
+
+```bash
+cd apps/ingest
+uv run --locked pytest -q tests/test_calendar.py
+```
+
+境界ケース（年末年始・祝日取引を実施しない日）のテストを足すときは `apps/ingest/tests/test_calendar.py` の `CASES` に追加する。

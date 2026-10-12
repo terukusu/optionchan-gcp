@@ -1,0 +1,41 @@
+[project]
+name = "optionchan-ingest"
+version = "0.1.0"
+description = "JPX の日経225オプションのページを毎分取得し、生 HTML を GCS に、行を BigQuery（東京）に書く Cloud Run サービス"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    # 正確な版とハッシュは uv.lock で固定する
+    "flask>=3.1",
+    "gunicorn>=23",
+    "pyquery>=2",
+    "lxml>=5",
+    "requests>=2.32",
+    "google-cloud-storage>=3",
+    "google-cloud-bigquery-storage>=2.30",
+    "protobuf>=5",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9",
+    "ruff>=0.16",
+]
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"
+
+[tool.uv]
+# 公開から 2 週間未満の版を入れない（サプライチェーン対策）。更新するときはこの日付を進めて uv lock する
+exclude-newer = "2026-09-28T00:00:00Z"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]

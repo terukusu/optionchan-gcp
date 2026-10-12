@@ -1,0 +1,32 @@
+{
+  "_comment": "データセット optionchan_tokyo とテーブルの設定（作成は 11b の Terraform。列の定義は同じディレクトリの <table>.json）。ユーザー確認待ちの値はここと列の JSON だけを直す",
+  "dataset": {
+    "dataset_id": "optionchan_tokyo",
+    "location": "asia-northeast1",
+    "storage_billing_model": "PHYSICAL",
+    "default_table_expiration_ms": null,
+    "max_time_travel_hours": 168
+  },
+  "tables": {
+    "spot_price": {
+      "time_partitioning": {"type": "DAY", "field": "created_at"},
+      "clustering": [],
+      "require_partition_filter": false
+    },
+    "future_price": {
+      "time_partitioning": {"type": "DAY", "field": "created_at"},
+      "clustering": ["contract_month"],
+      "require_partition_filter": false
+    },
+    "option_price": {
+      "time_partitioning": {"type": "DAY", "field": "created_at"},
+      "clustering": ["last_trading_day", "target_price"],
+      "require_partition_filter": true
+    },
+    "ingest_runs": {
+      "time_partitioning": {"type": "DAY", "field": "snapshot_at"},
+      "clustering": [],
+      "require_partition_filter": false
+    }
+  }
+}
