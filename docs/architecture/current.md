@@ -153,11 +153,11 @@ sequenceDiagram
 | `atm_data` | Cloud Functions 第1世代 | us-east1 | **python37** | HTTP | 256MB / 60s | 2019-05-13 | `functions/` |
 | `atm_iv_data` | Cloud Functions 第1世代 | us-east1 | **python37** | HTTP | 256MB / 60s | 2019-12-18 | `functions_py/atm_iv/` |
 | ビューアー | App Engine standard（service `default`） | asia-northeast1 | **python37** | HTTP（IAP） | 自動スケール（`max_idle_instances: 1`） | 2019-07-03 | `appengine/` |
-| `stackdriverLineNotify` | Cloud Functions 第1世代 | asia-northeast1 | **nodejs10** | HTTP | 128MB / 60s | 2019-04-24 | 別リポジトリ |
+| `stackdriverLineNotify` | Cloud Functions 第1世代 | asia-northeast1 | **nodejs10** | HTTP | 128MB / 60s | 2019-04-24 | 別リポジトリ（#20 で削除済み、2026-10-12） |
 
 - すべての関数・App Engine は App Engine のデフォルトサービスアカウントで動いている
 - App Engine にはバージョンが 30 個残っている（トラフィックは 2019-07-03 の 1 バージョンに 100%）
-- `stackdriverLineNotify` は監視アラートを LINE に転送するためのもの（README によると別リポジトリに切り出し済み）
+- `stackdriverLineNotify` は監視アラートを LINE に転送するためのもの（README によると別リポジトリに切り出し済み）。#20 で関数・webhook 通知チャネルを削除し、アラートポリシーの通知先から外した（2026-10-12）。ソースはリポジトリ外のローカルに退避
 
 ### 4.2 スケジューラ・メッセージング
 
@@ -207,7 +207,7 @@ BigQuery `optionchan` のテーブル（2026-10-12 時点）:
 
 - ログは Cloud Logging の既定（`_Default` / `_Required`）のみ。エクスポートなし
 - アラートポリシーは別サーバーの死活監視が 1 件あるだけで、optionchan の取り込み停止・エラーを検知するアラートは無い
-- 通知チャネルはメールと LINE Notify（webhook）。LINE Notify は 2025-03-31 にサービスを終了しているため、LINE への通知は届かない状態と考えられる
+- 通知チャネルはメールと LINE Notify（webhook）。LINE Notify は 2025-03-31 にサービスを終了しているため、LINE への通知は届かない状態と考えられる（#20 で webhook チャネルを削除済み、2026-10-12。通知チャネルはメールのみ）
 
 ## 5. ソフトウェア構成
 
@@ -248,7 +248,7 @@ optionchan-gcp/
 
 | 分類 | 課題 |
 |---|---|
-| ランタイム | App Engine と 4 関数が python37、`stackdriverLineNotify` が nodejs10（いずれも廃止済み）。このままでは再デプロイできない可能性が高い |
+| ランタイム | App Engine と 4 関数が python37（廃止済み。`stackdriverLineNotify`（nodejs10）は #20 で削除済み）。このままでは再デプロイできない可能性が高い |
 | 世代 | Cloud Functions はすべて第1世代 |
 | リージョン | 東京・us-east1・US に分散。関数↔BigQuery↔Datastore↔App Engine の通信がリージョンをまたぐ |
 | 構成管理 | IaC なし。リソース作成・デプロイが手作業で、本番と git がずれる（ドリフト） |
@@ -257,7 +257,7 @@ optionchan-gcp/
 | 権限 | 全関数が App Engine デフォルト SA で動作。強い権限を持つ SA に SA 鍵がある |
 | 整合性 | Datastore と BigQuery の更新順のずれで、取り込み直後に表示が失敗する（#5） |
 | データ品質 | `price_time` の日付ずれ（#2）と過去データ（#4） |
-| 監視 | 取り込み停止・エラーのアラートなし。通知先の LINE Notify は終了済み |
+| 監視 | 取り込み停止・エラーのアラートなし。通知先の LINE Notify は終了済みで、#20 で関連リソースを削除（通知先はメールのみ） |
 | コスト | 土日・夜間も毎分起動。`option_price` が 78GB で増え続ける（保持期限なし） |
 | 残骸 | App Engine の旧バージョン 30 個、未使用トピック `minutely15_task`、`jikken`（BigQuery / GCS 約 6.5GB） |
 | フロントエンド | ビューアーが App Engine に同梱。Chart.js のバージョンがページで混在 |
