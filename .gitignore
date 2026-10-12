@@ -255,3 +255,9 @@ $RECYCLE.BIN/
 *.lnk
 
 # End of https://www.gitignore.io/api/venv,macos,flask,python,windows
+
+### optionchan-gcp ###
+# 個人の gh / gcloud 切替設定、スキルの作業用ファイル (CLAUDE.md 参照)
+.claude/settings.local.json
+.claude/handoff/
+.claude/worktrees/
