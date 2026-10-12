@@ -202,12 +202,12 @@ flowchart LR
 
 | SA | 権限（範囲） |
 |---|---|
-| `sa-ingest`（取り込み・回収・再処理ジョブ共用） | `optionchan_tokyo` の `dataEditor`（データセット単位）、raw バケットの `objectCreator` + `objectViewer`（一覧・読み取り。削除なし）、`bigquery.jobUser`（回収処理で `ingest_runs` を読む） |
+| `sa-ingest`（取り込み・回収・再処理ジョブ共用） | `optionchan_tokyo` の `dataEditor`（データセット単位）、raw バケットの `objectCreator` + `objectViewer`（一覧・読み取り。削除なし）、`bigquery.jobUser`（回収処理で `ingest_runs` を読む。11c（#34）で付与。#33 時点では前の 2 つだけ） |
 | `sa-viewer` | `optionchan_tokyo` の `dataViewer` + `bigquery.jobUser` |
 | `sa-scheduler` | ingest サービス単位の `run.invoker` |
 | `sa-sq`（定期クエリ） | `optionchan_tokyo` の `dataEditor` + `bigquery.jobUser` |
-| `sa-tf-plan` | prod が扱うリソースの predefined 閲覧ロール（#10 時点で `monitoring.viewer`・`artifactregistry.reader`。basic の `roles/viewer` は UBLA バケットの既定 IAM で bootstrap の state まで読めるので使わない）+ prod の tfstate の `objectViewer`（plan は `-lock=false`） |
-| `sa-tf-apply` | リソース作成・Artifact Registry への push（#10 時点で `artifactregistry.admin`・`monitoring.alertPolicyEditor`・`monitoring.notificationChannelViewer` + prod の tfstate の `objectUser`）。`projectIamAdmin` は prod が IAM を扱う #11 で足し、IAM Conditions で付与できるロールを限定する: `api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([...])`（ロールは最大 10 個。`hasOnly()` を `&&` / `||` で複数つながない。`setIamPolicy` を含むロールや変更可能なカスタムロールを入れない。制限できるのはプロジェクト等への付与だけで、データセットへの付与には効かない。公式ドキュメントで 2026-10 に確認済み）。`serviceAccountUser` は SA 単位 |
+| `sa-tf-plan` | prod が扱うリソースの predefined 閲覧ロール（#10 時点で `monitoring.viewer`・`artifactregistry.reader`、#33 で `run.viewer`・`cloudscheduler.viewer`・`bigquery.metadataViewer` を追加。basic の `roles/viewer` は UBLA バケットの既定 IAM で bootstrap の state まで読めるので使わない）+ prod の tfstate の `objectViewer`（plan は `-lock=false`） |
+| `sa-tf-apply` | リソース作成・Artifact Registry への push（#10 時点で `artifactregistry.admin`・`monitoring.alertPolicyEditor`・`monitoring.notificationChannelViewer` + prod の tfstate の `objectUser`。#33 で `run.admin`・`cloudscheduler.admin`・`bigquery.user` を追加）。**`projectIamAdmin` は付けない**（#33、オーナー承認）: プロジェクト単位・バケット単位・SA 単位の付与は bootstrap（所有者が apply）に置き、prod が作るリソースへの付与（データセット `optionchan_tokyo` の `dataEditor`、サービス `ingest` の `run.invoker`）だけを prod に置く。データセットへの付与は `bigquery.user` で作成した作成者（dataOwner）として、サービスへの付与は `run.admin` で行う。`serviceAccountUser` は SA 単位（`sa-ingest`・`sa-scheduler`） |
 
 - 再処理ジョブは最小構成のため `sa-ingest` と共用する（権限は同じで足りる）
 - Compute / App Engine のデフォルト SA に `roles/editor` が付いている。Cloud Run は SA 未指定だと Compute デフォルト SA で動くので、**全リソースで `service_account` を必須**にし CI で検出する。Editor は後片付け（6 章）で外す
@@ -233,17 +233,17 @@ flowchart LR
 
 ```
 infra/
-├── bootstrap/   # tfstate バケット、WIF プール / プロバイダ、sa-tf-plan / sa-tf-apply とその権限
+├── bootstrap/   # tfstate バケット、WIF プール / プロバイダ、sa-tf-plan / sa-tf-apply とその権限、実行用 SA・raw バケットとプロジェクト / バケット / SA 単位の付与
 │                # オーナーが手で apply。state は prod と別の、オーナーだけが読める場所
 └── prod/        # 本番の root module 1 つ（modules 分割はしない。ingest.tf / data.tf / viewer.tf / monitoring.tf / iam.tf のファイル分割のみ）
 ```
 
 - Terraform（google / google-beta プロバイダ）、state は GCS（バージョニング有効）
 - 既存リソースとフェーズ 0 で gcloud で作ったリソースは `import` ブロックで取り込む（作り直さない）。BigQuery のテーブルは `deletion_protection = true`
-- アプリ: `uv`、`ruff`、`pytest`。コンテナは自前の Dockerfile で GitHub Actions がビルドし、Artifact Registry に push（digest 固定）
+- アプリ: `uv`、`ruff`、`pytest`。コンテナは自前の Dockerfile で GitHub Actions がビルドし、Artifact Registry に push（digest 固定）。タグはイメージの入力パスの git のハッシュ（`src-<20 桁>`、`.github/scripts/ingest-image.sh`）で、同じ入力ならビルドしない（#33）
 - GitHub Actions:
   - PR: テスト・lint・`terraform plan`（`sa-tf-plan`、結果を PR にコメント）
-  - `master` へのマージ: ビルド・push → イメージ digest を変数に `terraform apply`（`sa-tf-apply`、Environment `prod` の承認）。デプロイ経路は Terraform 1 本にし、`gcloud run deploy` との二重管理をしない
+  - `master` へのマージ: ビルド・push → イメージ digest を変数に `terraform apply`（`sa-tf-apply`、Environment `prod` の承認）。ビルドは承認後の apply job で、GCP の認証より前に行う（依存の取得中に資格情報が無いように）。デプロイ経路は Terraform 1 本にし、`gcloud run deploy` との二重管理をしない
 - Terraform 管理外（runbook に手順）: bootstrap の apply、IAP 用 OAuth クライアントの事前設定、予算アラートと BigQuery の 1 日あたりクエリ量の上限（フェーズ 0 で gcloud で設定、#21。手順は `docs/runbook.md` の「コスト」。予算は請求先アカウント側のリソース、クエリ量上限は Service Usage の consumer override。#10 で runbook 管理のままにすると決めた: 予算の請求先アカウントは他プロジェクトと共有で、CI 用 SA に請求先アカウントの権限を渡さない。クエリ量上限の変更には `serviceusage.quotaAdmin` 相当が要り、apply SA の権限が広がる）
 
 ### 4.1 runbook（`docs/runbook.md`、実装時に作成）

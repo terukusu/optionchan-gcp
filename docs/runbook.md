@@ -496,8 +496,8 @@ GCP のリソースを Terraform で管理する（#10。設計は `docs/archite
 
 | ルート | 中身 | apply する人 | state | state を読める主体 |
 |---|---|---|---|---|
-| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限 | 所有者がローカルから（CI は fmt / validate だけ） | `gs://optionchan-222710-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
-| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2 | CI（deploy workflow、Environment `prod` の承認後） | `gs://optionchan-222710-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
+| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限。取り込み用の SA `sa-ingest` / `sa-scheduler`、生 HTML のバケット `optionchan-222710-raw`、それらへの付与（プロジェクト単位・バケット単位・SA 単位。#33） | 所有者がローカルから（CI は fmt / validate だけ） | `gs://optionchan-222710-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
+| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2、BigQuery `optionchan_tokyo` とテーブル 4 つ、Cloud Run `ingest`、Scheduler `ingest`、それらへの付与（データセット単位・サービス単位。#33） | CI（deploy workflow、Environment `prod` の承認後） | `gs://optionchan-222710-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
 
 予算・クエリ量上限は Terraform 管理外（「コスト」）。state には通知チャネルのメールアドレスなどが入るので、state・plan の全文・ログをリポジトリ・Issue・PR に貼らない。CI も plan の全文は出さず、アドレスと操作だけを要約する。
 
@@ -517,6 +517,8 @@ jq -n --argjson id "$ENV_ID" '{environment_ids: [$id], state: "approved", commen
 ```
 
 差分 0 の確認や再実行は `gh workflow run deploy.yml --ref master`（Environment `prod` は `master` からしか使えない）。
+
+取り込みのイメージ（#33）: タグは `src-<20 桁>` で、イメージの入力（`apps/ingest` の Dockerfile・`pyproject.toml`・`uv.lock`・`src/`、`config/trading_calendar.toml`、`schema/tokyo/`、`.dockerignore`）の git のハッシュから `.github/scripts/ingest-image.sh tag` が決める（テスト・ドキュメントの変更ではタグが変わらない）。plan はそのタグが Artifact Registry にあれば digest、無ければタグ参照を `ingest_image` に渡す。無いときは Cloud Run に差分が出るので `apply` job が動き、承認後に **GCP の認証より前に**ビルド・検査（import できる、`auth.txt`・`functions/`・テストが無い）してから `sa-tf-apply` で push し、digest で apply する。タグは不変（`immutable_tags`）。
 
 ### 共通の変数
 
@@ -580,6 +582,44 @@ gcloud storage buckets get-iam-policy gs://$P-tfstate-bootstrap --format=json \
 
 変更時（権限の追加など）は PR でコードを直し、マージ後に所有者が手順 2〜4 を行う。CI は bootstrap を apply しない。
 
+### bootstrap の変更（#33: 取り込み用の SA・バケット・付与）
+
+prod（Cloud Run・Scheduler・データセット）より先に apply する（`sa-tf-apply` の権限と `sa-ingest` / `sa-scheduler` が無いと prod の apply が失敗する）。PR のマージ後、deploy の `apply` job を承認する前に、master で上の手順 2〜4 を行う。
+
+手順 3 の要約の目安: create 15（API `run.googleapis.com` 1、SA 2（`sa-ingest`・`sa-scheduler`）、バケット `optionchan-222710-raw` 1、バケット IAM 2、プロジェクト IAM 7（Scheduler のサービスエージェント 1、`sa-tf-apply` 3、`sa-tf-plan` 3）、SA IAM 2（`sa-tf-apply` の `serviceAccountUser`））、update / delete / replace 0。
+
+確認（すべて期待どおりであること）:
+
+```sh
+gcloud storage buckets describe gs://$P-raw --format=json \
+  | jq -c '{location, ubla: .uniform_bucket_level_access, pap: .public_access_prevention,
+            soft_delete: .soft_delete_policy.retentionDurationSeconds, versioning: (.versioning_enabled // false),
+            lifecycle: (.lifecycle_config // null), retention: (.retention_policy // null)}'
+# {"location":"ASIA-NORTHEAST1","ubla":true,"pap":"enforced","soft_delete":"604800","versioning":false,"lifecycle":null,"retention":null}
+gcloud storage buckets get-iam-policy gs://$P-raw --format=json \
+  | jq -c '[.bindings[] | select(any(.members[]; startswith("serviceAccount:sa-"))) | {role, m: [.members[] | select(startswith("serviceAccount:sa-")) | split("@")[0]]}]'
+# objectCreator・objectViewer の 2 件で、どちらも sa-ingest だけ
+gcloud iam service-accounts list --project=$P --format='value(email)' | grep -cE '^sa-(ingest|scheduler)@'   # 2
+gcloud projects get-iam-policy $P --format=json > <scratch>/iam.json
+jq -r '.bindings[] | select(.members[] | test("sa-tf-(plan|apply)@")) | .role' <scratch>/iam.json | sort   # 下の 2 行を含み、projectIamAdmin が無い
+#   sa-tf-plan: run.viewer・cloudscheduler.viewer・bigquery.metadataViewer
+#   sa-tf-apply: run.admin・cloudscheduler.admin・bigquery.user
+jq '[.bindings[] | select(.role == "roles/resourcemanager.projectIamAdmin") | .members[] | select(test("sa-tf-"))] | length' <scratch>/iam.json   # 0
+jq '[.bindings[] | select(.role == "roles/cloudscheduler.serviceAgent") | .members[] | select(test("gcp-sa-cloudscheduler"))] | length' <scratch>/iam.json   # 1
+jq '[.bindings[] | .members[] | select(test("sa-ingest@"))] | length' <scratch>/iam.json   # 0（プロジェクト単位の付与なし）
+for sa in sa-ingest sa-scheduler; do
+  gcloud iam service-accounts get-iam-policy $sa@$P.iam.gserviceaccount.com --format=json \
+    | jq -c '[.bindings[] | {role, m: [.members[] | split("@")[0]]}]'
+done   # どちらも roles/iam.serviceAccountUser に serviceAccount:sa-tf-apply だけ
+rm -f <scratch>/iam.json
+```
+
+Scheduler のサービスエージェントが未作成で `scheduler_agent` の付与が失敗したら（API は有効なので通常は存在する）、エージェントを作ってから手順 3 をやり直す。
+
+```sh
+gcloud beta services identity create --service=cloudscheduler.googleapis.com --project=$P > /dev/null
+```
+
 ### GitHub の設定（bootstrap の後、PR を出す前）
 
 ```sh
@@ -640,7 +680,21 @@ gh workflow run deploy.yml --ref master   # plan が差分なし、apply は ski
 
 WIF・GCP・GitHub Actions の障害で CI が動かないときは、所有者の資格情報でローカルから行う（state のロックは apply が取る）。
 
+取り込みのイメージは `TF_VAR_ingest_image` で渡す（必須）。Artifact Registry に無ければ（`exists=false`）、apply の前にローカルでビルド・push して digest を得る。
+
 ```sh
+.github/scripts/ingest-image.sh resolve   # tag= / image= / exists=
+eval "$(.github/scripts/ingest-image.sh resolve | sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p')"
+if [ "$IMG_exists" = false ]; then   # ビルド・検査は apply job と同じ。HEAD をコミット済みの状態で行う（タグは HEAD から決まる）
+  test -z "$(git status --porcelain -- apps/ingest .dockerignore)" || { echo "未コミットの変更がある。タグと中身がずれるのでビルドしない"; exit 1; }
+  docker build -f apps/ingest/Dockerfile -t ingest:build .
+  docker run --rm ingest:build python -c 'import optionchan_ingest.app'
+  gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet
+  docker tag ingest:build "$IMG_image" && docker push "$IMG_image"
+  eval "$(.github/scripts/ingest-image.sh resolve | sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p')"
+fi
+export TF_VAR_ingest_image=$IMG_image   # @sha256: であること
+
 $TF -chdir=infra/prod init -input=false
 $TF -chdir=infra/prod plan -input=false -no-color -out=p.tfplan > <scratch>/p-plan.log   # 要約は上の jq で見る
 $TF -chdir=infra/prod apply -input=false p.tfplan
@@ -670,6 +724,128 @@ $TF -chdir=infra/prod plan -input=false -detailed-exitcode > /dev/null; echo $? 
 - Editor を持つデフォルト SA（4 つ）はプロジェクトの `roles/editor` で両方の tfstate バケットを読み書きできる（バケットの IAM では防げない）。#15 で Editor を外すまで残る
 - `sa-tf-plan` はこのリポジトリのどの workflow・ブランチからも借用できる（PR の plan 用）。push できるのは所有者だけで、fork の PR は secret を受け取れない。fork・Dependabot の PR では `terraform-plan` が失敗して必須 check で止まる（Dependabot を入れるとき（#11 以降）に扱いを決める）
 - `sa-tf-apply` の `roles/artifactregistry.admin` はプロジェクト単位（既存の `gcf-artifacts` も消せる）。apply は承認つきで、Terraform が管理しないリソースには触れない。#11 で見直す
+- `sa-tf-apply` の `roles/run.admin`・`roles/cloudscheduler.admin`・`roles/bigquery.user` もプロジェクト単位（Scheduler はジョブ単位の IAM が無い。旧系の `minutely_task` も権限上は変えられる）。使うのは承認つきの apply だけで、Terraform は旧ジョブを管理しない（#33）
+- `sa-ingest` の `roles/bigquery.dataEditor`（`optionchan_tokyo` だけ）は `tables.delete` を含む。Terraform の `deletion_protection` は API 経由の削除を止めない。消えたらタイムトラベル（7 日）で戻す（#33）
+
+## 新しい取り込み（ingest）
+
+#11 で旧系と並行稼働させる新しい取り込み（#33）。旧系（Cloud Functions・Scheduler `minutely_task`・GCS `optionchan`・データセット `optionchan`・アラート）とは独立していて、旧系には触れない。
+
+| リソース | 設定 | 定義 |
+|---|---|---|
+| Scheduler `ingest`（asia-northeast1） | `* * * * *` Asia/Tokyo、POST `/`、OIDC（`sa-scheduler`、audience = サービスの URL）、リトライ 0、`attempt_deadline` 50 秒、`paused = var.ingest_paused` | `infra/prod/ingest.tf` |
+| Cloud Run `ingest`（asia-northeast1） | 第1世代、CPU 0.5・512Mi・リクエスト中だけ CPU、同時実行 1、0〜2 インスタンス、50 秒、ingress internal、`sa-ingest`、digest 指定、環境変数 `GCP_PROJECT` / `RAW_BUCKET` / `BQ_DATASET` | `infra/prod/ingest.tf` |
+| BigQuery `optionchan_tokyo` | asia-northeast1、PHYSICAL、タイムトラベル 168 時間。テーブル `spot_price` / `future_price` / `option_price` / `ingest_runs` | `schema/tokyo/`（`infra/prod/data.tf` が読む） |
+| GCS `optionchan-222710-raw` | 生 HTML（`raw/YYYY/MM/DD/YYYYMMDDTHHMM.json.gz`）。ソフト削除 7 日、期限なし | `infra/bootstrap/ingest.tf` |
+| 権限 | `sa-ingest`: `optionchan_tokyo` の `dataEditor`、バケットの `objectCreator`・`objectViewer`（削除・上書きなし）。`sa-scheduler`: サービス `ingest` の `run.invoker` だけ | `infra/bootstrap/ingest.tf`、`infra/prod/iam.tf` |
+
+時間外・休場日はアプリが 204 を返して何もしない（JPX にもアクセスしない）。取引時間中は 1 限月のページを毎分、2 限月のページは更新時だけ取得する。
+
+### 変数
+
+「Terraform」の「共通の変数」に加えて設定する。`T0` は確認の起点（UTC の TIMESTAMP 文字列、例 `2026-10-14 01:00:00`）。
+
+```sh
+L=asia-northeast1
+T0='<YYYY-MM-DD HH:MM:SS>'   # UTC
+```
+
+### デプロイ直後の確認
+
+構成（Cloud Run は v2 API の JSON をそのまま見る。フィールド名が Terraform と同じ）:
+
+```sh
+curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  https://run.googleapis.com/v2/projects/$P/locations/$L/services/ingest \
+  | jq -c '{ingress, sa: (.template.serviceAccount | split("@")[0]), env: .template.executionEnvironment,
+            conc: .template.maxInstanceRequestConcurrency, max: .template.scaling.maxInstanceCount, timeout: .template.timeout,
+            limits: .template.containers[0].resources.limits, cpu_idle: .template.containers[0].resources.cpuIdle,
+            digest: (.template.containers[0].image | test("@sha256:[0-9a-f]{64}$")), envs: [.template.containers[0].env[].name]}'
+# INGRESS_TRAFFIC_INTERNAL_ONLY、sa-ingest、EXECUTION_ENVIRONMENT_GEN1、1、2、"50s"、{"cpu":"0.5"(か 500m),"memory":"512Mi"}、true、true、[GCP_PROJECT,RAW_BUCKET,BQ_DATASET]
+gcloud scheduler jobs describe ingest --location $L --project $P --format=json \
+  | jq -c '{schedule, timeZone, retry: (.retryConfig.retryCount // 0), attemptDeadline, state,
+            method: .httpTarget.httpMethod, oidc: (.httpTarget.oidcToken.serviceAccountEmail | split("@")[0])}'
+# "* * * * *"、"Asia/Tokyo"、0、"50s"、"ENABLED"、"POST"、"sa-scheduler"
+gcloud scheduler jobs list --location $L --project $P --format='value(name.basename(),state)'   # 3 本（旧 2 + ingest）
+bq show --format=json $P:optionchan_tokyo | jq -c '{location, storageBillingModel, maxTimeTravelHours}'   # asia-northeast1、PHYSICAL、"168"
+for t in spot_price future_price option_price ingest_runs; do
+  norm='map({name, type, mode: (.mode // "NULLABLE"), description})'
+  diff <(bq show --schema --format=json $P:optionchan_tokyo.$t | jq -S "$norm") <(jq -S "$norm" schema/tokyo/$t.json) > /dev/null \
+    && echo "$t schema ok" || echo "$t schema DIFF"
+  bq show --format=json $P:optionchan_tokyo.$t \
+    | jq -c --arg t $t '{t: $t, part: .timePartitioning, cluster: (.clustering.fields // []), rpf: (.requirePartitionFilter // false)}'
+done   # schema/tokyo/tables.json と同じ
+```
+
+権限:
+
+```sh
+gcloud run services get-iam-policy ingest --region $L --project $P --format=json \
+  | jq -c '[.bindings[] | {role, m: [.members[] | split("@")[0]]}]'   # [{"role":"roles/run.invoker","m":["serviceAccount:sa-scheduler"]}] だけ
+```
+
+バケット・プロジェクトの付与は「Terraform」の「bootstrap の変更（#33）」の確認と同じ。
+
+書き込み（T0 後の取引時間中の 30 分。`ingest_runs` 10 行以上、不一致 0）:
+
+```sh
+bq query --location=$L --use_legacy_sql=false --parameter="t0:STRING:$T0" --format=prettyjson '
+WITH r AS (
+  SELECT * FROM `optionchan_tokyo.ingest_runs`
+  WHERE snapshot_at >= TIMESTAMP_SUB(TIMESTAMP(@t0), INTERVAL 1 HOUR)
+    AND started_at >= TIMESTAMP(@t0) AND started_at < TIMESTAMP_ADD(TIMESTAMP(@t0), INTERVAL 30 MINUTE)),
+c AS (
+  SELECT "s" k, ingest_run_id, COUNT(*) n FROM `optionchan_tokyo.spot_price`
+    WHERE created_at >= TIMESTAMP_SUB(TIMESTAMP(@t0), INTERVAL 1 HOUR) GROUP BY 1, 2
+  UNION ALL SELECT "f", ingest_run_id, COUNT(*) FROM `optionchan_tokyo.future_price`
+    WHERE created_at >= TIMESTAMP_SUB(TIMESTAMP(@t0), INTERVAL 1 HOUR) GROUP BY 1, 2
+  UNION ALL SELECT "o", ingest_run_id, COUNT(*) FROM `optionchan_tokyo.option_price`
+    WHERE created_at >= TIMESTAMP_SUB(TIMESTAMP(@t0), INTERVAL 1 HOUR) GROUP BY 1, 2)
+SELECT COUNT(*) runs,
+  COUNTIF(IFNULL(s.n, 0) != r.rows_spot OR IFNULL(f.n, 0) != r.rows_future OR IFNULL(o.n, 0) != r.rows_option) mismatched
+FROM r
+LEFT JOIN (SELECT * FROM c WHERE k = "s") s USING (ingest_run_id)
+LEFT JOIN (SELECT * FROM c WHERE k = "f") f USING (ingest_run_id)
+LEFT JOIN (SELECT * FROM c WHERE k = "o") o USING (ingest_run_id)'
+```
+
+旧系との値の突き合わせ: 東京と US は 1 つのクエリで JOIN できないので、新系の `ingest_runs` から T0 後の `snapshot_at` を 3 つ選び、それぞれについて旧 `optionchan.<t>`（`--location=US`）と新 `optionchan_tokyo.<t>`（`--location=asia-northeast1`）を `created_at = TIMESTAMP(@ts)` で読み、旧スキーマの共通列（`schema/<t>.json` の列）だけを `TO_JSON_STRING` してキー順に並べたものをスクラッチで `diff` する。結果は差分の件数と列名だけを記録する（行は貼らない）。説明済みの差（SQ のある月の先物限月、2 限月ページの版の違い）は除いて数える。
+
+生 HTML: T0 後の 30 分の `ingest_runs` の `source_object` がすべてあること（`gcloud storage objects describe` で数件、`gcloud storage ls gs://$P-raw/raw/YYYY/MM/DD/` を名前の `THHMM` で窓に絞った件数が `COUNT(DISTINCT snapshot_at)` と一致すること。差は `parse_failed` 等のログで説明できること）。
+
+ログ（T0 の 5 分後から 1 時間。直後の数分は IAM の伝播待ちで 403 がありうるので、出た件数だけ記録する）:
+
+```sh
+W="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\" AND timestamp>=\"<T0+5m の RFC3339>\" AND timestamp<\"<T0+65m の RFC3339>\""
+gcloud logging read "$W AND severity>=ERROR AND jsonPayload.event:*" --project $P --format='value(jsonPayload.event)' | sort | uniq -c   # 0 件（stale だけは時刻と件数を記録）
+gcloud logging read "$W AND jsonPayload.event=\"ingested\"" --project $P --format=json \
+  | jq '[.[].jsonPayload.elapsed_ms] | sort | {n: length, max: .[-1], p50: .[(length / 2 | floor)]}'   # max < 45000
+gcloud logging read "$W AND (textPayload:\"gunicorn\" OR textPayload:\"Booting worker\")" --project $P --format='value(severity)' | sort | uniq -c   # 起動行の severity を Issue に記録
+```
+
+時間外（平日 07:00〜07:30 JST）: `$W` の時刻を差し替えて `httpRequest.status!=204 AND log_name="projects/$P/logs/run.googleapis.com%2Frequests"` が 0 件、同じ窓の `ingest_runs`（`snapshot_at` で絞る）が 0 行。
+
+Terraform の差分 0: `gh workflow run deploy.yml --ref master` の plan が「差分なし」、bootstrap の `plan -detailed-exitcode` が 0。差分が出たら（CPU の `0.5` の正規化など）、コードを実態に合わせる PR を出す。
+
+### 停止・再開
+
+```sh
+# 緊急停止（所有者）。次の apply で再開されないよう、すぐ ingest_paused = true の PR を出す
+gcloud scheduler jobs pause ingest --location $L --project $P   # この PR がマージされるまで、他の PR の deploy で Scheduler の再開（paused の差分）が出たら apply を承認しない
+gcloud scheduler jobs describe ingest --location $L --project $P --format='value(state)'   # PAUSED
+```
+
+通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。止めている間の取りこぼしは 11c（#34）の回収の対象。
+
+### 切り戻し
+
+| 段階 | 手段 | 影響 |
+|---|---|---|
+| R1 新系の起動を止める（最初に行う） | 上の「停止・再開」 | 新系の取り込みが止まるだけ。旧系・データ・生 HTML はそのまま |
+| R2 イメージを前の版に戻す | 原因のコミットを revert する PR。plan が前の入力のタグを解決し、Artifact Registry に残っていれば（直近 5 版）その digest、無ければ apply job がビルドし直す | 1 回の apply で新しいリビジョン |
+| R3 計算資源を消す | Scheduler・Cloud Run・invoker の定義を消す PR（Cloud Run は `deletion_protection = false`）。plan の要約が delete 3 だけであることを見てマージ | 新系が無くなる。データセット・テーブル・バケット・SA は残す |
+
+データは消さない（テーブルは `deletion_protection`、データセット・テーブル・バケットは `prevent_destroy` と `deletion_policy = "PREVENT"`）。並行稼働中に入った行は追記のみで、11c の最新版ビューで選別する。
 
 ## 取引カレンダーの更新
 

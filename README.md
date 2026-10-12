@@ -19,7 +19,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
         * 直近のスマイルカーブ表示用のデータを返す WebAPI
 
 * apps/ingest
-  * 新しい取り込み（Cloud Run サービス、Python 3.13・uv。#11 で旧系と並行稼働させる）。JPX のページを毎分取得し、生 HTML（2 ページを gzip した JSON）を GCS に、行を BigQuery（東京、Storage Write API）に書く。デプロイは #11 の後続 Issue
+  * 新しい取り込み（Cloud Run サービス、Python 3.13・uv。#11 で旧系と並行稼働させる）。JPX のページを毎分取得し、生 HTML（2 ページを gzip した JSON）を GCS に、行を BigQuery（`optionchan_tokyo`、東京、Storage Write API）に書く。Cloud Run `ingest`（asia-northeast1）を Scheduler `ingest` が毎分起動する。デプロイは deploy workflow（イメージのビルド・push も含む、#33）。確認・停止・切り戻しは docs/runbook.md の「新しい取り込み（ingest）」
   * ローカルの動作確認は `INGEST_DRY_RUN=1`（GCS・BigQuery に書かず、件数と proto のサイズだけをログに出す）
 
 * config
@@ -35,7 +35,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * functions・監視アラート定義・GitHub Actions の workflow のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
 
 * infra
-  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA。所有者が手で apply）と `prod`（Artifact Registry・監視アラート。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
+  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込みの SA・生 HTML のバケットと権限。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo`・Cloud Run / Scheduler `ingest`。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
 
 * .github/workflows
   * `ci.yml`（PR で pytest（`apps/ingest` を含む）・terraform plan・取り込みのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
