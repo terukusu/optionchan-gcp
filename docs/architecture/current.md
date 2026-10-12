@@ -1,6 +1,6 @@
 # 現行アーキテクチャ（リファクタリング前）
 
-- 時点: **2026-10-12**（本番 GCP の実状態と `master` の `8900301` を調べて作成）
+- 時点: **2026-10-12**（本番 GCP の実状態と `master` を調べて作成。同日の PR #6 のマージと `download_jpx` のデプロイまでを反映）
 - 位置づけ: アーキテクチャリファクタリングの **Before** 資料。After と比較するため、現状を事実ベースで記録する。良し悪しの判断は末尾の「現行の課題」にまとめる
 - GCP プロジェクト: `optionchan-222710`
 
@@ -127,7 +127,7 @@ sequenceDiagram
     IAP->>GAE: 認証済みリクエスト
     GAE-->>B: HTML + JS (/static)
     B->>GAE: /smile_data (XHR)
-    GAE->>CF: GET + Authorization: Bearer <共通パスワード>
+    GAE->>CF: GET + Authorization: Bearer [共通パスワード]
     CF->>DS: 最新の先物価格 (smile_data のみ)
     CF->>BQ: SELECT
     CF-->>GAE: CSV
@@ -167,6 +167,7 @@ sequenceDiagram
 | Cloud Scheduler `create_timeframe` | `1 0 * * *`（UTC）→ Pub/Sub `create_timeframe` |
 | Pub/Sub `minutely_task` / `create_timeframe` | 各 1 サブスクリプション（Cloud Functions のトリガー用） |
 | Pub/Sub `minutely15_task` | サブスクリプションなし（未使用） |
+| Pub/Sub `cloud-builds` | Cloud Build が使うトピック（optionchan の処理とは無関係） |
 
 ### 4.3 ストレージ・データ
 
@@ -199,7 +200,7 @@ BigQuery `optionchan` のテーブル（2026-10-12 時点）:
 | ビューアー（App Engine） | IAP で Google ログインを要求 |
 | App Engine → HTTP 関数 | 関数は `allUsers` に invoker を付与（誰でも呼び出せる）。関数内で `Authorization: Bearer` を `auth.txt` の共通パスワードと照合 |
 | 共通パスワード | `auth.txt`（gitignore 済み）を `functions/`・`functions_py/atm_iv/`・`appengine/` に置いてデプロイ。デプロイされたソース zip に平文で含まれる（#3） |
-| サービスアカウント | 実行はすべて App Engine デフォルト SA。別に `optionchan` SA があり（BigQuery 管理者・Datastore オーナー・Storage オブジェクト管理者）、ユーザー管理の鍵が発行されている |
+| サービスアカウント | 実行はすべて App Engine デフォルト SA。別に `optionchan` SA があり（BigQuery 管理者・Datastore オーナー・Storage オブジェクト管理者）、SA 鍵が発行されている |
 
 ### 4.5 監視・ログ
 
@@ -225,6 +226,7 @@ optionchan-gcp/
 │   ├── templates/, static/
 │   └── app.yaml
 ├── schema/                 # BigQuery のテーブルスキーマ (JSON)
+├── tests/                  # pytest (JPX ページの解析。#2 で追加)
 ├── lifecycle.json          # GCS の自動削除設定
 └── memo.txt                # リソース作成・デプロイのコマンド集
 ```
@@ -236,9 +238,9 @@ optionchan-gcp/
 
 ## 6. デプロイ・運用
 
-- デプロイは手作業（`memo.txt` のコマンドを手で実行）。IaC・CI/CD・自動テストは無い
+- デプロイは手作業（`memo.txt` のコマンドを手で実行）。IaC・CI/CD は無い
 - リソース（バケット、データセット、トピック、スケジューラ）も手作業で作成
-- 本番と git の差: `download_jpx` / `load_jpx_into_bq` は 2024-08 のデプロイ内容が未コミット（#2 で取り込み中）。2024 年のデプロイではローカルの `venv/` などもアップロードされていた
+- 本番と git の差: `download_jpx` / `load_jpx_into_bq` は 2024-08 のデプロイ内容が未コミットだった（2026-10-12 に PR #6 で取り込み、`download_jpx` を再デプロイ）。2024 年のデプロイではローカルの `venv/` などもアップロードされていた。python37 の関数と App Engine は git と本番の照合をしていない
 - 監視はしておらず、異常は閲覧時に気づく運用
 
 ## 7. 現行の課題（リファクタリングの論点）
@@ -249,9 +251,9 @@ optionchan-gcp/
 | 世代 | Cloud Functions はすべて第1世代 |
 | リージョン | 東京・us-east1・US に分散。関数↔BigQuery↔Datastore↔App Engine の通信がリージョンをまたぐ |
 | 構成管理 | IaC なし。リソース作成・デプロイが手作業で、本番と git がずれる（ドリフト） |
-| 品質 | 自動テスト・CI なし（#2 で初めてテストを追加中） |
+| 品質 | CI なし。自動テストは #2 で `tests/`（JPX ページの解析）を追加したのみ |
 | 認証 | 共通パスワードの平文配布（#3）。HTTP 関数が `allUsers` 公開 |
-| 権限 | 全関数が App Engine デフォルト SA で動作。強い権限を持つ SA にユーザー管理の鍵がある |
+| 権限 | 全関数が App Engine デフォルト SA で動作。強い権限を持つ SA に SA 鍵がある |
 | 整合性 | Datastore と BigQuery の更新順のずれで、取り込み直後に表示が失敗する（#5） |
 | データ品質 | `price_time` の日付ずれ（#2）と過去データ（#4） |
 | 監視 | 取り込み停止・エラーのアラートなし。通知先の LINE Notify は終了済み |
