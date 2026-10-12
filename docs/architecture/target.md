@@ -1,142 +1,251 @@
 # 新アーキテクチャ（リファクタリング後・設計案）
 
-- 時点: 2026-10-12（設計案。論点は「9. 決定事項」のとおり合意済み）
+- 時点: 2026-10-12（設計レビュー #17 を反映した改訂版。決定事項は「9. 決定事項」、レビュー指摘の扱いは「10. 設計レビューの反映状況」）
 - 対になる資料: [現行アーキテクチャ](current.md)（Before）
 - 方針: **モダン化・IaC 化・オブザーバビリティ強化**。個人プロジェクトなので「月額を今と同程度（実請求 約 160 円）に抑え、無料枠を活かす」「運用の手間を減らす」を同じくらい重視する
+- 規模: **最小構成を基準**にする。本文の「必須」が最小構成、「任意」は要否を個別に判断する追加候補。ただしセキュリティの必須項目は削らない
 
 ## 1. 設計方針
 
 | # | 方針 | 現行の課題との対応 |
 |---|---|---|
-| P1 | **すべて Terraform で管理**し、デプロイは GitHub Actions から行う（手作業のデプロイをやめる） | IaC なし、ドリフト |
-| P2 | **リージョンを東京（asia-northeast1）に集約**する（BigQuery も東京のデータセットへ移す） | 3 リージョン分散 |
+| P1 | **すべて Terraform で管理**し、デプロイは GitHub Actions から行う。ただし権限の根元（bootstrap）は分離してオーナーが手で apply する | IaC なし、ドリフト |
+| P2 | **リージョンを 1 か所に集約**する。東京（asia-northeast1）か US かは**スパイクで実測して決める**（2.1） | 3 リージョン分散 |
 | P3 | 実行基盤は **Cloud Run** に統一し、**App Engine と第1世代 Cloud Functions をやめる** | 廃止ランタイム、第1世代 |
-| P4 | 認証は **IAP と IAM に寄せ、共有パスワードを無くす**。関数の `allUsers` 公開をやめる | #3、公開エンドポイント |
-| P5 | サービスごとに **専用サービスアカウント（最小権限）**。ユーザー管理の SA 鍵は使わない（CI も Workload Identity 連携） | デフォルト SA、SA 鍵 |
+| P4 | 認証は **IAP と IAM に寄せ、共有パスワードを無くす**。`allUsers` 公開をやめる | #3、公開エンドポイント |
+| P5 | サービスごとに **専用サービスアカウント（最小権限）**。ユーザー管理の SA 鍵は使わない（CI も Workload Identity 連携） | デフォルト SA（Editor）、SA 鍵 |
 | P6 | 取り込みは **生データ（HTML）を保存してから解析**する。解析のバグを後から再処理で直せるようにする | #4（元の `MM/DD` が残っておらず過去データを正確に直せない） |
-| P7 | 書き込み順を「データ → 状態」にし、**表示側は BigQuery の実データだけを見る** | #5 |
-| P8 | **オブザーバビリティを最初に入れる**（鮮度・エラー・データ品質のアラート）。リファクタ中の事故検知と Before/After の比較に使う | 監視なし、LINE Notify 終了 |
+| P7 | 書き込み順を「生 HTML → データ → 完了記録（`ingest_runs`）」にし、**表示側は完了記録のあるデータだけを見る** | #5、部分書き込み |
+| P8 | **監視を最初に入れる**。アラートは 1〜2 本に絞り（2027-09 から課金。2026-10 時点の告知で、公式 https://cloud.google.com/stackdriver/pricing で要確認）、細かい検査はコードと定期クエリで行う | 監視なし、LINE Notify 終了 |
 | P9 | 集計は関数ではなく **BigQuery の定期クエリ / ビュー**で行う | `insert_ohlc`（python37） |
 
 ## 2. システム構成図（After）
 
 ```mermaid
 flowchart LR
-    subgraph EXT[外部]
+    subgraph EXT["外部"]
         JPX["JPX 価格情報ページ"]
         USER["閲覧者"]
-        GH["GitHub<br/>terukusu/optionchan-gcp"]
+        GH["GitHub Actions"]
     end
 
-    subgraph GCP["GCP プロジェクト optionchan-222710 / asia-northeast1 に集約"]
-        SCH["Cloud Scheduler<br/>取引時間だけ毎分<br/>(HTTP + OIDC)"]
-        ING["Cloud Run サービス<br/>ingest (非公開)<br/>SA: sa-ingest"]
-        RAW[("GCS raw<br/>生 HTML.gz<br/>Nearline→Archive")]
-        BQ[("BigQuery<br/>dataset optionchan_tokyo<br/>(東京)")]
-        SQ["BigQuery<br/>定期クエリ / ビュー<br/>1時間足・品質チェック"]
-        VIEW["Cloud Run サービス<br/>viewer (UI + API)<br/>SA: sa-viewer"]
-        IAP["IAP"]
-        AR[("Artifact Registry")]
-        MON["Cloud Monitoring<br/>ログ指標・アラート<br/>ダッシュボード"]
-        LOG["Cloud Logging<br/>構造化ログ (JSON)"]
+    subgraph BOOT["bootstrap（オーナーが手で apply、prod の state 外）"]
+        WIF["Workload Identity 連携"]
+        TFP["sa-tf-plan（PR、読み取り）"]
+        TFA["sa-tf-apply（Environment prod のみ）"]
         TFS[("GCS tfstate")]
     end
 
-    NOTIFY["通知<br/>メール + (Discord/Slack 等)"]
+    subgraph PROD["optionchan-222710（リージョンはスパイクで決定: 東京 または US）"]
+        SCH["Cloud Scheduler（毎分 1 ジョブ）"]
+        ING["Cloud Run ingest（取り込み・回収、ingress internal、sa-ingest）"]
+        RAW[("GCS raw 生 HTML（Standard、上書き禁止）")]
+        BQ[("BigQuery 3 テーブル + ingest_runs")]
+        SQ["定期クエリ（1 時間足・日次整合、sa-sq）"]
+        JOB["Cloud Run ジョブ（手動の再処理のみ）"]
+        IAP["IAP（Cloud Run に直接設定）"]
+        VIEW["Cloud Run viewer（sa-viewer）"]
+        AR[("Artifact Registry")]
+        MON["Logging / Monitoring（アラート 1〜2 本）"]
+    end
 
-    SCH --> ING
-    ING -- "HTML 取得" --> JPX
-    ING -- "生データ保存" --> RAW
-    ING -- "Storage Write API" --> BQ
+    MAIL["通知（メール）"]
+
+    SCH -- "OIDC" --> ING
+    ING -- "取得" --> JPX
+    ING -- "(1) 生 HTML" --> RAW
+    ING -- "(2) Storage Write API" --> BQ
     SQ --> BQ
+    JOB -- "再処理" --> BQ
     USER --> IAP --> VIEW
-    VIEW -- "SELECT (パラメータ化)" --> BQ
+    VIEW -- "パラメータ化 SELECT" --> BQ
+    ING -.-> MON
+    SQ -.-> MON
+    MON --> MAIL
 
-    ING & VIEW -. "stdout JSON" .-> LOG --> MON
-    SQ -. "結果" .-> MON
-    MON --> NOTIFY
-
-    GH -- "GitHub Actions<br/>(Workload Identity 連携)" --> AR
-    GH -- "terraform plan / apply" --> TFS
-    AR --> ING & VIEW
+    GH -- "OIDC" --> WIF
+    WIF --> TFP
+    WIF --> TFA
+    TFP -- "plan" --> TFS
+    TFA -- "image push" --> AR
+    TFA -- "apply" --> PROD
 ```
 
 なくなるもの: App Engine、Cloud Functions 7 個、Pub/Sub 3 トピック、Datastore、GCS `optionchan`（中継）、共有パスワード（`auth.txt`）、`stackdriverLineNotify`。
+
+### 2.1 リージョン: 東京案 / US 集約案（スパイクで決定）
+
+| | 東京案 | US 集約案 |
+|---|---|---|
+| Cloud Run・GCS raw | asia-northeast1 | US のリージョン（例: us-central1。BigQuery US マルチリージョンと同じ地域） |
+| BigQuery | 新データセット `optionchan_tokyo` に過去データをコピー | 既存 `optionchan` を読み取り専用で残し、新データは同じ US の新データセット（例: `optionchan_v2`）へ。境界時刻 T0 で結合するビューで 1 つに見せる |
+| データ移行（6 章 3a） | 必要（コピー・検証で約 1 週間、転送料 約 60 円） | **不要** |
+| 期待される利点 | JPX への距離が近く、取得時間・課金時間が短い可能性 | 移行作業とリスクが小さい。`PaymentInfo`（課金エクスポート）も US にあり分散しない |
+| 保存単価 | US より 1 割強高い | 現行どおり |
+
+判定スパイク（6 章 S）で、両リージョンに取得だけを行う試験用サービスを置き、同じ時刻に 5 取引日以上（夜間取引を含む）計測する。
+
+| 測るもの | 指標 |
+|---|---|
+| JPX 取得時間 | 1 ページの取得時間 p50 / p95、失敗率（タイムアウト・接続断） |
+| Cloud Run の課金時間 | 1 回あたりの課金対象インスタンス時間（更新あり / 更新なし / 時間外の 3 経路） |
+| コールドスタート | 起動遅延の p50 / p95、毎分起動でインスタンスが残る割合 |
+| JPX ページ更新時刻の挙動 | 更新間隔、実時刻との遅れ、1 限月と 2 限月の更新時刻のずれ、4 時台の空ページ |
+
+判定基準（案。スパイクの Issue で確定する）:
+
+1. 東京の更新あり経路の処理時間 p50 が US より **30% 以上短く**、かつ月の vCPU 秒試算（7 章）で無料枠に収まるかどうかが変わる → 東京案
+2. US の取引時間中の失敗率が東京より **1 ポイント以上高い** → 東京案
+3. どちらにも当たらない → 移行作業の少ない **US 集約案**
 
 ## 3. コンポーネント設計
 
 ### 3.1 取り込み（ingest）
 
-- **Cloud Run サービス**（Python 3.13、非公開・最小インスタンス 0・リクエスト課金）。Cloud Scheduler が HTTP + OIDC トークンで直接呼ぶ（Pub/Sub を挟まない）。1 回の処理は 10 秒前後で、CPU が課金されるのはリクエスト処理中だけ
-  - Cloud Run ジョブにしない理由: ジョブはインスタンス課金で、起動 1 回ごとのコンテナ起動時間も課金対象になる。月約 2.5 万回起動すると無料枠を超えるおそれがあるため、毎分の起動にはサービスの方が向く
-- **起動は取引時間だけ**: JPX のページは約 15 分遅れなので、取引時間より 15 分ほど後ろにずらし、平日 8:45〜16:05 と 17:00〜翌 6:20（土曜早朝を含む）の cron を複数登録する。祝日でも取引がある日は平日の cron で起動され、取引がない日はページが更新されないので何もしない。現行の毎分 24 時間起動に比べて起動回数は約 6 割（月約 2.5 万回）
-- 処理順:
-  1. 1限月のページを取得し、ページの更新時刻が直前のスナップショット時刻（手順 5）と同じなら終了する
-  2. 2限月のページも取得し、**2 ページ分の生 HTML を 1 ファイルにまとめて GCS `raw` に保存**（`raw/YYYY/MM/DD/HHMM.html.gz`。更新があった回だけ保存するので 1 日約 800 回）
-  3. 解析して `spot_price` / `future_price` / `option_price` の行を作る（解析は純粋関数。#2 のテストをそのまま移植）
-  4. **BigQuery Storage Write API**（コミット型ストリーム）で 3 テーブルに書く
-  5. 直前のスナップショット時刻は BigQuery の最新 `created_at` を参照する（Datastore をやめる。1 日数百回の小さなクエリはパーティション指定で数 MB 程度）
-- 解析エラーは **行単位で隔離**し、1 行の異常でスナップショット全体を落とさない（エラー行数をログ指標にする）
-- **再処理ジョブ**: 生 HTML から任意の期間を解析し直して BigQuery に書き直せるようにする。まれにしか動かさないので、こちらは **Cloud Run ジョブ**（同じコンテナを引数違いで起動）
+**実行基盤（必須）**
+
+- **Cloud Run サービス 1 つ**（Python 3.13、最小インスタンス 0、**CPU 0.5**、メモリ 512MiB 程度）。1 vCPU 未満は第1世代実行環境・同時実行 1・リクエスト課金が条件で、0.5 vCPU ではメモリ上限が 1GiB 未満になる（[公式](https://docs.cloud.google.com/run/docs/configuring/services/cpu)）。0.5 未満にはしない。ジョブにしないのは、ジョブはインスタンスごとに最低 1 分課金で、毎分起動には向かないため
+- ingress は `INGRESS_TRAFFIC_INTERNAL_ONLY`（同一プロジェクトの Scheduler から `run.app` URL を呼ぶ場合は内部扱い）+ IAM 認証 + OIDC の audience 固定
+- **Cloud Scheduler は `* * * * *` の 1 ジョブだけ**（Scheduler の無料枠は請求先アカウントあたり 3 ジョブで、既に他で使い切っている）。リトライ 0、`attemptDeadline` と Cloud Run のリクエストタイムアウトを 50 秒前後に揃える。`X-CloudScheduler-ScheduleTime` はリトライ間で一定なので、リトライ 0 でも念のため重複排除のキーに使える
+- **取引時間・休場日の判定はコード側 1 か所**（JPX の公表をもとにした設定ファイル。年 2 回更新、runbook に手順）。時間外は 204 で即返す。祝日取引から除外される日がある（例: 2026-11-23、12/31、1/1、1/2）。実測ではページ時刻のデータ範囲は 08:45〜15:46 / 17:00〜06:01 で、実時刻はその約 15 分後
+- JPX への HTTP は接続・読み取りとも**タイムアウト 10 秒程度**（現行の `requests.get` はタイムアウト無し）
+
+**スナップショットの識別子と保存条件**
+
+- 識別子 = **1 限月ページの更新時刻**（JST）。保存条件は「ページ更新時刻が前回保存分から変わったら」
+- 現行は「先物の約定時刻（時:分）が変わったら保存」（`update_prev_future_price_if_changed`）で、件数が変わりうる（1 日 約 800 回 vs 最大 約 1,200 回、未確認）。実測で `created_at` の重複が 2026 年に 34 件（中身が異なる）、spot / future の片方だけのスナップショットが 2025 年 36 件・2026 年 8 件ある。**新旧の判定差は並行稼働で比較し、#11 の AC にする**
+
+**処理順（必須）**
+
+1. 1 限月のページを取得し、更新時刻から生 HTML のオブジェクト名（`raw/YYYY/MM/DD/YYYYMMDDTHHMM.html.gz`）を決める。オブジェクトが既にあれば終了（HEAD 1 回。この「更新なし」経路は JPX の取得を含むので時間はスパイクで測る）
+2. 2 限月のページも取得し、2 ページ分を 1 ファイルにまとめて **`ifGenerationMatch=0`（上書き禁止）で作成**する。412 なら他の実行が処理済みなので終了（ロック兼重複排除）
+3. 解析して `spot_price` / `future_price` / `option_price` の行を作る（純粋関数。年は `datetime.now()` ではなく HTML 内の更新時刻から決める。#2 のテストと古い HTML 断片を回帰テストにする）
+4. **Storage Write API** で 3 テーブルに追記する（旧ストリーミング挿入 `insertAll` は使わない）
+5. 最後に完了記録 **`ingest_runs`** に 1 行書く（snapshot 時刻、`ingest_run_id`、テーブルごとの行数、`source_object`、`parser_version`）
+
+- 「処理済みか」は GCS のオブジェクトと `ingest_runs` で判定し、**BigQuery の最新 `created_at` を毎回クエリしない**（最低課金 10MB × 月 2.5 万回 ≒ 250GB、遅延 1〜2 秒）
+- **部分書き込み・重複への対処**: 追記のみとし、表示・集計は「`ingest_runs` に完了記録がある実行のうち、スナップショットごとに最新の `ingest_run_id`」を選ぶビューを通す。途中で落ちた実行の行は見えない。Storage Write API の exactly-once は同一ストリーム内のオフセット一致のときだけで、3 テーブル一括のコミットは未確認（実装時に確認）のため、これに頼らない
+- **取りこぼしの回収（必須）**: **ingest サービスの中で行う**（Scheduler を増やさない）。毎時 0 分の呼び出し（取引時間中は通常処理の後）で、直近の GCS raw の一覧と `ingest_runs` を突き合わせ、完了記録の無い生 HTML を解析し直す。1 回あたりの件数に上限を設け、リクエストタイムアウト内に収める
+
+**失敗の分類（必須）**
+
+| 種別 | 例 | 扱い |
+|---|---|---|
+| `jpx_unavailable`（WARN） | 空ページ・接続断（4 時台に毎日発生） | 次の分に任せる。アラートしない |
+| `parse_failed`（ERROR） | 形式変更、1 スナップショットの行数が下限（現在 1,076 行）未満 | 生 HTML は残し、`ingest_runs` は書かない。アラート対象 |
+| `write_failed`（ERROR） | BigQuery 書き込み失敗 | 回収処理で再処理。**初回から M2 で通知** |
+
+- 行数・限月は SQ・限月交代で入れ替わるので、下限と品質チェックはそれを考慮する
+
+**再処理（必須）**
+
+- 同じコンテナを引数違いで動かす **Cloud Run ジョブ**。**手動の期間指定再処理・バックフィル専用**で、定期起動しない（定期の回収は上記のとおり ingest サービスが行う）
+- 置換方法は 2 つ:
+  - (b) 既定: 追記のみ。新しい `ingest_run_id` で書き、上記のビューで最新版を選ぶ
+  - (a) 大量・恒久の置換: 1 日以上前のパーティションに限り、一時テーブルからパーティション単位で DELETE + INSERT（通常の取り込みと期間で排他。Storage Write API で 30 分以内に書いた行には DML の制約がある）
 
 ### 3.2 データ（BigQuery）
 
-- 東京に新しいデータセット **`optionchan_tokyo`** を作り、現行の US データセット `optionchan` から **データセットコピー**で移す（論理 78GB / 物理 4.8GB）。データセットのロケーションは後から変えられず、ID はプロジェクト内で一意なので同名にはできない。データセットの名前も変えられないため、移行後もこの名前を使い、旧 `optionchan` は後片付けで削除する
-- テーブルは現行のスキーマを基本に維持する（ビューアーと過去データとの互換のため）。追加・変更:
-  - `ingest_run_id`（取り込みの実行 ID）を追加し、ログと突き合わせられるようにする
-  - `price_time` は DATETIME（JST）のまま。過去データの補正（#4）は再処理ジョブまたは推定 SQL で別途行う
-- **1 時間足**（現 `insert_ohlc`）は BigQuery の **定期クエリ**に置き換える
-- 表示用の集計（スマイルカーブ・ATM 推移）は **ビュー / テーブル関数**にして、API はそれを読むだけにする
-- 古いパーティションは長期保存料金（90 日で自動的に約半額）に任せ、削除はしない
+- データセット: 東京案は `optionchan_tokyo`（新規）、US 集約案は既存 `optionchan`（過去分、読み取り専用）+ 新データセット（例: `optionchan_v2`）。データセットのロケーションと名前は後から変えられない
+- テーブルは現行のスキーマを基本に維持し、次を追加する（必須）:
+  - `ingest_run_id`、`parser_version`、`source_object`（生 HTML のパスと generation）
+  - 2 限月ページの更新時刻（現行は 1 限月の時刻に揃えて上書きしている）
+  - `ingest_runs` テーブル（完了記録）
+- `price_time` は DATETIME（JST）のまま。列の説明に JST と明記する
+- `option_price` は `require_partition_filter = true`、テーブル関数は期間引数を必須にする。パーティションは UTC 日単位で、JST の取引日（夜間取引）をまたぐ
+- **1 時間足**（現 `insert_ohlc`）は定期クエリにする。現行は ATM かつ type=2、UTC 基準で前日 1 日分、`CURRENT_TIMESTAMP` 基準、単純 INSERT で、実測でキー重複（`atm_iv` 84 行、`atm_option_price` 42 行）がある。新方式は `@run_time` 基準、`(last_trading_day, time_frame, started_at)` で MERGE、`SAFE_OFFSET` を使い、再処理した日は再計算する。**過去 30 日分で現行と同値**を確認してから切り替える
+- 表示用の集計（スマイルカーブ・ATM 推移）は **ビュー / テーブル関数**（上記の最新版選択ビューの上に作る）
+- 古いパーティションは長期保存料金に任せ、削除しない。タイムトラベルは既定の 7 日
+
+**過去データの補正（#4、移行とは別ステップ）**
+
+- コピー（東京案）や結合ビュー（US 案）は**元データのまま**行い、検証が済んでから補正する
+- 補正は `price_time_raw` 列に元の値を残し、推定で直した行に `price_time_estimated` フラグを立てる
+- 推定ロジックの検証: 並行稼働中の生 HTML を正解とし、旧ロジックで解析 → 推定 SQL で戻した結果との**一致率を AC にする**（目標値は #4 で決める）
 
 ### 3.3 ビューアー（App Engine をやめる）
 
-- **Cloud Run サービス 1 つ**に UI（静的ファイル）と API をまとめる。最小インスタンス 0（使わないときは課金なし）
-- 認証は **IAP**（Cloud Run への IAP 直接設定。使えない構成ならロードバランサ + IAP）。閲覧できるのは指定した Google アカウントだけ
-- API は BigQuery を **直接・パラメータ化クエリで**読む（関数への中継と共有パスワードをやめる）
-- フロントエンドは Chart.js を最新版に揃え、ビルド済みの静的ファイルをコンテナに同梱する（CDN 依存をやめる）
-- 代案: 画面を作り込まないなら **Looker Studio**（BigQuery 直結、コード不要）。ただし細かいチャート（スマイルカーブの 2 軸など）は再現しにくい
+- **Cloud Run サービス 1 つ**に UI（静的ファイル）と API をまとめる。最小インスタンス 0
+- 認証は **Cloud Run への IAP 直接設定**（GA。GA の時期は公式で要確認。ロードバランサ不要・追加費用なし）。ロードバランサ + IAP は採らない（費用が大きく、LB と Cloud Run の両方に IAP は併用できない）
+  - IAP の有効化は Terraform の `google_cloud_run_v2_service` の `iap_enabled = true` で行う（[公式](https://docs.cloud.google.com/run/docs/securing/identity-aware-proxy-cloud-run)）
+  - このプロジェクトは組織に属さないため、**独自の OAuth クライアントを事前に手作業で設定する**必要がある（IAP OAuth Admin API は 2026-03-19 に停止）。これは **Terraform 管理外**として runbook に手順を書く。OAuth クライアント情報が state に入るかは未確認（実装時に確認）
+  - `run.invoker` は IAP サービスエージェントにだけ、`iap.httpsResourceAccessor` は閲覧者にサービス単位で付ける（現在はプロジェクト単位）
+- API は BigQuery を **パラメータ化クエリで直接**読む。IAP 前提で CORS は許可しない。期間・件数に上限を設け、スキャン量で課金が膨らまないようにする
+- Chart.js を最新版に揃え、ビルド済みの静的ファイルをコンテナに同梱する（ロックファイルで管理、CDN 依存をやめる）
 
-### 3.4 オブザーバビリティ
+### 3.4 監視
 
-| 対象 | シグナル | 実装 | アラート条件（案） |
+**必須（アラートは 1〜2 本）**
+
+| # | アラート | 条件 | 拾うもの |
 |---|---|---|---|
-| 鮮度 | 最新スナップショットの遅れ | ingest が成功時に `snapshot_saved` を構造化ログに出す → ログ指標 | 取引時間中に 10 分以上 `snapshot_saved` が無い |
-| エラー | 実行失敗・解析エラー行 | ingest の 5xx・失敗ログ、`parse_error` ログ指標、Error Reporting | 失敗が 3 回連続 / 解析エラー行が 1 スナップショットで 5% 超 |
-| データ品質 | 行数・NULL 率・`price_time` の妥当性 | BigQuery 定期クエリ（1 時間ごと）。異常があれば `ERROR()` でクエリ自体を失敗させ、その失敗（転送実行のエラーログ）をログ指標にする | 未来の `price_time`・日曜の日付・行数の急減が 1 件以上 |
-| ビューアー | エラー率・レイテンシ | Cloud Run の標準指標 | 5xx が 5 分で 3 件以上 |
-| コスト | 月額・BigQuery スキャン量 | 予算アラート、`INFORMATION_SCHEMA.JOBS` | 予算の 80% / 100% |
+| M1 | 生存（ログ指標の欠落） | ingest の起動ログ（時間外の 204 も含む）が 15 分無い。24 時間有効 | Scheduler・Cloud Run の停止 |
+| M2 | エラー（ログ一致） | ingest・再処理・定期クエリの `severity >= ERROR` | `parse_failed`、書き込み失敗、鮮度切れ、データ品質違反 |
 
-- ログはすべて **JSON の構造化ログ**（`severity`、`ingest_run_id`、`snapshot_at`、`rows` 等）で stdout に出す
-- **ダッシュボード**（鮮度・取り込み行数・エラー・コスト）とアラートポリシーも Terraform で管理する
-- 通知先: メール + チャット（Discord / Slack 等、要決定）。LINE Notify はサービス終了のため使わない
+- **鮮度**は ingest が判定し ERROR ログを出す（M2 で通知）: 取引時間中（カレンダー参照）に「実時刻 − ページ更新時刻」がしきい値を超えたら。取引中の 10〜20 分の空白が 2026-09 以降 16 回（すべて 0〜6 時の夜間）あるため、しきい値は通常の遅れ 15 分 + 余裕で **日中 30 分 / 夜間 40 分**を初期値とし、並行稼働で調整する。metric-absence 条件は時間帯を指定できないので生存（M1）と分ける
+- **データ品質**: 行数・間隔は ingest 側で即時に検査する。**日次の定期クエリ**で整合を検査し、違反があれば `ERROR()` で失敗させる（M2 で通知）
+  - `ingest_runs` の行数・テーブル別行数 = 各テーブルの実件数（GCS raw と `ingest_runs` の突き合わせは SQL ではできないので、ingest の回収処理が行う）
+  - 3 テーブルに同じスナップショットがある、`created_at` の重複が無い、2 限月ともある、限月ごとに ATM がちょうど 1 つ
+  - `price_time` が未来でない・30 日以上前でない、日曜の日付が無い（直近パーティションのみ。過去は #4 まで違反のまま）。祝日取引・休場・SQ を考慮
+- **コスト**: 予算アラート（80% / 100%）と BigQuery の 1 日あたりクエリ量の上限（カスタムクォータ）。予算アラートは Cloud Monitoring のアラート課金の対象外
+- ログはすべて JSON の構造化ログ（`severity`、`ingest_run_id`、`snapshot_at`、`rows`、失敗種別）で stdout に出す
+- 通知はメール（D3）
 
-### 3.5 セキュリティ
+**任意（要否を個別に判断）**: ダッシュボード、ビューアーの 5xx アラート、Error Reporting、チャット通知（Discord / Slack 等、webhook は Secret Manager）、品質項目ごとの個別アラート
 
-- サービスアカウント: `sa-ingest`（GCS raw への書き込み、BigQuery データ編集）、`sa-viewer`（BigQuery 読み取り）、`sa-scheduler`（ingest の呼び出し）、`sa-deploy`（GitHub Actions 用）
-- 既存の `optionchan` SA のユーザー管理鍵は削除する。App Engine デフォルト SA の権限は移行後に外す
-- エンドポイントの一般公開は無し（ビューアーは IAP、ingest は Scheduler の SA からのみ呼び出し可）
-- 秘密情報は原則持たない。必要になった場合だけ Secret Manager（1 値 1 シークレット）
+### 3.5 セキュリティ（すべて必須）
+
+**サービスアカウントと権限**
+
+| SA | 権限（範囲） |
+|---|---|
+| `sa-ingest`（取り込み・回収・再処理ジョブ共用） | 採用データセットの `dataEditor`（データセット単位）、raw バケットの `objectCreator` + `objectViewer`（一覧・読み取り。削除なし）、`bigquery.jobUser`（回収処理で `ingest_runs` を読む） |
+| `sa-viewer` | 採用データセットの `dataViewer` + `bigquery.jobUser` |
+| `sa-scheduler` | ingest サービス単位の `run.invoker` |
+| `sa-sq`（定期クエリ） | 採用データセットの `dataEditor` + `bigquery.jobUser` |
+| `sa-tf-plan` | プロジェクトの閲覧 + tfstate の読み取り（plan は `-lock=false`） |
+| `sa-tf-apply` | リソース作成・Artifact Registry への push。`projectIamAdmin` は IAM Conditions（`modifiedGrantsByRole`）で付与できるロールを限定（構文・動作は未確認、bootstrap 実装時に確認）。`serviceAccountUser` は SA 単位 |
+
+- 再処理ジョブは最小構成のため `sa-ingest` と共用する（権限は同じで足りる）
+- Compute / App Engine のデフォルト SA に `roles/editor` が付いている。Cloud Run は SA 未指定だと Compute デフォルト SA で動くので、**全リソースで `service_account` を必須**にし CI で検出する。Editor は後片付け（6 章）で外す
+- 旧 `optionchan` SA の鍵（2019 年発行）は **フェーズ 0 で最終使用日時を確認**し、未使用なら無効化 → 一定期間後に削除
+
+**CI（GitHub Actions）と Workload Identity 連携**
+
+- プロバイダの属性条件は数値 ID（`assertion.repository_id` / `repository_owner_id`）で絞る
+- `sa-tf-apply` は `principal://…/subject/repo:terukusu/optionchan-gcp:environment:prod` にだけ許可。Environment `prod` は `master` のみ・required reviewer
+- `pull_request_target` / `workflow_run` は使わない。fork からの PR はすべて承認必須、workflow の既定権限は read、`id-token: write` は job 単位
+- `master` にブランチ保護、Actions による PR 承認を無効化（フェーズ 0 で設定・確認）
+- サプライチェーン: Actions は SHA ピン留め（必須化）と許可アクションの限定、`uv.lock` はハッシュ付き、Dependabot か Renovate、ベースイメージとデプロイは digest 固定、Artifact Registry にクリーンアップポリシー
+
+**公開面・秘匿情報・バケット**
+
+- 一般公開のエンドポイントは無し（ビューアーは IAP、ingest は ingress internal + Scheduler の SA のみ）
+- 現行の `allUsers` 公開関数は、`stackdriverLineNotify` を **フェーズ 0 で即削除**、残り（`smile_data` 等）は 5a で公開を外す。それまでの備えとして予算アラートと BigQuery の日次クォータを先に入れる。git 履歴にある 2019 年の共通パスワードは現行の値と一致しないことを確認済み（2026-10-12）
+- Terraform state・公開コードに秘匿情報を入れない: メールアドレス等は GitHub Environment の variables / secrets → `TF_VAR_`、webhook URL（トークン相当）は Secret Manager に置き ID で参照、plan 出力は `sensitive`。`.gitignore` に `*.tfstate` / `.terraform/` / `*.tfvars` を追加し、`.terraform.lock.hcl` はコミットする
+- raw と tfstate のバケットは `uniform_bucket_level_access = true`・`public_access_prevention = enforced`、ソフト削除 / 保持ポリシー、`prevent_destroy`。tfstate は `sa-tf-apply` とオーナーだけが書ける
+- JPX のコンテンツ（生 HTML）は再配布しない（公開しない）。テスト用 fixture は必要部分だけに絞る
 
 ## 4. IaC・CI/CD
 
 ```
 infra/
-├── bootstrap/        # tfstate バケット、Workload Identity 連携、sa-deploy（初回だけ手で apply）
-├── envs/prod/        # 本番の root module（backend = GCS）
-└── modules/
-    ├── ingest/       # Cloud Run サービス、再処理ジョブ、Scheduler、GCS raw、SA
-    ├── data/         # BigQuery データセット・テーブル・ビュー・定期クエリ
-    ├── viewer/       # Cloud Run サービス、IAP、SA
-    └── observability/# ログ指標、アラート、通知チャネル、ダッシュボード、予算
+├── bootstrap/   # tfstate バケット、WIF プール / プロバイダ、sa-tf-plan / sa-tf-apply とその権限
+│                # オーナーが手で apply。state は prod と別の、オーナーだけが読める場所
+└── prod/        # 本番の root module 1 つ（modules 分割はしない。ingest.tf / data.tf / viewer.tf / monitoring.tf / iam.tf のファイル分割のみ）
 ```
 
-- ツール: Terraform（google / google-beta プロバイダ）、state は GCS（バージョニング有効）
-- 既存リソースは `import` ブロックで取り込んでから変更する（作り直さない）。BigQuery のテーブルは `deletion_protection = true`
-- アプリ: `uv` で依存管理、`ruff`、`pytest`。コンテナは Artifact Registry
-- GitHub Actions（Workload Identity 連携、SA 鍵なし）:
-  - PR: テスト・lint・`terraform plan`（結果を PR にコメント）
-  - `master` へのマージ: コンテナのビルド・push → `terraform apply`（GitHub の Environment で手動承認を挟む）
+- Terraform（google / google-beta プロバイダ）、state は GCS（バージョニング有効）
+- 既存リソースとフェーズ 0 で gcloud で作ったリソースは `import` ブロックで取り込む（作り直さない）。BigQuery のテーブルは `deletion_protection = true`
+- アプリ: `uv`、`ruff`、`pytest`。コンテナは自前の Dockerfile で GitHub Actions がビルドし、Artifact Registry に push（digest 固定）
+- GitHub Actions:
+  - PR: テスト・lint・`terraform plan`（`sa-tf-plan`、結果を PR にコメント）
+  - `master` へのマージ: ビルド・push → イメージ digest を変数に `terraform apply`（`sa-tf-apply`、Environment `prod` の承認）。デプロイ経路は Terraform 1 本にし、`gcloud run deploy` との二重管理をしない
+- Terraform 管理外（runbook に手順）: bootstrap の apply、IAP 用 OAuth クライアントの事前設定、予算アラート（請求先アカウント側のため。Terraform 化できるかは実装時に判断）
+
+### 4.1 runbook（`docs/runbook.md`、実装時に作成）
+
+アラート（M1・M2）ごとの一次対応、Scheduler の停止 / 再開、取引カレンダーの更新（年 2 回）、期間指定の再処理、JPX の形式変更時・BigQuery 障害時の対応、tfstate のロック解除・復旧、IAP OAuth クライアントの設定。
 
 ## 5. リポジトリ構成（After）
 
@@ -145,34 +254,42 @@ optionchan-gcp/
 ├── apps/
 │   ├── ingest/       # 取り込み (Cloud Run サービス + 再処理ジョブ)。jpx_loader の後継
 │   └── viewer/       # UI + API (Cloud Run サービス)
+├── config/           # 取引カレンダー（取引時間・休場日・祝日取引の除外日）
 ├── sql/              # ビュー・定期クエリ・品質チェック・移行 SQL
-├── infra/            # Terraform
+├── infra/            # Terraform（bootstrap / prod）
 ├── tests/
-├── docs/architecture/
+├── docs/             # architecture/、runbook.md
 └── .github/workflows/
 ```
 
 ## 6. 移行計画
 
-本番は毎分取り込み中なので、**新旧を並行稼働させて比較してから切り替える**。
+本番は毎分取り込み中なので、**新旧を並行稼働させて比較してから切り替える**。期間は目安。全体で約 6〜8 か月、**2027-06 末までに旧系の削除（5b）を終える**ことを目標にする。Cloud Monitoring のアラート課金は 2027-09-01 から始まる（2026-10 時点の告知。公式 https://cloud.google.com/stackdriver/pricing で要確認）ので、それまでに旧系向けのアラートを片付け、新系の 1〜2 本だけが残る状態にする。**フェーズ S と 0 は並行可**（セキュリティ即時対応はスパイクを待たない）。
 
-| フェーズ | 内容 | 切り戻し |
-|---|---|---|
-| 0. 先行監視 | 現行構成に鮮度・エラーのアラートと新しい通知チャネルを入れる（Terraform で作り始める）。Before の指標を取り始める | 削除するだけ |
-| 1. 基盤 | Terraform の bootstrap、Workload Identity 連携、Artifact Registry、CI | 影響なし |
-| 2. 取り込みの新設 | 東京に新データセット `optionchan_tokyo` を作り、新 ingest を並行稼働（新データセットにだけ書く）。旧と新のスナップショットを毎日突き合わせる | 新を止めるだけ |
-| 3. データ移行 | 旧データセット `optionchan` の過去データを `optionchan_tokyo` へコピー。並行稼働期間の重複を整理 | 旧データセットは残っている |
-| 4. ビューアー切替 | 新 viewer を IAP 付きで公開。旧 App Engine と見比べる | 旧 URL はそのまま |
-| 5. 旧系の停止 | Scheduler 停止 → 旧 Functions・Pub/Sub・Datastore・GCS 中継を削除。App Engine はアプリごとは削除できないので無効化（またはバージョン削除） | フェーズ 5 は一定期間（例: 2 週間）様子を見てから |
-| 6. 後片付け | 旧 US データセットの削除（バックアップ後）、`jikken`、旧 SA 鍵、App Engine の旧バージョン、`stackdriverLineNotify` | — |
+| フェーズ | 内容 | 期間（目安） | 完了判定 | 切り戻し |
+|---|---|---|---|---|
+| S. スパイク | 東京と US に取得だけの試験サービスを置き、2.1 の項目を計測。リージョンを決めて D2 に記録 | 1〜2 週間（2026-11 前半） | 両リージョンで 5 取引日以上（夜間含む）計測し、判定基準で決定 | 試験サービスを削除 |
+| 0. 先行監視・セキュリティ即時対応 | `stackdriverLineNotify` 削除、予算アラート、BigQuery 日次クォータ、旧 SA 鍵の使用状況確認、GitHub 設定を 3.5 の CI 項目に揃える、現行構成に M1・M2 相当のアラートとメール通知（gcloud で作り、フェーズ 1 で import） | 1 週間（2026-11） | 左記がすべて済み、アラートを 1 回ずつ試験発報して届く | 追加分を削除するだけ |
+| 1. bootstrap・基盤 | bootstrap（tfstate、WIF、`sa-tf-plan` / `sa-tf-apply`）→ prod root module、Artifact Registry、CI。フェーズ 0 のリソースを import | 1〜2 週間（2026-11〜12） | PR で plan が動き、apply は承認後のみ。import 後の plan 差分 0 | 影響なし |
+| 2. 新取り込みの並行稼働 | 採用リージョンに新データセットと ingest を作り並行稼働（新データセットにだけ書く）。開始時刻を **T0** とする。新旧の突き合わせは定期クエリで自動化（キーは `price_time` と行使価格。東京案では別リージョンを直接 JOIN できないので、旧系の前日分を日次でコピーして比較）。年末年始の休場もここで確認 | 構築 2〜3 週間 + 並行 4 週間以上（2026-12〜2027-02） | 説明できない差分 0 が **連続 10 営業日**、新系の取りこぼし率が旧系以下、保存条件の新旧差を記録（#11）、Cloud Run の月 vCPU 秒が試算内 | 新を止めるだけ |
+| 3a. データ移行（**東京案のみ**） | 旧データセットを一時データセット（例 `optionchan_import`）へコピー → 日別行数と `BIT_XOR(FARM_FINGERPRINT(TO_JSON_STRING(t)))` を US / 東京で突き合わせ → T0 より前の行だけ `optionchan_tokyo` へ INSERT…SELECT。並行稼働中に新系が取りこぼした分は旧系から補う | 1 週間（2027-02） | 全日で行数・フィンガープリント一致、T0 前後で欠落・重複 0 | 旧データセットは残っている |
+| 3a'. 結合ビュー（**US 案のみ**） | 旧 `optionchan`（T0 前）と新データセット（T0 以降）を結合するビューを作る。データのコピーは無し | 数日 | ビュー経由の日別行数が両データセットの合計と一致 | ビューを消すだけ |
+| 3b. #4 補正 | 3.2 の方法で過去データを補正（移行とは別ステップ） | 1〜2 週間（2027-03） | 推定ロジックの一致率が #4 の AC を満たす、`price_time_raw` が全行に残る | `price_time_raw` から戻せる |
+| 4. ビューアー | 新 viewer を IAP 付きで公開し、旧 App Engine と見比べる | 2〜3 週間（2027-03〜04） | 既存のチャートをすべて再現、1 週間の見比べで差異なし | 旧 URL はそのまま |
+| 5a. 旧系の停止（可逆） | 旧 Scheduler 停止、HTTP 関数の `allUsers` を外す、旧系向けアラートを止める | 2 週間様子を見る（2027-04〜05） | 2 週間、新系のアラートの誤報・取りこぼし無し | Scheduler 再開・公開を戻す |
+| 5b. 旧系の削除（不可逆） | 旧 Functions・Pub/Sub・Datastore・GCS 中継を削除。App Engine は無効化（アプリごとは削除不可）。python37 / nodejs10 の関数は**再デプロイできない**ので、5a の観察を終えてから | 1 週間（2027-05） | 削除済み、新系だけで 1 週間問題無し | 不可（ソースは git に残る） |
+| 6. 後片付け | 次の順で: ソース zip（gcf-sources 等）削除 → 旧 SA の権限除去・鍵削除 → デフォルト SA の Editor 除去 → 旧 US データセット削除（東京案のみ、新側で検証済みのもの）、`jikken`、App Engine の旧バージョン、Artifact Registry の旧イメージ | 2〜3 週間（2027-05〜06） | Editor の付いた SA が 0、`allUsers` の付いたリソースが 0 | 段階ごとに確認 |
 
-既存 Issue との関係: #3（共有パスワード）はフェーズ 4 で不要になる。#5（スマイルカーブ）は新 viewer で解消。#4（過去データ補正）はフェーズ 2 以降の再処理ジョブ・推定 SQL で行う。#2 は現行構成で先に直した（PR #6、2026-10-12 デプロイ済み）。
+既存 Issue との関係: #3（共有パスワード）は 4 で不要になり、5a で公開が無くなる。#5（スマイルカーブ）は新 viewer で解消。#4（過去データ補正）は 3b。#11（保存条件の新旧差）は 2 の AC。#2 は現行構成で先に直した（PR #6、2026-10-12 デプロイ済み）。
 
 ## 7. コスト見積もり（月額・概算）
 
-公開価格をもとにした概算（1 ドル 150 円）。実績は移行後に予算アラートとダッシュボードで確認する。
+公開価格をもとにした概算（1 ドル 150 円、税抜き。請求額には税 10% が加わる）。実績は予算アラートと課金エクスポートで確認する。
 
-### 7.1 現行の内訳（2026-09 の課金データ）
+- **請求額の集計基準**: 課金エクスポートを `usage_start_time` 基準で集計すると 2026-09 は 約 156 円、`invoice.month` 基準では 約 165 円。本資料は `usage_start_time` 基準
+- **無料枠は請求先アカウント単位**で、同じ請求先アカウントの他プロジェクトと共有している（Cloud Run・BigQuery・Scheduler 等）。そのため「無料枠内」は他プロジェクトの使用量しだいで外れうる
+
+### 7.1 現行の内訳（2026-09 の課金データ、`usage_start_time` 基準）
 
 | 項目 | 使用額 | 請求額 |
 |---|---|---|
@@ -182,52 +299,85 @@ optionchan-gcp/
 | Artifact Registry | 約 2 円 | 約 2 円 |
 | 税 | — | 約 17 円 |
 | Scheduler・Datastore・ログ・リージョン間通信 | ほぼ 0 円 | ほぼ 0 円 |
-| **合計** | 約 406 円 | **約 156 円**（2026-07〜09 は 約 156〜170 円） |
+| **合計** | 約 406 円 | **約 156 円** |
 
-実際に払っているのは BigQuery と GCS の保存・操作だけで、計算資源は無料枠に収まっている。
+BigQuery は 2026-10-12 に物理サイズ課金へ切り替え済み（92 円 → 約 15 円の見込み。`option_price` は論理 78GB に対し物理 4.8GB）。
 
-### 7.2 変更ごとの影響（請求額ベース）
+### 7.2 After（請求額ベース、税抜き）
 
-| 変更 | 影響（月額） |
-|---|---|
-| BigQuery を物理サイズ課金に切り替え | **約 −75 円**（92 円 → 約 15 円）。`option_price` は論理 78GB に対し物理 4.8GB。**2026-10-12 に現行データセットで実施済み** |
-| 東京へ移す（リージョン移動だけ） | **約 +5 円**。BigQuery・GCS の保存単価が US より 1 割強高い（物理サイズ課金後の BigQuery は約 15 円なので増分も小さい） |
-| 取り込みの実行（Cloud Run サービス、取引時間のみ） | **0 円の見込み**（要確認）。現行の第1世代関数も無料枠内。Cloud Run のリクエスト課金の無料枠に、月約 2.5 万回 × 10 秒前後が収まるかを並行稼働中に実測する |
-| 生 HTML を 1 スナップショット 1 ファイルにまとめる | GCS の書き込み操作が約 1/3（約 −25 円）。中継用 JSON を書かなくなる分も含む |
-| 生 HTML の保存 | 1 スナップショット約 48KB（gzip、2 ページ）× 1 日約 800 回 ≒ 1 日約 40MB、年約 10GB。Nearline → Archive で月数円〜十数円 |
-| ビューアー | App Engine（現行も実質 0 円）→ Cloud Run 最小 0（同じく無料枠内の見込み） |
+| 項目 | 見込み（月額） | 根拠・前提 |
+|---|---|---|
+| Cloud Run（ingest） | **0 円**（目標）。無料枠を全く使えない場合 最大 約 380 円 | 試算: 更新あり 1.6 万回 × 10 秒 + 更新なし 0.9 万回 × 3 秒 + 時間外 1.9 万回 × 0.1 秒 ≒ 18.8 万秒（毎時の回収は誤差）→ CPU 0.5 で 約 9.4 万 vCPU 秒（無料枠 18 万内）、1 vCPU なら 約 18.8 万で超える。各経路の秒数は仮定で、スパイクで測る（現行 `download_jpx` は平均 6.39 秒、p50 9.6 秒）。無料枠ゼロ時は CPU 約 340 円 + メモリ 約 35 円 |
+| Cloud Scheduler | 約 15 円 | 1 ジョブ $0.10。請求先アカウントの無料枠 3 ジョブは使い切っているため |
+| GCS raw（Standard） | 保存 約 30〜50 円（1 年後、以降は年ごとに増える）+ 書き込み 約 15 円 | 1 スナップショット 約 48KB × 1 日 約 800 回で年 10〜15GB。HEAD（Class B）は月 1 円未満 |
+| BigQuery 保存 | 0〜約 20 円 | 物理サイズ課金で 約 5GiB ≒ 約 15〜20 円。請求先アカウントの 10GiB 無料枠（他プロジェクトと共有）が空いていれば 0 円 |
+| BigQuery クエリ・書き込み | ほぼ 0 円 | クエリは月 1TiB、Storage Write API は月 2TiB の無料枠内 |
+| Artifact Registry | 0 円（目標） | 無料枠 0.5GiB。クリーンアップポリシーで収める（現在は gcf-artifacts だけで 約 1.1GB） |
+| ビューアー（Cloud Run） | ほぼ 0 円 | 最小インスタンス 0、利用者は本人のみ |
+| アラート（2027-09-01 以降） | 約 50〜100 円 | ポリシー（メトリクス参照）1 件 $0.35 + ポイント料金で 約 50 円 / 件（2026-10 時点の告知。公式 https://cloud.google.com/stackdriver/pricing で要確認）。ログ一致条件の料金は未確認（実装時に確認）。予算アラートは対象外 |
+| リージョン差 | 東京案は保存単価が US より 1 割強高い（増分は数円） | — |
 
-### 7.3 データ移行（一回きり）
+**合計の見込み**（税込み請求額）: 約 70〜110 円（2027-09 以降はアラート分 約 50〜100 円を加算）。Cloud Run の無料枠を使えない場合は最大 +約 380 円で、スパイクと並行稼働で実測して判断する。
+
+### 7.3 移行の一時費用
 
 | 項目 | 費用 |
 |---|---|
-| US → 東京のデータセットコピー（リージョン間転送） | 約 60〜950 円（物理 4.8GB / 論理 78GB のどちらで課金されるかによる） |
-| コピージョブ自体 | 0 円 |
-| 新旧の突き合わせ・重複整理・#4 の補正クエリ | ほぼ 0 円（月 1TB の無料枠内） |
-| 並行稼働中の二重保存 | 月 約 15〜20 円（物理サイズ課金後。旧データセット削除まで） |
-
-**合計の見込み**（請求額）: 現行 約 156 円 → 物理サイズ課金の切り替えで 約 80 円 → After 約 60〜100 円。After で増えうるのは Cloud Run が無料枠を超えた場合で、並行稼働中に実測して判断する。
+| データセットコピーの転送料（東京案のみ） | 約 60 円（物理バイト基準、北米 → アジア $0.08/GiB × 約 5GiB）。US 案は 0 円 |
+| 新旧の突き合わせ・#4 補正のクエリ | ほぼ 0 円（月 1TiB の無料枠内） |
+| BigQuery の二重保存（東京案、3a〜6 の間） | 月 約 15〜20 円（7.2 と同じ基準。10GiB 無料枠が空いていれば 0 円）。旧系の取り込み費用は 5a まで現行どおり続く |
+| スパイクの試験サービス | ほぼ 0 円（数日、無料枠内の見込み） |
 
 ## 8. 採用しなかった案
 
 | 案 | 理由 |
 |---|---|
-| Cloud Run functions（第2世代）に載せ替えるだけ | 最小の変更で済むが、P6・P7（生データ保存、書き込み順）や構成の整理が進まない。ingest は処理順の見直しと生データ保存を伴うため作り直す |
-| GKE / Compute Engine | 個人の小規模用途に対して運用負荷とコストが大きい |
-| Firestore / Bigtable 等への移行 | 分析中心の用途で、BigQuery が最適。データ量も BigQuery の得意な範囲 |
-| Pub/Sub を残す | 起動は Scheduler → Cloud Run の直接呼び出しで足りる。中継を減らす |
+| Cloud Run functions（第2世代）/ `gcloud run deploy --source` | 第2世代の実体は Cloud Run サービスで、実行時の性質は自前コンテナと同じ。差は運用面: ソースデプロイは Cloud Build（とそのサービスアカウント）を挟み、Terraform 管理のイメージとの二重管理になりやすい。自前 Dockerfile + GitHub Actions でビルドすれば、テストと同じ CI でイメージを digest 固定でき、デプロイ経路が Terraform 1 本になる。Dockerfile の保守が増える点は小さいと判断（最小構成と両立） |
+| リージョンを決め打ちにする | 東京・US とも利点があるため、実測で決める（2.1） |
+| ロードバランサ + IAP | 費用が大きい。Cloud Run への IAP 直接設定で足りる |
+| 毎分の取り込みや定期の回収を Cloud Run ジョブで動かす / 取引時間ごとに Scheduler を複数 | ジョブは最低 1 分課金。Scheduler は 1 ジョブごとに課金されるため、時間判定と回収は ingest サービス内。ジョブは手動の再処理だけ |
+| Terraform を modules に分割 | 個人の小規模用途では root module 1 つで足りる |
+| GKE / Compute Engine | 運用負荷とコストが大きい |
+| Firestore / Bigtable 等 | 分析中心の用途で BigQuery が最適 |
+| Pub/Sub を残す | Scheduler → Cloud Run の直接呼び出しで足りる |
+| Looker Studio | D1 のとおり不採用（スマイルカーブの 2 軸などを再現しにくい） |
 | Pulumi / CDK for Terraform | 情報量・GCP の公式サンプルの多さで Terraform を選ぶ |
 
 ## 9. 決定事項
 
-2026-10-12 に推奨案で合意（#7）。
+初版は 2026-10-12 に推奨案で合意（#7）。同日、設計レビュー（#17）を受けて D2・D3・D4・D6 を更新し、D8〜D10 を追加。
 
-| # | 論点 | 決定 |
+| # | 論点 | 決定 | 決定日・根拠 |
+|---|---|---|---|
+| D1 | ビューアーを自前の Cloud Run にするか、Looker Studio にするか | Cloud Run（スマイルカーブ等の既存チャートを再現するため） | 2026-10-12（#7） |
+| D2 | リージョン | **東京案 / US 集約案をスパイクで実測して決める**（2.1 の判定基準） | 2026-10-12（#17）。決定後に結果を追記 |
+| D3 | 通知先 | メールのみで開始。チャットは任意（要否を個別判断。採るなら webhook は Secret Manager） | 2026-10-12（#17） |
+| D4 | 生 HTML の保存クラス・期間 | **GCS Standard、期限なし**（Nearline / Archive へは移さない。再処理の元データ） | 2026-10-12（#17） |
+| D5 | `jikken` と `PaymentInfo`（課金エクスポート）の扱い | `jikken` は削除、`PaymentInfo` はコスト監視に使うので残す（US のまま） | 2026-10-12（#7） |
+| D6 | 過去データ補正（#4）の時期 | **データ移行とは別ステップ**（3b）。元データのまま移して検証してから補正する | 2026-10-12（#17） |
+| D7 | BigQuery のタイムトラベル期間 | 既定の 7 日のまま | 2026-10-12（#7） |
+| D8 | 構成の規模 | 最小構成を基準（ingest 1 サービス、IAP 直接設定、アラート 1〜2 本、Terraform root module 1 つ）。セキュリティ必須項目は削らない | 2026-10-12（#17） |
+| D9 | download_jpx のメモリ | 512MB に変更済み（依存更新で 256MB を超えたため） | 2026-10-12 |
+| D10 | 部分書き込み・重複の扱い | 追記のみ + `ingest_runs` の完了記録で最新版を選ぶビュー（3.1） | 2026-10-12（#17） |
+
+## 10. 設計レビューの反映状況
+
+#17 の設計レビュー（取り込み・データと移行・監視・セキュリティの 4 観点のレビューと、それに伴うコスト・代替案の指摘）の扱い。block / major はすべて反映した。
+
+| 観点 | 主な指摘 | 反映先 |
 |---|---|---|
-| D1 | ビューアーを自前の Cloud Run にするか、Looker Studio にするか | Cloud Run（スマイルカーブ等の既存チャートを再現するため） |
-| D2 | BigQuery を東京へ移すか、US のままにするか | 東京へ移す（他のリソースと同じ場所にし、リージョン間通信をなくす） |
-| D3 | 通知先 | まずメールで開始する。チャット（Discord / Slack 等）はフェーズ 0 の実装時に決めて追加する |
-| D4 | 生 HTML の保存期間 | 期限なし（Archive クラスで低コスト。再処理の元データになる） |
-| D5 | `jikken` と `PaymentInfo`（課金エクスポート）の扱い | `jikken` は削除、`PaymentInfo` はコスト監視に使うので残す |
-| D6 | 移行中の過去データ補正（#4）の時期 | データ移行（フェーズ 3）と同時に行う |
-| D7 | BigQuery のタイムトラベル期間 | 既定の 7 日のまま（物理サイズ課金ではタイムトラベル分も課金されるが、追記中心のため影響は小さい） |
+| 取り込み | 完了記録 `ingest_runs`・取りこぼし回収、`ifGenerationMatch=0` による冪等化、タイムアウト・リトライ 0、Storage Write API に頼らない重複対策、スナップショットの識別子と保存条件、取引カレンダーをコード側に、CPU 0.5・高速経路、失敗の分類・行数下限、再処理の置換方法、解析の純粋性 | 3.1 |
+| データ・移行 | コピーは一時データセット経由で T0 前だけ INSERT、#4 を別ステップに（フィンガープリントで検証）、1 時間足の MERGE 化、パーティション必須、スキーマ追加、期間と完了判定、5a / 5b 分割、bootstrap とフェーズ 0 の順序 | 3.2、6 |
+| 監視 | アラート課金に合わせて 1〜2 本に集約、生存と鮮度の分離・しきい値、品質検査の即時 / 日次の分担、runbook | 3.4、4.1 |
+| セキュリティ | WIF 条件の数値 ID 化、`sa-tf-plan` / `sa-tf-apply` 分割と Environment、apply 権限の制限と bootstrap 分離、IAP 直接設定と OAuth クライアントの手作業化、Editor・`service_account` 必須、ingress internal、公開関数・旧 SA 鍵の早期対応、state の秘匿情報、バケット設定、サプライチェーン | 3.5、4 |
+| コスト | 集計基準・無料枠の共有・各項目の作り直し | 7 |
+| 代替案 | 第2世代関数を退ける理由の修正、US 集約案の追加 | 8、2.1 |
+
+一部だけ反映・反映しなかったもの:
+
+- **`.gitignore` への `*.tfstate` 等の追加**: 方針だけ書き（3.5）、実際の追加は Terraform を置く実装の PR で行う
+- **`docs/runbook.md`**: 項目だけ挙げ（4.1）、本体は実装時に作る（対象の手順がまだ無いため）
+- **再処理ジョブ用の SA を分けるか**: 最小構成のため `sa-ingest` と共用に決めた
+- **回収処理の起動元**: Scheduler を増やさず ingest サービス内（毎時 0 分）で行い、Cloud Run ジョブは手動の再処理専用にした
+- **EPIC（#16）の子 Issue・終了条件の見直し**: 本資料の移行計画に反映し、Issue の整理は EPIC 側で行う
+- 未確認のまま残した点（実装・スパイク時に確認）: 保存条件の新旧で件数がどれだけ変わるか、Storage Write API での 3 テーブル一括コミット、`modifiedGrantsByRole` 条件の構文・動作、IAP の OAuth クライアント情報が state に入るか、IAP 直接設定の GA 時期、ログ一致条件のアラート料金、判定基準の数値（30%・1 ポイント）の妥当性

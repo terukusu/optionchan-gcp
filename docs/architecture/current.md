@@ -146,7 +146,7 @@ sequenceDiagram
 
 | リソース | 種別 | リージョン | ランタイム | トリガー | メモリ / タイムアウト | 最終デプロイ | ソース |
 |---|---|---|---|---|---|---|---|
-| `download_jpx` | Cloud Functions 第1世代 | us-east1 | python311 | Pub/Sub `minutely_task` | 256MB / 60s | 2024-08-06 | `functions/` |
+| `download_jpx` | Cloud Functions 第1世代 | us-east1 | python311 | Pub/Sub `minutely_task` | 512MB / 60s（2026-10-12 に 256MB から変更。依存更新でメモリ超過） | 2026-10-12 | `functions/` |
 | `load_jpx_into_bq` | Cloud Functions 第1世代 | us-east1 | python311 | GCS `optionchan` finalize | 256MB / 60s | 2024-08-06 | `functions/` |
 | `insert_ohlc` | Cloud Functions 第1世代 | us-east1 | **python37** | Pub/Sub `create_timeframe` | 128MB / 540s | 2023-04-25 | `functions_py/timeframe/` |
 | `smile_data` | Cloud Functions 第1世代 | us-east1 | **python37** | HTTP | 256MB / 60s | 2019-05-13 | `functions/` |
@@ -200,7 +200,8 @@ BigQuery `optionchan` のテーブル（2026-10-12 時点）:
 | ビューアー（App Engine） | IAP で Google ログインを要求 |
 | App Engine → HTTP 関数 | 関数は `allUsers` に invoker を付与（誰でも呼び出せる）。関数内で `Authorization: Bearer` を `auth.txt` の共通パスワードと照合 |
 | 共通パスワード | `auth.txt`（gitignore 済み）を `functions/`・`functions_py/atm_iv/`・`appengine/` に置いてデプロイ。デプロイされたソース zip に平文で含まれる（#3） |
-| サービスアカウント | 実行はすべて App Engine デフォルト SA。別に `optionchan` SA があり（BigQuery 管理者・Datastore オーナー・Storage オブジェクト管理者）、SA 鍵が発行されている |
+| サービスアカウント | 実行はすべて App Engine デフォルト SA。別に `optionchan` SA があり（BigQuery 管理者・Datastore オーナー・Storage オブジェクト管理者）、SA 鍵が発行されている（2019 年）。Compute Engine / App Engine のデフォルト SA には `roles/editor` が付いている |
+| プロジェクト | 組織に属さない（IAP の OAuth クライアントをプログラムで作れない制約に関係） |
 
 ### 4.5 監視・ログ
 
