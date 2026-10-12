@@ -173,7 +173,7 @@ sequenceDiagram
 | リソース | 場所 | 内容 |
 |---|---|---|
 | GCS `optionchan` | us-east1 | 取り込みの中継。`{spot,future,option}_price_YYYYMMDDHHMMSS.json.gz`。作成 3 日後に自動削除（`lifecycle.json`）。約 4,100 ファイル / 34MB |
-| BigQuery dataset `optionchan` | US | 本番データ（下表） |
+| BigQuery dataset `optionchan` | US | 本番データ（下表）。保存料金は 2026-10-12 に論理サイズ課金から物理サイズ課金へ切り替えた（`option_price` は論理 78GB / 物理 4.8GB） |
 | Datastore（Datastore モード） | asia-northeast1 | `optionchan` / `prev_future_price` の 1 エンティティのみ（前回の先物価格） |
 | BigQuery dataset `jikken` / GCS `jikken` | US / us-east1 | 2019 年の実験用。GCS は約 6.5GB |
 | BigQuery dataset `PaymentInfo` | US | 課金データのエクスポート先（optionchan 本体とは無関係） |
