@@ -214,9 +214,9 @@ flowchart LR
 
 - プロバイダの属性条件は数値 ID（`assertion.repository_id` / `repository_owner_id`）で絞る
 - `sa-tf-apply` は `principal://…/subject/repo:terukusu/optionchan-gcp:environment:prod` にだけ許可。Environment `prod` は `master` のみ・required reviewer
-- `pull_request_target` / `workflow_run` は使わない。fork からの PR はすべて承認必須、workflow の既定権限は read、`id-token: write` は job 単位
-- `master` にブランチ保護、Actions による PR 承認を無効化（フェーズ 0 で設定・確認）
-- サプライチェーン: Actions は SHA ピン留め（必須化）と許可アクションの限定、`uv.lock` はハッシュ付き、Dependabot か Renovate、ベースイメージとデプロイは digest 固定、Artifact Registry にクリーンアップポリシー
+- `pull_request_target` / `workflow_run` は使わない。fork からの PR はすべて承認必須、workflow の既定権限は read（この 2 つは #22 で設定済み）、`id-token: write` は job 単位
+- `master` にブランチ保護、Actions による PR 承認を無効化、secret scanning と push protection を有効化（フェーズ 0 で設定・確認。#22、手順は runbook の「GitHub 設定」）
+- サプライチェーン: Actions は SHA ピン留め（必須化）と許可アクションの限定（この 2 つは #22 で設定済み）、`uv.lock` はハッシュ付き、Dependabot か Renovate、ベースイメージとデプロイは digest 固定、Artifact Registry にクリーンアップポリシー
 
 **公開面・秘匿情報・バケット**
 
@@ -248,6 +248,8 @@ infra/
 アラート（M1・M2）ごとの一次対応、Scheduler の停止 / 再開、取引カレンダーの更新（年 2 回）、期間指定の再処理、JPX の形式変更時・BigQuery 障害時の対応、tfstate のロック解除・復旧、IAP OAuth クライアントの設定。
 
 「コスト」（予算・クエリ量上限の確認と変更、超過時の一次対応）は #21 で作成済み。
+
+「GitHub 設定」（設定値の確認、許可アクションの追加、緊急時の直接 push）は #22 で作成済み。
 
 「サービスアカウント鍵」（最終認証日時の確認、無効化と戻し方、無効化後の確認）は #23 で作成済み。
 

@@ -275,3 +275,69 @@ GROUP BY d ORDER BY d'
 ```
 
 クエリの書き間違いで 0 件を得ていないか、`severity>=ERROR` だけの検索（`--limit=1`）が動くことを一度見る。エラーが出たら上の「戻す」を行い、Issue にエラー種別と件数だけをコメントする。
+
+## GitHub 設定
+
+リポジトリ `terukusu/optionchan-gcp` の設定（#22。設計は `docs/architecture/target.md` 3.5 の CI 項目）。所有者 1 人で、PR は所有者が `gh pr merge --merge` でマージする前提。変更・確認は `gh api`（所有者の権限が必要）。
+
+| 項目 | 設定 |
+|---|---|
+| `master` のブランチ保護（クラシック） | PR 必須・承認数 0、`enforce_admins` 有効、force push・削除禁止。status check は #10 で追加 |
+| workflow の既定権限 | `read`。Actions による PR 承認は無効 |
+| fork からの PR の workflow 実行 | 外部の貢献者はすべて承認必須 |
+| 使えるアクション | GitHub 製のみ + `patterns_allowed` に列挙したもの、SHA ピン留め必須 |
+| secret scanning | 有効（push protection も有効） |
+
+承認数を 1 以上にすると自分の PR をマージできなくなる。`require_last_push_approval`（最後の push を別の人が承認）も同じ理由で `false` にする。
+
+以下の節では、先に `R=repos/terukusu/optionchan-gcp` を設定しておく。
+
+### ブランチ保護の設定
+
+PUT は保護設定の全体を置き換えるので、項目を足すとき（#10 で status check を足すなど）も、この JSON 全体に足して送る。
+
+```sh
+gh api -X PUT $R/branches/master/protection --input - <<'JSON'
+{"required_status_checks":null,
+ "enforce_admins":true,
+ "required_pull_request_reviews":{"dismiss_stale_reviews":false,"require_code_owner_reviews":false,"required_approving_review_count":0,"require_last_push_approval":false},
+ "restrictions":null,
+ "required_linear_history":false,"allow_force_pushes":false,"allow_deletions":false,
+ "block_creations":false,"required_conversation_resolution":false,"lock_branch":false,"allow_fork_syncing":false}
+JSON
+```
+
+### 確認
+
+すべて `true` であること。
+
+```sh
+gh api $R/branches/master/protection --jq '.enforce_admins.enabled == true and .allow_force_pushes.enabled == false and .allow_deletions.enabled == false and .required_pull_request_reviews.required_approving_review_count == 0 and .required_pull_request_reviews.require_last_push_approval == false and .required_pull_request_reviews.require_code_owner_reviews == false and (.required_linear_history.enabled // false) == false and (.lock_branch.enabled // false) == false and .restrictions == null'
+gh api $R/actions/permissions/workflow --jq '.default_workflow_permissions == "read" and .can_approve_pull_request_reviews == false'
+gh api $R/actions/permissions/fork-pr-contributor-approval --jq '.approval_policy == "all_external_contributors"'
+gh api $R/actions/permissions --jq '.enabled == true and .allowed_actions == "selected" and .sha_pinning_required == true'
+gh api $R/actions/permissions/selected-actions --jq '.github_owned_allowed == true and .verified_allowed == false'
+gh api $R --jq '.security_and_analysis.secret_scanning.status == "enabled" and .security_and_analysis.secret_scanning_push_protection.status == "enabled"'
+```
+
+### 許可アクションを足すとき
+
+`patterns_allowed` は PUT で全体が置き換わるので、今の一覧に足した配列を送る（下の例の `owner/repo@*` は書き換える。そのまま送ると既存の一覧が消える）。workflow 側は `uses: owner/repo@<40 桁の SHA> # vX.Y.Z` で書く。
+
+```sh
+gh api $R/actions/permissions/selected-actions --jq .patterns_allowed
+gh api -X PUT $R/actions/permissions/selected-actions --input - <<'JSON'
+{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":["owner/repo@*"]}
+JSON
+```
+
+### PR を経ずに master へ push するとき（緊急時のみ）
+
+```sh
+gh api -X DELETE $R/branches/master/protection/enforce_admins
+git push origin master        # force push はしない
+gh api -X POST $R/branches/master/protection/enforce_admins
+gh api $R/branches/master/protection --jq .enforce_admins.enabled   # true
+```
+
+戻し忘れを防ぐため 4 行を続けて実行し、最後の確認で `true` を見る。行ったことは Issue に記録する。
