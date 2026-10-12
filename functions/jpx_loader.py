@@ -3,7 +3,7 @@
 """
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime
 from pytz import timezone
 from typing import List
 import re
@@ -25,8 +25,8 @@ class JpxOptionPriceInfo:
     created_at: datetime
 
 
-REGEX_PRICE = re.compile(r'([\d\.]+)\(\d{2}/\d{2} (\d{2}:\d{2})\)')
-REGEX_OPTION_PRICE = re.compile(r'([0-9\.]+)\s*\d{2}/\d{2} (\d{2}:\d{2})')
+REGEX_PRICE = re.compile(r'([\d\.]+)\((\d{2})/(\d{2}) (\d{2}):(\d{2})\)')
+REGEX_OPTION_PRICE = re.compile(r'([0-9\.]+)\s*(\d{2})/(\d{2}) (\d{2}):(\d{2})')
 REGEX_ORDER = re.compile(r'([\d\-]+)\s*\(([\d\-]+)\)\s*([\d\-]+)\s*\(([\d\-]+)\)')
 REGEX_DIFF = re.compile(r'([+\-\d\.]+)\s*([+\-\d\.]+)%')
 REGEX_ORDER_IV = re.compile(r'(?:\-|([\d\.]+)%)\s*(?:\-|([\d\.]+)%)')
@@ -40,6 +40,27 @@ JPX_URL_NEARBY_2ND = 'https://svc.qri.jp/jpx/nkopm/1'
 JPX_URL_NEARBY_3RD = 'https://svc.qri.jp/jpx/nkopm/2'
 
 log = getLogger(__name__)
+
+
+# ページに表示された約定日時(MM/DD HH:MM, 年なし)と更新時刻から、約定日時(JST)を組み立てます。
+# 年は前年・当年・翌年(更新時刻のJSTの年基準)のうち、組み立てた日時が更新時刻に最も近いものとします。
+# (1/4 に 12/30 の約定を表示する年マタギや、12/31 23:59 の更新で 01/01 00:00 と表示される場合に対応)
+# 存在しない日付(平年の 2/29 など)になる年は候補から外します。どの年でも存在しない日付なら ValueError。
+def build_price_time(created_at, month, day, hour, minute):
+    created_at_jst = created_at.astimezone(TZ_JST)
+
+    candidates = []
+    for year in (created_at_jst.year - 1, created_at_jst.year, created_at_jst.year + 1):
+        try:
+            candidates.append(TZ_JST.localize(datetime(year, month, day, hour, minute)))
+        except ValueError:
+            # この年には存在しない日付
+            continue
+
+    if not candidates:
+        raise ValueError('invalid price time: {:02d}/{:02d} {:02d}:{:02d}'.format(month, day, hour, minute))
+
+    return min(candidates, key=lambda x: abs(x - created_at_jst))
 
 
 def load_html_from_file(file_path):
@@ -113,15 +134,8 @@ def parse_option(option_info):
 
     if m is not None:
         price = int(m.group(1))
-        price_time_str = m.group(2)
-        [pt_hour, pt_minute] = list(map(lambda x: int(x), price_time_str.split(':')))
-        pt_year = created_at.year
-        pt_month = created_at.month
-        pt_day = created_at.day
-        price_time = TZ_JST.localize(datetime(pt_year, pt_month, pt_day, pt_hour, pt_minute))
-        if price_time > created_at:
-            #  未来時刻ということは日マタギということなので日付を1日戻しておく
-            price_time -= timedelta(days=1)
+        [pt_month, pt_day, pt_hour, pt_minute] = list(map(lambda x: int(x), m.group(2, 3, 4, 5)))
+        price_time = build_price_time(created_at, pt_month, pt_day, pt_hour, pt_minute)
 
     # 前日比
     m = REGEX_DIFF.search(option_info[next(seq)])
@@ -253,16 +267,8 @@ def parse_jpx_html(html):
 
     if m is not None:
         spot_price = float(m.group(1))
-        spot_price_time_str = m.group(2)
-        [spt_hour, spt_minute] = list(map(lambda x: int(x), spot_price_time_str.split(':')))
-        spt_year = created_at.year
-        spt_month = created_at.month
-        spt_day = created_at.day
-        spot_price_time = TZ_JST.localize(datetime(spt_year, spt_month, spt_day, spt_hour, spt_minute))
-
-        if spot_price_time > created_at:
-            # 未来日ということは日マタギなので１日戻しておく
-            spot_price_time -= timedelta(days=1)
+        [spt_month, spt_day, spt_hour, spt_minute] = list(map(lambda x: int(x), m.group(2, 3, 4, 5)))
+        spot_price_time = build_price_time(created_at, spt_month, spt_day, spt_hour, spt_minute)
 
     spot_price_diff_str = spot_price_web.find('td').eq(2).text().replace(',', '')
     spot_price_diff = float(spot_price_diff_str) if spot_price_diff_str != '-' else None
@@ -292,15 +298,8 @@ def parse_jpx_html(html):
     m = REGEX_PRICE.search(future_price_str)
     if m is not None:
         future_price = int(m.group(1))
-        future_price_time_str = m.group(2)
-        [fpt_hour, fpt_minute] = list(map(lambda x: int(x), future_price_time_str.split(':')))
-        fpt_year = created_at.year
-        fpt_month = created_at.month
-        fpt_day = created_at.day
-        future_price_time = TZ_JST.localize(datetime(fpt_year, fpt_month, fpt_day, fpt_hour, fpt_minute))
-        if future_price_time > created_at:
-            # 未来日ということは日マタギなので１日戻しておく
-            future_price_time -= timedelta(days=1)
+        [fpt_month, fpt_day, fpt_hour, fpt_minute] = list(map(lambda x: int(x), m.group(2, 3, 4, 5)))
+        future_price_time = build_price_time(created_at, fpt_month, fpt_day, fpt_hour, fpt_minute)
 
     future_price_diff_str = future_price_web.find('td').eq(2).text().replace(',', '')
     future_price_diff = int(future_price_diff_str) if future_price_diff_str != '-' else None
