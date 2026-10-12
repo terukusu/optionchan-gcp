@@ -116,10 +116,18 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_SA_TF_PLAN }}
 
+      # 取り込みのイメージ（#33）: Artifact Registry にあれば digest、無ければタグ参照で plan する（ビルドは承認後の apply job）
+      - name: イメージの解決
+        id: image
+        run: .github/scripts/ingest-image.sh resolve >> "$GITHUB_OUTPUT"
+
       - name: terraform plan（prod）
         working-directory: infra/prod
         env:
           TF_VAR_alert_policy_ids: ${{ secrets.TF_ALERT_POLICY_IDS || '{}' }}
+          TF_VAR_ingest_image: ${{ steps.image.outputs.image }}
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
+          IMAGE_EXISTS: ${{ steps.image.outputs.exists }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           rc=0
@@ -136,6 +144,13 @@ jobs:
             echo "### terraform plan（infra/prod）"
             echo
             terraform show -json tfplan | jq -r "$PLAN_SUMMARY_JQ"
+            echo
+            if [ "$IMAGE_EXISTS" = true ]; then
+              digest=${TF_VAR_ingest_image##*@sha256:}
+              echo "イメージ ingest: \`${IMAGE_TAG}\` は既存（digest \`sha256:${digest:0:12}\` で plan）"
+            else
+              echo "イメージ ingest: \`${IMAGE_TAG}\` は未作成（マージ後、承認された apply job がビルド・push してから digest で apply する）"
+            fi
             echo
             echo "対象コミット: ${HEAD_SHA}（全文は公開しない。アドレスと操作のみ）"
           } > summary.md

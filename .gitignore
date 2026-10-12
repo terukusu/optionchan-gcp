@@ -271,3 +271,5 @@ tfplan
 plan.log
 apply.log
 gha-creds-*.json
+# 上の venv 用の [Ss]cripts に当たるので戻す（CI の共用スクリプト。#33）
+!.github/scripts/

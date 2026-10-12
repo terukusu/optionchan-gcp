@@ -1,7 +1,10 @@
 # Terraform 用 SA。付与は追加型（*_iam_member）だけを使う（authoritative 型は既存の binding を消す）。
 # basic の roles/viewer は使わない: UBLA バケットの既定 IAM で projectViewer が legacy の読み取りを持ち、
 # bootstrap の state まで読めてしまうため。prod が扱うリソースの predefined ロールを個別に付ける。
-# projectIamAdmin / serviceAccountUser は prod が IAM を扱う #11 で足す。
+# projectIamAdmin は付けない（#33。オーナー承認）。プロジェクト単位・バケット単位・SA 単位の付与はこの bootstrap に置き、
+# prod が作るリソース（データセット optionchan_tokyo・Cloud Run ingest）への付与だけを prod の iam.tf に置く。
+# sa-tf-apply がデータセットの IAM を変えられるのは、bigquery.user で作成した作成者（dataOwner）になるため。
+# serviceAccountUser はプロジェクト単位にせず、ingest.tf で sa-ingest / sa-scheduler の SA 単位に付ける。
 
 resource "google_service_account" "tf_plan" {
   project         = var.project_id
@@ -29,12 +32,19 @@ locals {
   plan_project_roles = toset([
     "roles/monitoring.viewer",
     "roles/artifactregistry.reader",
+    "roles/run.viewer",
+    "roles/cloudscheduler.viewer",
+    "roles/bigquery.metadataViewer",
   ])
 
+  # run.admin / cloudscheduler.admin はプロジェクト単位（Scheduler にジョブ単位の IAM が無い）。使うのは承認付きの apply だけ
   apply_project_roles = toset([
     "roles/artifactregistry.admin",
     "roles/monitoring.alertPolicyEditor",
     "roles/monitoring.notificationChannelViewer",
+    "roles/run.admin",
+    "roles/cloudscheduler.admin",
+    "roles/bigquery.user",
   ])
 }
 
