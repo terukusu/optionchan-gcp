@@ -25,13 +25,21 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * Cloud Monitoring のアラートポリシー定義（JSON）とバックテスト。作成・試験発報の手順は docs/runbook.md の「監視アラート」
 
 * tests
-  * functions のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
+  * functions・監視アラート定義・GitHub Actions の workflow のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
+
+* infra
+  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA。所有者が手で apply）と `prod`（Artifact Registry・監視アラート。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
+
+* .github/workflows
+  * `ci.yml`（PR で pytest と terraform plan）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
 
 ## テストの実行
 Python 3.11 の venv を作り、リポジトリ直下で実行する。
 
 ```bash
 python3.11 -m venv .venv
-.venv/bin/pip install -r functions/requirements.txt pytest
+.venv/bin/pip install -r functions/requirements.txt -r tests/requirements.txt
 .venv/bin/python -m pytest -q tests
 ```
+
+PR では GitHub Actions（`.github/workflows/ci.yml`）が同じテストと `terraform plan` を回し、plan の要約（アドレスと操作だけ）を PR にコメントする。

@@ -204,8 +204,8 @@ flowchart LR
 | `sa-viewer` | `optionchan_tokyo` の `dataViewer` + `bigquery.jobUser` |
 | `sa-scheduler` | ingest サービス単位の `run.invoker` |
 | `sa-sq`（定期クエリ） | `optionchan_tokyo` の `dataEditor` + `bigquery.jobUser` |
-| `sa-tf-plan` | プロジェクトの閲覧 + tfstate の読み取り（plan は `-lock=false`） |
-| `sa-tf-apply` | リソース作成・Artifact Registry への push。`projectIamAdmin` は IAM Conditions（`modifiedGrantsByRole`）で付与できるロールを限定（構文・動作は未確認、bootstrap 実装時に確認）。`serviceAccountUser` は SA 単位 |
+| `sa-tf-plan` | prod が扱うリソースの predefined 閲覧ロール（#10 時点で `monitoring.viewer`・`artifactregistry.reader`。basic の `roles/viewer` は UBLA バケットの既定 IAM で bootstrap の state まで読めるので使わない）+ prod の tfstate の `objectViewer`（plan は `-lock=false`） |
+| `sa-tf-apply` | リソース作成・Artifact Registry への push（#10 時点で `artifactregistry.admin`・`monitoring.alertPolicyEditor`・`monitoring.notificationChannelViewer` + prod の tfstate の `objectUser`）。`projectIamAdmin` は prod が IAM を扱う #11 で足し、IAM Conditions で付与できるロールを限定する: `api.getAttribute('iam.googleapis.com/modifiedGrantsByRole', []).hasOnly([...])`（ロールは最大 10 個。`hasOnly()` を `&&` / `||` で複数つながない。`setIamPolicy` を含むロールや変更可能なカスタムロールを入れない。制限できるのはプロジェクト等への付与だけで、データセットへの付与には効かない。公式ドキュメントで 2026-10 に確認済み）。`serviceAccountUser` は SA 単位 |
 
 - 再処理ジョブは最小構成のため `sa-ingest` と共用する（権限は同じで足りる）
 - Compute / App Engine のデフォルト SA に `roles/editor` が付いている。Cloud Run は SA 未指定だと Compute デフォルト SA で動くので、**全リソースで `service_account` を必須**にし CI で検出する。Editor は後片付け（6 章）で外す
@@ -242,7 +242,7 @@ infra/
 - GitHub Actions:
   - PR: テスト・lint・`terraform plan`（`sa-tf-plan`、結果を PR にコメント）
   - `master` へのマージ: ビルド・push → イメージ digest を変数に `terraform apply`（`sa-tf-apply`、Environment `prod` の承認）。デプロイ経路は Terraform 1 本にし、`gcloud run deploy` との二重管理をしない
-- Terraform 管理外（runbook に手順）: bootstrap の apply、IAP 用 OAuth クライアントの事前設定、予算アラートと BigQuery の 1 日あたりクエリ量の上限（フェーズ 0 で gcloud で設定、#21。手順は `docs/runbook.md` の「コスト」。予算は請求先アカウント側のリソース、クエリ量上限は Service Usage の consumer override で、Terraform に import するか runbook 管理のままにするかは #10 で判断）
+- Terraform 管理外（runbook に手順）: bootstrap の apply、IAP 用 OAuth クライアントの事前設定、予算アラートと BigQuery の 1 日あたりクエリ量の上限（フェーズ 0 で gcloud で設定、#21。手順は `docs/runbook.md` の「コスト」。予算は請求先アカウント側のリソース、クエリ量上限は Service Usage の consumer override。#10 で runbook 管理のままにすると決めた: 予算の請求先アカウントは他プロジェクトと共有で、CI 用 SA に請求先アカウントの権限を渡さない。クエリ量上限の変更には `serviceusage.quotaAdmin` 相当が要り、apply SA の権限が広がる）
 
 ### 4.1 runbook（`docs/runbook.md`、実装時に作成）
 
@@ -387,4 +387,4 @@ BigQuery は 2026-10-12 に物理サイズ課金へ切り替え済み（92 円 �
 - **再処理ジョブ用の SA を分けるか**: 最小構成のため `sa-ingest` と共用に決めた
 - **回収処理の起動元**: Scheduler を増やさず ingest サービス内（毎時 0 分）で行い、Cloud Run ジョブは手動の再処理専用にした
 - **EPIC（#16）の子 Issue・終了条件の見直し**: 本資料の移行計画に反映し、Issue の整理は EPIC 側で行う
-- 未確認のまま残した点（実装時に確認）: 保存条件の新旧で件数がどれだけ変わるか、Storage Write API での 3 テーブル一括コミット、`modifiedGrantsByRole` 条件の構文・動作、IAP の OAuth クライアント情報が state に入るか、IAP 直接設定の GA 時期（判定基準の数値は東京案に決定したため不要）
+- 未確認のまま残した点（実装時に確認）: 保存条件の新旧で件数がどれだけ変わるか、Storage Write API での 3 テーブル一括コミット、IAP の OAuth クライアント情報が state に入るか、IAP 直接設定の GA 時期（判定基準の数値は東京案に決定したため不要）

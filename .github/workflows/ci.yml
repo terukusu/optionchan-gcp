@@ -1,0 +1,115 @@
+# PR の検査（#10）。job 名 pytest / terraform-plan はブランチ保護の必須 status check に使う。
+# 公開リポジトリなので plan の全文はログ・コメント・artifact に出さない（アドレスと操作の要約だけ）。
+name: ci
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  TF_IN_AUTOMATION: "1"
+  # 失敗時のログ末尾に使うマスク: 9 桁以上の数字（プロジェクト番号・チャネル ID 等）と、SA 以外のメールアドレス
+  MASK_SED: >-
+    s/[0-9]{9,}/<num>/g;
+    s/@([A-Za-z0-9-]+)\.iam\.gserviceaccount\.com/__SA__\1__/g;
+    s/[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}/<email>/g;
+    s/__SA__([A-Za-z0-9-]+)__/@\1.iam.gserviceaccount.com/g
+  # terraform show -json の出力から「アドレス: 操作」と操作ごとの件数だけを Markdown にする
+  PLAN_SUMMARY_JQ: |
+    def ops:
+      (if .change.importing then ["import"] else [] end)
+      + (.change.actions
+         | if . == ["delete", "create"] or . == ["create", "delete"] then ["replace"]
+           elif . == ["no-op"] or . == ["read"] then []
+           else . end);
+    [.resource_changes[]? | {address, ops: ops} | select(.ops | length > 0)] as $rc
+    | if ($rc | length) == 0 then "差分なし（No changes）"
+      else
+        "| 操作 | 件数 |", "|---|---|",
+        ($rc | map(.ops[]) | group_by(.) | map("| \(.[0]) | \(length) |")[]),
+        "",
+        ($rc[] | "- `\(.address)`: \(.ops | join(", "))")
+      end
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: 依存のインストール
+        run: python -m pip install -r functions/requirements.txt -r tests/requirements.txt
+      - name: pytest
+        run: python -m pytest -q tests
+
+  terraform-plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.16.4
+          # wrapper は stdout を step 出力に載せるので使わない
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive infra
+      - name: bootstrap の validate（CI からは apply しない）
+        run: |
+          terraform -chdir=infra/bootstrap init -backend=false -input=false -no-color
+          terraform -chdir=infra/bootstrap validate -no-color
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_TF_PLAN }}
+
+      - name: terraform plan（prod）
+        working-directory: infra/prod
+        env:
+          TF_VAR_alert_policy_ids: ${{ secrets.TF_ALERT_POLICY_IDS || '{}' }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          rc=0
+          { terraform init -input=false -no-color \
+              && terraform validate -no-color \
+              && terraform plan -lock=false -input=false -no-color -out=tfplan; } > plan.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "terraform が失敗した（exit $rc）。ログの末尾（マスク済み）:"
+            tail -n 40 plan.log | sed -E "$MASK_SED"
+            exit "$rc"
+          fi
+          {
+            echo "<!-- terraform-plan-summary -->"
+            echo "### terraform plan（infra/prod）"
+            echo
+            terraform show -json tfplan | jq -r "$PLAN_SUMMARY_JQ"
+            echo
+            echo "対象コミット: ${HEAD_SHA}（全文は公開しない。アドレスと操作のみ）"
+          } > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: PR に要約を書く
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh pr comment "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --edit-last --body-file infra/prod/summary.md \
+            || gh pr comment "$PR_NUMBER" -R "$GITHUB_REPOSITORY" --body-file infra/prod/summary.md

@@ -4,7 +4,7 @@
 
 ## コスト
 
-予算アラートと BigQuery の 1 日あたりクエリ量の上限（#21）。どちらも Terraform 管理外（#10 で import するか判断する）。
+予算アラートと BigQuery の 1 日あたりクエリ量の上限（#21）。どちらも Terraform 管理外で、この runbook で管理する（#10 で判断。予算は他プロジェクトと共有の請求先アカウント側のリソースで、クエリ量上限の変更には `serviceusage.quotaAdmin` 相当が要るため、CI 用 SA に権限を渡さない）。
 
 | 項目 | 設定 |
 |---|---|
@@ -197,7 +197,7 @@ gcloud alpha services quota delete \
 
 ## 監視アラート
 
-現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。Terraform 管理外（#10 で import するか判断する）で、旧系の削除（#14）で消す。
+現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。#10 で Terraform（`infra/prod/monitoring.tf`）に取り込んだ。定義の正は `monitoring/*.json`（`tests/test_monitoring.py` で検査）で、Terraform は JSON を読んで組み立てる。変更は JSON を直して PR を出し、マージ後に deploy workflow が承認つきで反映する（「Terraform」節）。gcloud で直接変えると次の plan で差分になる。旧系の削除（#14）で消す。
 
 | 表示名 | 条件 | 拾うもの | 定義 |
 |---|---|---|---|
@@ -210,9 +210,11 @@ M2 を ERROR ログの一致にしないのは、既知のエラー（毎日 04:
 
 ### 変数
 
-「コスト」の「共通の変数」の `P` と `CH` を使う（`echo "$CH" | grep -c .` が 1 であること）。通知チャネル ID はポリシー JSON に書かず、作成時に `--notification-channels` で渡す（ファイルの設定より優先される）。
+「コスト」の「共通の変数」の `P` と `CH` を使う（`echo "$CH" | grep -c .` が 1 であること）。通知チャネル ID はポリシー JSON に書かない。Terraform は `type = "email"` の data source で引く（メールチャネルが 2 件以上になると plan がエラーになる）。下の「作成」では `--notification-channels` で渡す（ファイルの設定より優先される）。
 
 ### 作成
+
+Terraform 化（#10）前の手順の記録。今は Terraform が作るので使わない。ポリシーを消してしまい CI も使えない緊急時にだけ使い、その後「Terraform」節の「アラートの取り込み」で state を合わせる（古い ID を `terraform state rm` してから import）。
 
 同じ表示名のポリシーがあれば作らない。リポジトリ直下で実行する。
 
@@ -311,6 +313,8 @@ gcloud logging read 'resource.type="cloud_function" AND resource.labels.function
 
 作業で意図的に取り込みを止めるとき（例: Scheduler を止めるメンテナンス）は、M1 を止めておく。
 
+数時間の作業なら gcloud で止めてよい。止めている間は deploy workflow の plan に M1 の `enabled` の update が出るので、その間に apply を承認しない（承認すると M1 が有効に戻る）。作業後は必ず戻し、`gh workflow run deploy.yml --ref master` の plan が差分 0 になることを見る。何日も止めるときは `monitoring/m1-liveness.json` の `enabled` を `false` にする PR で行う（`tests/test_monitoring.py` の `enabled` の検査も合わせて直し、戻す PR で元に戻す）。
+
 ```sh
 ID=$(gcloud monitoring policies list --project=$P --filter='displayName:"optionchan: M1"' --format='value(name)')
 echo "$ID" | grep -c .   # 1 であること
@@ -321,7 +325,9 @@ gcloud monitoring policies update "$ID" --enabled --project=$P
 
 ### 削除（切り戻し・#14）
 
-「試験発報」の削除と同じループで、表示名を `optionchan: M1 生存（download_jpx の起動が 15 分無い）` と `optionchan: M2 エラー（取り込み関数の失敗）` にする。別サーバー用の既存ポリシーは表示名が `optionchan: ` で始まらないので対象にならない。
+Terraform で管理しているので、`infra/prod/monitoring.tf` の `alert_policies` から消す（2 本とも消すなら `monitoring.tf` ごと消す）PR を出し、承認後の apply で削除する（`deletion_policy` は既定の `DELETE`）。gcloud で直接消すと、次の plan で create になる。
+
+Terraform が使えないときは「試験発報」の削除と同じループで、表示名を `optionchan: M1 生存（download_jpx の起動が 15 分無い）` と `optionchan: M2 エラー（取り込み関数の失敗）` にして消し、`terraform state rm 'google_monitoring_alert_policy.this["m1"]'`（m2 も）で state から外す。別サーバー用の既存ポリシーは表示名が `optionchan: ` で始まらないので対象にならない。
 
 ### 検知できないもの
 
@@ -418,10 +424,12 @@ GROUP BY d ORDER BY d'
 
 | 項目 | 設定 |
 |---|---|
-| `master` のブランチ保護（クラシック） | PR 必須・承認数 0、`enforce_admins` 有効、force push・削除禁止。status check は #10 で追加 |
+| `master` のブランチ保護（クラシック） | PR 必須・承認数 0、`enforce_admins` 有効、force push・削除禁止。必須 status check `pytest` / `terraform-plan`（#10、strict なし） |
 | workflow の既定権限 | `read`。Actions による PR 承認は無効 |
 | fork からの PR の workflow 実行 | 外部の貢献者はすべて承認必須 |
-| 使えるアクション | GitHub 製のみ + `patterns_allowed` に列挙したもの、SHA ピン留め必須 |
+| 使えるアクション | GitHub 製 + `patterns_allowed` に列挙したもの（`hashicorp/setup-terraform@*`、`google-github-actions/auth@*`。#10）、SHA ピン留め必須 |
+| Environment `prod` | `master` のみ、required reviewer は所有者（自己承認可）。deploy workflow の `apply` job が使う（#10） |
+| secret / variables | secret `GCP_WIF_PROVIDER`（WIF プロバイダの完全名。プロジェクト番号を含む）、variables `GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY`（SA のメール）、secret `TF_ALERT_POLICY_IDS`（アラート取り込み用の一時的な値。Actions のログに出さないため secret にする。取り込み後に削除）（#10） |
 | secret scanning | 有効（push protection も有効） |
 
 承認数を 1 以上にすると自分の PR をマージできなくなる。`require_last_push_approval`（最後の push を別の人が承認）も同じ理由で `false` にする。
@@ -430,11 +438,11 @@ GROUP BY d ORDER BY d'
 
 ### ブランチ保護の設定
 
-PUT は保護設定の全体を置き換えるので、項目を足すとき（#10 で status check を足すなど）も、この JSON 全体に足して送る。
+PUT は保護設定の全体を置き換えるので、項目を足すときも、この JSON 全体に足して送る。status check（#10）は、PR の CI が一度成功してから入れる（check が一度も報告されていないと、名前の誤りに気づけない）。
 
 ```sh
 gh api -X PUT $R/branches/master/protection --input - <<'JSON'
-{"required_status_checks":null,
+{"required_status_checks":{"strict":false,"checks":[{"context":"pytest"},{"context":"terraform-plan"}]},
  "enforce_admins":true,
  "required_pull_request_reviews":{"dismiss_stale_reviews":false,"require_code_owner_reviews":false,"required_approving_review_count":0,"require_last_push_approval":false},
  "restrictions":null,
@@ -453,6 +461,10 @@ gh api $R/actions/permissions/workflow --jq '.default_workflow_permissions == "r
 gh api $R/actions/permissions/fork-pr-contributor-approval --jq '.approval_policy == "all_external_contributors"'
 gh api $R/actions/permissions --jq '.enabled == true and .allowed_actions == "selected" and .sha_pinning_required == true'
 gh api $R/actions/permissions/selected-actions --jq '.github_owned_allowed == true and .verified_allowed == false'
+gh api $R/branches/master/protection --jq '.required_status_checks.strict == false and ([.required_status_checks.checks[].context] | sort) == ["pytest", "terraform-plan"]'
+gh api $R/actions/permissions/selected-actions --jq '(.patterns_allowed | sort) == ["google-github-actions/auth@*", "hashicorp/setup-terraform@*"]'
+gh api $R/environments/prod --jq '.deployment_branch_policy == {"protected_branches": false, "custom_branch_policies": true} and ([.protection_rules[] | select(.type == "required_reviewers")] | length) == 1'
+gh api $R/environments/prod/deployment-branch-policies --jq '[.branch_policies[] | {name, type}] == [{"name": "master", "type": "branch"}]'
 gh api $R --jq '.security_and_analysis.secret_scanning.status == "enabled" and .security_and_analysis.secret_scanning_push_protection.status == "enabled"'
 ```
 
@@ -477,3 +489,174 @@ gh api $R/branches/master/protection --jq .enforce_admins.enabled   # true
 ```
 
 戻し忘れを防ぐため 4 行を続けて実行し、最後の確認で `true` を見る。行ったことは Issue に記録する。
+
+## Terraform
+
+GCP のリソースを Terraform で管理する（#10。設計は `docs/architecture/target.md` 3.5）。terraform 1.16.4、google プロバイダ 8.4.0 に固定（`versions.tf`、`.terraform.lock.hcl`、workflow）。ローカルでは `mise exec terraform@1.16.4 -- terraform` で実行する。
+
+| ルート | 中身 | apply する人 | state | state を読める主体 |
+|---|---|---|---|---|
+| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限 | 所有者がローカルから（CI は fmt / validate だけ） | `gs://optionchan-222710-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
+| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2 | CI（deploy workflow、Environment `prod` の承認後） | `gs://optionchan-222710-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
+
+予算・クエリ量上限は Terraform 管理外（「コスト」）。state には通知チャネルのメールアドレスなどが入るので、state・plan の全文・ログをリポジトリ・Issue・PR に貼らない。CI も plan の全文は出さず、アドレスと操作だけを要約する。
+
+### 流れ
+
+1. PR を出すと `ci` workflow が `pytest` と `terraform-plan` を回す（どちらも必須 status check）。`terraform-plan` は fmt・bootstrap の validate・prod の plan（`sa-tf-plan`、`-lock=false`）を行い、「アドレス: 操作」の要約を PR にコメントする
+2. 要約に意図しない update / delete / replace が無いことを見てからマージする
+3. マージすると `deploy` workflow の `plan` job が差分を見る。差分が無ければ終わり。あれば `apply` job が Environment `prod` の承認を待つ
+4. Actions の画面（または下のコマンド）で承認すると、`apply` job が `sa-tf-apply` でもう一度 plan して適用する（plan ファイルは公開 artifact にしない）。承認から適用までの間に master が進んだ場合は、その分も含めて適用される（`concurrency` で直列）
+
+```sh
+RUN=<run_id>   # gh run list --workflow=deploy.yml --limit=3
+gh api $R/actions/runs/$RUN/pending_deployments --jq '.[] | {env: .environment.name, can: .current_user_can_approve}'
+ENV_ID=$(gh api $R/actions/runs/$RUN/pending_deployments --jq '.[0].environment.id')
+jq -n --argjson id "$ENV_ID" '{environment_ids: [$id], state: "approved", comment: "plan の要約を確認"}' \
+  | gh api -X POST $R/actions/runs/$RUN/pending_deployments --input - >/dev/null
+```
+
+差分 0 の確認や再実行は `gh workflow run deploy.yml --ref master`（Environment `prod` は `master` からしか使えない）。
+
+### 共通の変数
+
+「コスト」の `P` に加えて、リポジトリ直下で設定する。GitHub の数値 ID・プロジェクト番号・WIF プロバイダの完全名は表示しない（変数・パイプで渡す）。
+
+```sh
+export CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false
+P=optionchan-222710
+R=repos/terukusu/optionchan-gcp
+TF="mise exec terraform@1.16.4 -- terraform"
+# ADC が無いときだけ（トークンは 1 時間で切れる）
+export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
+```
+
+### bootstrap の初回 apply
+
+state の置き場（bootstrap 用バケット）を先に gcloud で作り、`infra/bootstrap/imports.tf` で取り込む（local state を作らない）。
+
+```sh
+# 0. 作業前の記録（スクラッチに保存。貼らない）
+gcloud monitoring policies list --project=$P --filter='displayName:"optionchan: M"' --format=json > <scratch>/policies-before.json
+gcloud functions list --project=$P --format="value(name,status,runtime)" > <scratch>/functions-before.txt
+
+# 1. bootstrap 用バケット
+gcloud storage buckets create gs://$P-tfstate-bootstrap --project=$P --location=asia-northeast1 \
+  --default-storage-class=STANDARD --uniform-bucket-level-access --public-access-prevention
+gcloud storage buckets update gs://$P-tfstate-bootstrap --versioning
+
+# 2. GitHub の数値 ID（コード・tfvars に置かない）
+export TF_VAR_github_repository_id=$(gh api $R --jq .id)
+export TF_VAR_github_owner_id=$(gh api $R --jq .owner.id)
+
+# 3. plan → 要約を見てから apply
+$TF -chdir=infra/bootstrap init -input=false
+$TF -chdir=infra/bootstrap plan -input=false -no-color -out=b.tfplan > <scratch>/b-plan.log
+$TF -chdir=infra/bootstrap show -json b.tfplan \
+  | jq -r '.resource_changes[] | select(.change.actions != ["no-op"] or .change.importing) | "\(.address): \(.change.actions | join(","))\(if .change.importing then " (import)" else "" end)"'
+$TF -chdir=infra/bootstrap apply -input=false b.tfplan
+rm -f infra/bootstrap/b.tfplan
+
+# 4. 差分 0（exit 0）
+$TF -chdir=infra/bootstrap plan -input=false -detailed-exitcode > /dev/null; echo $?
+```
+
+手順 3 の要約の目安: import 1（`google_storage_bucket.tfstate["bootstrap"]`。lifecycle_rule の追加で update を伴う）、create は API 7・バケット 1・プール・プロバイダ・SA 2・IAM 9（プロジェクト 5、SA 2、バケット 2）、delete 0。
+
+確認（すべて期待どおりであること）:
+
+```sh
+for b in $P-tfstate $P-tfstate-bootstrap; do
+  gcloud storage buckets describe gs://$b --format=json \
+    | jq -c '{name, location, versioning: (.versioning_enabled // false), ubla: .uniform_bucket_level_access, pap: .public_access_prevention}'
+done   # ASIA-NORTHEAST1、true、true、enforced
+gcloud iam workload-identity-pools providers describe github-actions --project=$P --location=global \
+  --workload-identity-pool=github --format='value(attributeCondition)' | grep -c 'repository_owner_id'   # 1
+gcloud iam service-accounts get-iam-policy sa-tf-apply@$P.iam.gserviceaccount.com --format=json \
+  | jq '[.bindings[] | select(.role == "roles/iam.workloadIdentityUser") | .members[]] | length == 1 and (.[0] | endswith(":environment:prod"))'   # true
+gcloud storage buckets get-iam-policy gs://$P-tfstate-bootstrap --format=json \
+  | jq '[.bindings[].members[] | select(test("sa-tf-"))] | length'   # 0
+```
+
+変更時（権限の追加など）は PR でコードを直し、マージ後に所有者が手順 2〜4 を行う。CI は bootstrap を apply しない。
+
+### GitHub の設定（bootstrap の後、PR を出す前）
+
+```sh
+# 許可アクション（今の一覧に足す。「GitHub 設定」の「許可アクションを足すとき」）
+gh api -X PUT $R/actions/permissions/selected-actions --input - <<'JSON'
+{"github_owned_allowed":true,"verified_allowed":false,"patterns_allowed":["hashicorp/setup-terraform@*","google-github-actions/auth@*"]}
+JSON
+
+# secret・variables（値を表示しない）
+$TF -chdir=infra/bootstrap output -raw wif_provider_name | gh secret set GCP_WIF_PROVIDER -R terukusu/optionchan-gcp
+$TF -chdir=infra/bootstrap output -raw sa_tf_plan_email | gh variable set GCP_SA_TF_PLAN -R terukusu/optionchan-gcp
+$TF -chdir=infra/bootstrap output -raw sa_tf_apply_email | gh variable set GCP_SA_TF_APPLY -R terukusu/optionchan-gcp
+
+# Environment prod（master のみ、所有者が承認）
+jq -n --argjson id "$(gh api user --jq .id)" \
+  '{wait_timer: 0, prevent_self_review: false, reviewers: [{type: "User", id: $id}],
+    deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}}' \
+  | gh api -X PUT $R/environments/prod --input - >/dev/null
+gh api -X POST $R/environments/prod/deployment-branch-policies -f name=master -f type=branch >/dev/null
+```
+
+`TF_ALERT_POLICY_IDS` は下の「アラートの取り込み」で設定する。必須 status check は PR の CI が一度成功してから「GitHub 設定」の「ブランチ保護の設定」で入れる。確認は「GitHub 設定」の「確認」。
+
+### アラートの取り込み（#10、一度だけ）
+
+#9 で gcloud から作った M1・M2 を `infra/prod/imports.tf` の `import` ブロックで取り込む。ポリシー ID はコードに書かず、GitHub secret で渡す（variable だと Actions のログの env 表示に出る）。
+
+```sh
+gcloud monitoring policies list --project=$P --format=json \
+  | jq -c '[.[] | select(.displayName | startswith("optionchan: M1 ") or startswith("optionchan: M2 "))
+            | {key: (if (.displayName | startswith("optionchan: M1 ")) then "m1" else "m2" end), value: .name}]
+           | from_entries' \
+  | tee >(jq -r 'keys | join(",")' >&2) \
+  | gh secret set TF_ALERT_POLICY_IDS -R terukusu/optionchan-gcp   # 標準エラーに m1,m2 と出ること
+gh secret list -R terukusu/optionchan-gcp | grep -c '^TF_ALERT_POLICY_IDS'   # 1
+```
+
+PR の要約が `google_monitoring_alert_policy.this["m1"]` / `["m2"]` は `import` だけ（update が付かない）であることを見てマージする。update が付いていたら JSON → HCL の写し方（`infra/prod/monitoring.tf`）を直す。apply 後、ポリシーの `name` が作業前の記録と同じで、「監視アラート」の「確認」が `ok: true` であることを見る。
+
+取り込みが済んだら secret を消し、差分 0 を確認する（`for_each` が空になり import は何もしない。`import` ブロックと変数は #11 以降の PR で消してよい）。
+
+```sh
+gh secret delete TF_ALERT_POLICY_IDS -R terukusu/optionchan-gcp
+gh workflow run deploy.yml --ref master   # plan が差分なし、apply は skip
+```
+
+### CI が使えないときの手動 plan / apply
+
+WIF・GCP・GitHub Actions の障害で CI が動かないときは、所有者の資格情報でローカルから行う（state のロックは apply が取る）。
+
+```sh
+$TF -chdir=infra/prod init -input=false
+$TF -chdir=infra/prod plan -input=false -no-color -out=p.tfplan > <scratch>/p-plan.log   # 要約は上の jq で見る
+$TF -chdir=infra/prod apply -input=false p.tfplan
+rm -f infra/prod/p.tfplan
+```
+
+CI の障害で PR がマージできないときは、まず必須 status check を外す（「ブランチ保護の設定」の JSON を `"required_status_checks":null` にして PUT）。復旧したら戻す。
+
+### state のロック解除と復旧
+
+apply が途中で止まって `Error acquiring the state lock` になったら、他に apply が動いていないこと（`gh run list --workflow=deploy.yml`）を見てから解除する。Lock ID はエラーメッセージに出る。
+
+```sh
+$TF -chdir=infra/prod force-unlock <LOCK_ID>
+```
+
+state を壊したときは、バケットの世代（versioning、10 世代保持）から戻す。
+
+```sh
+gcloud storage ls -a gs://$P-tfstate/prod/default.tfstate   # 世代の一覧（#<generation> 付き）
+gcloud storage cp gs://$P-tfstate/prod/default.tfstate#<generation> gs://$P-tfstate/prod/default.tfstate
+$TF -chdir=infra/prod plan -input=false -detailed-exitcode > /dev/null; echo $?   # 0 であること
+```
+
+### 残るリスク
+
+- Editor を持つデフォルト SA（4 つ）はプロジェクトの `roles/editor` で両方の tfstate バケットを読み書きできる（バケットの IAM では防げない）。#15 で Editor を外すまで残る
+- `sa-tf-plan` はこのリポジトリのどの workflow・ブランチからも借用できる（PR の plan 用）。push できるのは所有者だけで、fork の PR は secret を受け取れない。fork・Dependabot の PR では `terraform-plan` が失敗して必須 check で止まる（Dependabot を入れるとき（#11 以降）に扱いを決める）
+- `sa-tf-apply` の `roles/artifactregistry.admin` はプロジェクト単位（既存の `gcf-artifacts` も消せる）。apply は承認つきで、Terraform が管理しないリソースには触れない。#11 で見直す
