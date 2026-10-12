@@ -1,14 +1,16 @@
-from logging import StreamHandler, Formatter, DEBUG, INFO
 import logging
 
 
 def getLogger(name):
-    # log settings
-    log = logging.getLogger(name)
-    handler = StreamHandler()
-    handler.setLevel(DEBUG)
-    handler.setFormatter(Formatter('%(asctime)s- %(name)s - %(levelname)s - %(message)s'))
-    log.setLevel(DEBUG)
-    log.addHandler(handler)
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.DEBUG)  # ローカルでのデバッグ用
 
-    return log
+    # ハンドラーが既に存在する場合は追加しない
+    if not logger.handlers:
+        # Cloud Functions環境に適したハンドラー設定
+        handler = logging.StreamHandler()
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
