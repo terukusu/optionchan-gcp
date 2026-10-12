@@ -603,6 +603,16 @@ gh api -X POST $R/environments/prod/deployment-branch-policies -f name=master -f
 
 `TF_ALERT_POLICY_IDS` は下の「アラートの取り込み」で設定する。必須 status check は PR の CI が一度成功してから「GitHub 設定」の「ブランチ保護の設定」で入れる。確認は「GitHub 設定」の「確認」。
 
+### prod の state の初期化（#10、一度だけ）
+
+`sa-tf-plan` は prod の state を読むだけなので、state がまだ無いと CI の `terraform init` が空の state とロックを書けずに 403 で失敗する。最初の PR を出す前に、所有者の資格情報で一度だけ `init` して空の state を作る。
+
+```sh
+export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)   # ADC が無いとき
+$TF -chdir=infra/prod init -input=false
+gcloud storage ls gs://$P-tfstate/prod/   # default.tfstate があること
+```
+
 ### アラートの取り込み（#10、一度だけ）
 
 #9 で gcloud から作った M1・M2 を `infra/prod/imports.tf` の `import` ブロックで取り込む。ポリシー ID はコードに書かず、GitHub secret で渡す（variable だと Actions のログの env 表示に出る）。
