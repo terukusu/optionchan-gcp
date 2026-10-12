@@ -85,7 +85,7 @@ jobs:
           docker run --rm ingest:ci python -c 'import optionchan_ingest.app'
           # auth.txt・functions/・テストがイメージに入っていないこと
           found=$(docker run --rm --entrypoint sh ingest:ci -c \
-            'find / -xdev \( -name auth.txt -o -name auth.json -o -path /app/functions -o -path /app/tests -o -name .git \) 2>/dev/null' | wc -l)
+            'find / -xdev \( -name auth.txt -o -name auth.json -o -path /app/functions -o -path /app/tests -o -name .git \) 2>/dev/null || true' | wc -l)
           test "$found" -eq 0
 
   terraform-plan:
