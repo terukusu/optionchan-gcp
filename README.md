@@ -33,6 +33,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 * sql
   * BigQuery の SQL。`sql/latest/` はスナップショットごとに最新の完了版を選ぶテーブル関数の本文（Terraform が読む。使い方は docs/runbook.md の「最新版の読み方」）
   * `sql/quality/`（日次の品質チェック）・`sql/legacy/`（旧系の前日分を東京へ運んで新旧を突き合わせる）は BigQuery Data Transfer Service の定期クエリの本文（#40。Terraform が読む。確認・再実行は docs/runbook.md の「日次の品質チェックと新旧の突き合わせ（#40）」）
+  * `sql/legacy_import/` は旧系の過去データを東京へ移すときに手で流す SQL（コピーの検証・移行・移行の検証、#12。Terraform は読まない。手順は docs/runbook.md の「過去データの移行（#12）」）
 
 * monitoring
   * Cloud Monitoring のアラートポリシー定義（JSON）とバックテスト。作成・試験発報の手順は docs/runbook.md の「監視アラート」（旧系）と「新しい取り込みの監視（#35）」（新系）

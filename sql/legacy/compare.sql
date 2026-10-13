@@ -68,18 +68,22 @@ legacy_option AS (
   FROM `${project}.${copy_dataset}.option_price`
   WHERE created_at >= win_start AND created_at < win_end
 ),
+-- 新系は過去データの移行（#12）で入れた旧系の行（ingest_run_id が legacy- で始まる）を除く（旧系どうしを比べないように）。
 -- 直前・直後のスナップショットを連休明けや窓の終わりでも取れるように、スナップショット・スポット・先物は 7 日前から 2 時間後まで読む（小さい表）
 new_runs AS (
   SELECT snapshot_at, page2_updated_at
   FROM `${project}.${dataset}.latest_runs`(TIMESTAMP_SUB(win_start, INTERVAL 7 DAY), TIMESTAMP_ADD(win_end, INTERVAL 2 HOUR))
+  WHERE NOT STARTS_WITH(ingest_run_id, 'legacy-')
 ),
 new_spot AS (
   SELECT price, price_time, diff, diff_rate, hv, created_at
   FROM `${project}.${dataset}.spot_price_latest`(TIMESTAMP_SUB(win_start, INTERVAL 7 DAY), TIMESTAMP_ADD(win_end, INTERVAL 2 HOUR))
+  WHERE NOT STARTS_WITH(ingest_run_id, 'legacy-')
 ),
 new_future AS (
   SELECT price, price_time, diff, diff_rate, hv, contract_month, created_at
   FROM `${project}.${dataset}.future_price_latest`(TIMESTAMP_SUB(win_start, INTERVAL 7 DAY), TIMESTAMP_ADD(win_end, INTERVAL 2 HOUR))
+  WHERE NOT STARTS_WITH(ingest_run_id, 'legacy-')
 ),
 -- option は窓の 6 時間前から 2 時間後まで（窓の境 07:00 JST = 22:00 UTC の前後。読むパーティション（UTC の日）は増えない）。
 -- 直前・直後のスナップショットがこの範囲の外なら、その候補は使わない（option_from / option_to）
@@ -89,6 +93,7 @@ new_option AS (
     bid, bid_volume, bid_iv, ask, ask_volume, ask_iv, volume, positions,
     quotation, quotation_date, delta, gamma, theta, vega, last_trading_day, created_at
   FROM `${project}.${dataset}.option_price_latest`(TIMESTAMP_SUB(win_start, INTERVAL 6 HOUR), TIMESTAMP_ADD(win_end, INTERVAL 2 HOUR))
+  WHERE NOT STARTS_WITH(ingest_run_id, 'legacy-')
 ),
 -- source:end
 option_range AS (
