@@ -1,0 +1,10 @@
+# 許可リスト方式: すべて除外してから、イメージのビルドに必要なものだけを戻す（node_modules・static/vendor・tests・.venv は入れない）
+*
+!pyproject.toml
+!uv.lock
+!package.json
+!package-lock.json
+!src/
+src/optionchan_viewer/static/vendor/
+**/__pycache__
+**/*.pyc
