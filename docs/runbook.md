@@ -1240,6 +1240,8 @@ bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json \
 
 ### 再実行・バックフィル
 
+DTS の定期クエリは作成直後に 1 回ずつ自動で実行され、4 本が同時に走る。2026-10-13 の作成時は、legacy-stage が `staged_window` を作り直している途中に legacy-copy が走り、コピー先の `staged_window` が空になった（メタデータは 1 行、クエリでは 0 行）。legacy-compare が `copy is not for the window ... (staged: null)` で失敗したら、legacy-copy を再実行してから legacy-compare を再実行する。毎朝の実行は 07:02 → 07:10 → 07:30 の順なので起きない。
+
 本番の結果テーブル・作業用データセットへの書き込みなので、実行は所有者が行う。同じ日を再実行しても行は置き換わるだけ（重複しない）。窓の日付 W（日中立会の日付、JST）の分は、`run_time` を W の UTC の 22:02 / 22:15 / 22:30（JST の W+1 日 07:02 / 07:15 / 07:30）にする。突き合わせは stage → copy → compare の順に、前の実行が `SUCCEEDED` になってから次を実行する。
 
 ```sh
