@@ -581,3 +581,169 @@ def test_real_deps_use_configured_second(monkeypatch):
     monkeypatch.setattr(app_module, "_cfg", None)
     monkeypatch.setattr(app_module, "_deps", None)
     assert app_module._real_deps().fetch_at_second == 9.0
+
+
+# --- 毎時 0 分の回収（ルート、#34） ---
+
+
+class FakeRecoveryDeps:
+    """ルートの検査用: 回収の依存の作成と一覧の呼び出しだけを記録する"""
+
+    def __init__(self, list_error=None):
+        self.calls = []
+        self.list_error = list_error
+
+    def build(self):
+        from optionchan_ingest.recovery import RecoveryDeps
+
+        self.calls.append("build")
+
+        def list_raw(start_offset, end_offset, timeout):
+            self.calls.append(("list", start_offset, end_offset))
+            if self.list_error:
+                raise self.list_error
+            return []
+
+        return RecoveryDeps("b", list_raw, _no_io, _no_io, _no_io)
+
+
+def _no_io(*args, **kwargs):
+    raise AssertionError("一覧が空なのに I/O を呼んだ")
+
+
+def _boom_recovery():
+    raise AssertionError("0 分以外で回収の依存を作った")
+
+
+@pytest.fixture
+def in_hours_client(client, monkeypatch):
+    """取引時間中のルート: 毎分の取り込みの依存は偽物（待たない）"""
+    fake = Fake()
+    monkeypatch.setattr(app_module, "_real_deps", fake.deps)
+    monkeypatch.setattr(app_module, "_recovery_deps", None)
+    return client, fake
+
+
+@pytest.mark.parametrize(
+    "fake_now, header",
+    [
+        ("2026-10-12T11:01:00+09:00", "2026-10-12T02:01:00Z"),
+        ("2026-10-12T11:59:00+09:00", None),
+        # 予定時刻のヘッダを優先する（実時刻が 0 分でも、予定時刻が 59 分なら回収しない）
+        ("2026-10-12T11:00:01+09:00", "2026-10-12T01:59:00Z"),
+    ],
+)
+def test_http_not_recovery_minute_skips_recovery(in_hours_client, monkeypatch, capsys, fake_now, header):
+    client, fake = in_hours_client
+    monkeypatch.setenv("INGEST_FAKE_NOW", fake_now)
+    monkeypatch.setattr(app_module, "_real_recovery_deps", _boom_recovery)
+    headers = {"X-CloudScheduler-ScheduleTime": header} if header else {}
+    response = client.post("/", headers=headers)
+    assert (response.status_code, response.get_json()["outcome"]) == (200, "ingested")
+    assert "recovery" not in [r["event"] for r in logs(capsys)]
+
+
+def test_http_recovery_minute_runs_after_ingest(in_hours_client, monkeypatch, capsys):
+    client, fake = in_hours_client
+    monkeypatch.setenv("INGEST_FAKE_NOW", "2026-10-12T11:00:01+09:00")
+    recovery_fake = FakeRecoveryDeps()
+    monkeypatch.setattr(app_module, "_real_recovery_deps", recovery_fake.build)
+    response = client.post("/", headers={"X-CloudScheduler-ScheduleTime": "2026-10-12T02:00:00Z"})
+    assert (response.status_code, response.get_json()["outcome"]) == (200, "ingested")
+    assert recovery_fake.calls == [
+        "build",
+        ("list", "raw/2026/10/12/20261012T0500.json.gz", "raw/2026/10/12/20261012T1101.json.gz"),
+    ]
+    records = logs(capsys)
+    assert [r["event"] for r in records][-2:] == ["ingested", "recovery"]
+    assert records[-1]["schedule_time"] == "2026-10-12T02:00:00Z"
+
+
+def test_http_recovery_uses_header_when_clock_is_late(in_hours_client, monkeypatch, capsys):
+    """実時刻が 1 分を過ぎていても（起動の遅れ）、予定時刻が 0 分なら回収する"""
+    client, fake = in_hours_client
+    monkeypatch.setenv("INGEST_FAKE_NOW", "2026-10-12T11:01:02+09:00")
+    recovery_fake = FakeRecoveryDeps()
+    monkeypatch.setattr(app_module, "_real_recovery_deps", recovery_fake.build)
+    client.post("/", headers={"X-CloudScheduler-ScheduleTime": "2026-10-12T02:00:00Z"})
+    assert "build" in recovery_fake.calls
+
+
+@pytest.mark.parametrize("where", ["build", "list"])
+def test_http_recovery_exception_does_not_change_response(in_hours_client, monkeypatch, capsys, where):
+    client, fake = in_hours_client
+    monkeypatch.setenv("INGEST_FAKE_NOW", "2026-10-12T11:00:01+09:00")
+    if where == "build":
+
+        def broken():
+            raise RuntimeError("no credentials")
+
+        monkeypatch.setattr(app_module, "_real_recovery_deps", broken)
+    else:
+        monkeypatch.setattr(app_module, "_real_recovery_deps", FakeRecoveryDeps(RuntimeError("x")).build)
+    response = client.post("/")
+    assert (response.status_code, response.get_json()) == (
+        200,
+        {"outcome": "ingested", "rows": {"spot_price": 1, "future_price": 1, "option_price": 40}},
+    )
+    records = logs(capsys)
+    assert ("ERROR", "recovery_failed") in [(r["severity"], r["event"]) for r in records]
+    assert [r["stage"] for r in records if r["event"] == "recovery_failed"] == [
+        "setup" if where == "build" else "unexpected"
+    ]
+
+
+def test_http_recovery_shares_deadline(in_hours_client, monkeypatch, capsys):
+    """通常の処理が期限の大半を使ったら、回収は始めない（同じ 45 秒の期限を共有する）"""
+    client, fake = in_hours_client
+    fake.cost = {"fetch1": 31.0}  # 残り 14 秒 < RECOVERY_MIN_REMAINING_SECONDS
+    monkeypatch.setenv("INGEST_FAKE_NOW", "2026-10-12T11:00:01+09:00")
+    recovery_fake = FakeRecoveryDeps()
+    monkeypatch.setattr(app_module, "_real_recovery_deps", recovery_fake.build)
+    assert client.post("/").status_code == 200
+    assert recovery_fake.calls == ["build"]  # 一覧を呼ばない
+    last = logs(capsys)[-1]
+    assert (last["severity"], last["event"], last["reason"]) == ("WARNING", "recovery_skipped", "no_time")
+
+
+def test_http_out_of_hours_recovery_minute(client, monkeypatch, capsys):
+    """時間外の 0 分: 毎分の取り込みの依存は作らず 204、回収（07:00 は照合も）を行う"""
+    monkeypatch.setenv("INGEST_FAKE_NOW", "2026-10-12T07:00:01+09:00")
+
+    def boom():
+        raise AssertionError("時間外に取り込みの依存を作った")
+
+    monkeypatch.setattr(app_module, "_real_deps", boom)
+    recovery_fake = FakeRecoveryDeps()
+    monkeypatch.setattr(app_module, "_real_recovery_deps", recovery_fake.build)
+    response = client.post("/", headers={"X-CloudScheduler-ScheduleTime": "2026-10-11T22:00:00Z"})
+    assert response.status_code == 204
+    assert [c[0] if isinstance(c, tuple) else c for c in recovery_fake.calls] == ["build", "list", "list"]
+    assert [r["event"] for r in logs(capsys)] == ["out_of_hours", "recovery", "raw_reconciled"]
+
+
+def test_http_out_of_hours_not_minute_0_creates_nothing(client, monkeypatch, capsys):
+    monkeypatch.setenv("INGEST_FAKE_NOW", "2026-10-12T07:01:00+09:00")
+
+    def boom():
+        raise AssertionError("時間外に取り込みの依存を作った")
+
+    monkeypatch.setattr(app_module, "_real_deps", boom)
+    monkeypatch.setattr(app_module, "_real_recovery_deps", _boom_recovery)
+    assert client.post("/", headers={"X-CloudScheduler-ScheduleTime": "2026-10-11T22:01:00Z"}).status_code == 204
+    assert [r["event"] for r in logs(capsys)] == ["out_of_hours"]
+
+
+def test_dry_run_recovery_deps_touch_nothing(client, monkeypatch, capsys):
+    """INGEST_DRY_RUN の回収は一覧が空（GCS・BigQuery に触らない）"""
+    monkeypatch.setattr(app_module, "_recovery_deps", None)
+    deps = app_module._real_recovery_deps()
+    assert deps.list_raw("a", "b", timeout=1) == []
+    with pytest.raises(AssertionError):
+        deps.completed_sources(None, None, timeout=1)
+
+
+def test_settings_bq_location_from_tables_json():
+    """クエリの場所はデータセットの場所（schema/tokyo/tables.json）。環境変数 BQ_LOCATION で上書きできる"""
+    assert settings.Settings.from_env({"RAW_BUCKET": "b"}).bq_location == "asia-northeast1"
+    assert settings.Settings.from_env({"RAW_BUCKET": "b", "BQ_LOCATION": "US"}).bq_location == "US"

@@ -7,6 +7,9 @@
 3. 2 限月ページを取得し、2 ページを封筒にして ifGenerationMatch=0 で作成（412 なら skipped_locked）
 4. 行を組み立てて構造を検査（違反は parse_failed。生 HTML は残し ingest_runs は書かない）
 5. spot_price → future_price → option_price → ingest_runs の順に Storage Write API で追記（失敗は write_failed）
+6. 予定時刻（無ければ実時刻）が JST の毎時 0 分なら、応答の前に同じ期限の残りで取りこぼしを回収し、
+   07:00 は日次の照合もする
+   （recovery.py、#34。時間外の 0 分は回収用のクライアントだけを作る。回収の結果・失敗は応答を変えない）
 全体の期限は settings.REQUEST_DEADLINE_SECONDS。各呼び出しのタイムアウトは残り時間で頭打ちにし、
 超えたら deadline_exceeded
 """
@@ -16,20 +19,19 @@ import os
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 from flask import Flask, Response, request
 
-from . import PARSER_VERSION, settings
+from . import PARSER_VERSION, recovery, settings
 from .calendar import Calendar, load_calendar, session_at
 from .io_bq import WriteFailed
 from .io_gcs import AlreadyExists, StorageFailed
 from .log import log
 from .parser import JST, JpxUnavailable, ParseError, parse_page, parse_updated_at
+from .pipeline import Deadline, DeadlineExceeded, bounded, run_row, write_snapshot
 from .snapshot import (
     FetchedPage,
     RunMeta,
@@ -68,49 +70,6 @@ class Result:
     body: dict[str, Any] = field(default_factory=dict)
 
 
-class DeadlineExceeded(Exception):
-    """リクエスト全体の期限（settings.REQUEST_DEADLINE_SECONDS）を超えた。stage は次に入ろうとした処理"""
-
-    def __init__(self, stage: str):
-        super().__init__(stage)
-        self.stage = stage
-
-
-class Deadline:
-    def __init__(self, seconds: float, monotonic: Callable[[], float]):
-        self._monotonic = monotonic
-        self._start = monotonic()
-        self._end = self._start + seconds
-
-    def elapsed_ms(self) -> int:
-        return int((self._monotonic() - self._start) * 1000)
-
-    def timeout(self, cap: float, stage: str) -> float:
-        """次の外部呼び出しのタイムアウト = min(cap, 残り時間)。残りが少なければ DeadlineExceeded"""
-        remaining = self._end - self._monotonic()
-        if remaining < settings.MIN_REMAINING_SECONDS:
-            raise DeadlineExceeded(stage)
-        return min(cap, remaining)
-
-
-# JPX・GCS の呼び出しを出すスレッド。待つのをやめた呼び出しが残っても、各呼び出しのタイムアウトで終わる
-_IO_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ingest-io")
-
-
-def _bounded(deadline: Deadline, stage: str, cap: float, fn: Callable, *args):
-    """fn(*args, timeout=t) を別スレッドで実行し、t + CALL_GRACE_SECONDS で待つのをやめて DeadlineExceeded にする。
-
-    t = min(cap, 残り時間)。fn の中のタイムアウトが効かない場合（少しずつ届く応答、再試行の最後の 1 回など）でも、
-    リクエスト全体が期限 + 小さな余裕で終わるようにする
-    """
-    timeout = deadline.timeout(cap, stage)
-    future = _IO_EXECUTOR.submit(fn, *args, timeout=timeout)
-    try:
-        return future.result(timeout=timeout + settings.CALL_GRACE_SECONDS)
-    except FutureTimeout:
-        raise DeadlineExceeded(stage) from None
-
-
 def second_of_minute(t: datetime) -> float:
     """分内の秒（0 以上 60 未満。JST と UTC で同じ）"""
     return t.second + t.microsecond / 1_000_000
@@ -140,8 +99,10 @@ def _calendar_notice(now: datetime, calendar: Calendar, common: dict) -> None:
         log("WARNING", "calendar_expiring", covered_until=calendar.covered_until, days_left=days_left, **common)
 
 
-def handle(now: datetime, deps: Deps, schedule_time: str | None = None) -> Result:
-    deadline = Deadline(settings.REQUEST_DEADLINE_SECONDS, deps.monotonic)
+def handle(now: datetime, deps: Deps, schedule_time: str | None = None, deadline: Deadline | None = None) -> Result:
+    """deadline を渡すと、その残りで動く（ルートが毎時の回収と同じ期限を共有するため）。省略時はここで作る"""
+    if deadline is None:
+        deadline = Deadline(settings.REQUEST_DEADLINE_SECONDS, deps.monotonic)
     common: dict[str, Any] = {"schedule_time": schedule_time}
     try:
         return _handle(now, deps, deadline, common)
@@ -190,7 +151,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
     # 1 限月ページ（JPX はリトライしない）
     t_jpx = deps.monotonic()
     try:
-        page1 = _bounded(deadline, "jpx_page1", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 1)
+        page1 = bounded(deadline, "jpx_page1", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 1)
         updated_at = parse_updated_at(page1.html)
     except JpxUnavailable as e:
         return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=str(e))
@@ -205,12 +166,12 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         log("ERROR", "stale", failure="stale", lag_seconds=int((now - updated_at).total_seconds()), **common)
 
     name = raw_object_name(updated_at)
-    if _bounded(deadline, "raw_exists", settings.GCS_TIMEOUT_SECONDS, deps.raw_exists, name):
+    if bounded(deadline, "raw_exists", settings.GCS_TIMEOUT_SECONDS, deps.raw_exists, name):
         return done("INFO", "skipped_no_update", 200, object=name, jpx_fetch_ms=int((deps.monotonic() - t_jpx) * 1000))
 
     # 2 限月ページ
     try:
-        page2 = _bounded(deadline, "jpx_page2", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 2)
+        page2 = bounded(deadline, "jpx_page2", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 2)
     except JpxUnavailable as e:
         return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=str(e))
     jpx_fetch_ms = int((deps.monotonic() - t_jpx) * 1000)
@@ -232,7 +193,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
     page2 = with_updated_at(page2, page2_updated_at)
 
     try:
-        generation = _bounded(
+        generation = bounded(
             deadline, "raw_create", settings.GCS_TIMEOUT_SECONDS, deps.raw_create, name, encode_raw([page1, page2])
         )
     except AlreadyExists:
@@ -250,33 +211,23 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
     if violations:
         return done("ERROR", "parse_failed", 500, failure="parse_failed", detail=violations)
 
-    # 書き込み（3 テーブル → ingest_runs）。期限を超えたら次のテーブルに入らない（ingest_runs が無いので 11c が回収）
+    # 書き込み（3 テーブル → ingest_runs）。期限を超えたら次のテーブルに入らない
+    # （ingest_runs が無いので毎時の回収が拾う）
     counts = {table: len(table_rows) for table, table_rows in rows.items()}
     common["rows"] = counts
+    run = run_row(
+        ingest_run_id=run_id,
+        snapshot_at=p1.updated_at,
+        page2_updated_at=p2.updated_at,
+        source_object=src,
+        source_generation=generation,
+        parser_version=PARSER_VERSION,
+        trigger=deps.trigger,
+        counts=counts,
+        started_at=now,
+    )
     try:
-        for table in settings.DATA_TABLES:
-            deps.append_rows(
-                table, rows[table], timeout=deadline.timeout(settings.BQ_APPEND_TIMEOUT_SECONDS, f"append_{table}")
-            )
-        run_row = {
-            "ingest_run_id": run_id,
-            "snapshot_at": p1.updated_at,
-            "page2_updated_at": p2.updated_at,
-            "source_object": src,
-            "source_generation": generation,
-            "parser_version": PARSER_VERSION,
-            "trigger": deps.trigger,
-            "rows_spot": counts["spot_price"],
-            "rows_future": counts["future_price"],
-            "rows_option": counts["option_price"],
-            "started_at": now,
-            "finished_at": deps.clock(),
-        }
-        deps.append_rows(
-            settings.RUNS_TABLE,
-            [run_row],
-            timeout=deadline.timeout(settings.BQ_APPEND_TIMEOUT_SECONDS, "append_ingest_runs"),
-        )
+        write_snapshot(rows, run, deps.append_rows, deadline, deps.clock)
     except WriteFailed as e:
         return done("ERROR", "write_failed", 500, failure="write_failed", detail=str(e))
 
@@ -333,22 +284,55 @@ def _real_deps() -> Deps:
 
     import requests
 
-    from .io_bq import BigQueryWriter
-    from .io_gcs import RawStore
-
+    store, writer = _clients(cfg)
     http = requests.Session()
-    store = RawStore(cfg.raw_bucket, cfg.project)
-    bq = BigQueryWriter(cfg.project, cfg.dataset, cfg.schema_dir)
     _deps = Deps(
         calendar,
         cfg.raw_bucket,
         lambda page, timeout: io_jpx.fetch_page(page, timeout, http),
         store.exists,
         store.create,
-        bq.append,
+        writer.append,
         fetch_at_second=cfg.fetch_at_second,
     )
     return _deps
+
+
+_store = None
+_writer = None
+_recovery_deps: recovery.RecoveryDeps | None = None
+
+
+def _clients(cfg: settings.Settings):
+    """GCS と BigQuery（Storage Write API）のクライアント。毎分の取り込みと回収で共有する"""
+    global _store, _writer
+    if _store is None:
+        from .io_bq import BigQueryWriter
+        from .io_gcs import RawStore
+
+        _store = RawStore(cfg.raw_bucket, cfg.project)
+        _writer = BigQueryWriter(cfg.project, cfg.dataset, cfg.schema_dir)
+    return _store, _writer
+
+
+def _real_recovery_deps() -> recovery.RecoveryDeps:
+    """毎時の回収の依存（0 分のリクエストで初めて作り、以降は使い回す）"""
+    global _recovery_deps
+    if _recovery_deps is not None:
+        return _recovery_deps
+    cfg, _ = _config()
+    if cfg.dry_run:
+        _recovery_deps = recovery.make_dry_run_deps(cfg)
+        return _recovery_deps
+
+    from .io_bq import BigQueryQuery
+
+    store, writer = _clients(cfg)
+    query = BigQueryQuery(cfg.project, cfg.dataset, cfg.bq_location)
+    _recovery_deps = recovery.RecoveryDeps(
+        cfg.raw_bucket, store.list, store.read, query.completed_sources, writer.append
+    )
+    return _recovery_deps
 
 
 def _now() -> datetime:
@@ -373,15 +357,36 @@ def ingest() -> Response:
             deps = Deps(calendar, "", _forbidden, _forbidden, _forbidden, _forbidden)
         else:
             deps = _real_deps()
-        result = handle(now, deps, schedule_time)
+        deadline = Deadline(settings.REQUEST_DEADLINE_SECONDS, deps.monotonic)
+        result = handle(now, deps, schedule_time, deadline=deadline)
     except Exception as e:  # 想定外。ERROR を出して 500
         log("ERROR", "unexpected", failure="unexpected", detail=f"{type(e).__name__}: {e}", schedule_time=schedule_time)
         return Response('{"outcome":"unexpected"}', status=500, mimetype="application/json")
+
+    # 毎時 0 分（JST）だけ、通常の処理の後に同じ期限の残りで回収（07:00 は照合も）。応答は handle の結果のまま
+    at = recovery.trigger_time(schedule_time, now)
+    if recovery.is_recovery_minute(at):
+        _hourly(now, at, deadline, {"schedule_time": schedule_time})
+
     if result.status == 204:
         return Response(status=204)
     return Response(
         json.dumps({"outcome": result.outcome, **result.body}), status=result.status, mimetype="application/json"
     )
+
+
+def _hourly(now: datetime, at: datetime, deadline: Deadline, common: dict) -> None:
+    try:
+        recovery.run_hourly(now, at, _real_recovery_deps(), deadline, common)
+    except Exception as e:  # 依存の作成の失敗など。通常の取り込みの応答は変えない
+        log(
+            "ERROR",
+            "recovery_failed",
+            failure="recovery_failed",
+            stage="setup",
+            detail=f"{type(e).__name__}: {e}",
+            **common,
+        )
 
 
 def _forbidden(*args, **kwargs):

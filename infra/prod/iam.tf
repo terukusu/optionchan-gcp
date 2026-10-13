@@ -5,8 +5,9 @@ locals {
   sa_scheduler = "sa-scheduler@${var.project_id}.iam.gserviceaccount.com"
 }
 
-# 取り込みの追記（Storage Write API）。optionchan_tokyo だけで、旧データセット optionchan には付けない。
-# bigquery.jobUser（11c の回収で ingest_runs を読む）は #34 で足す
+# 取り込みの追記（Storage Write API）と、回収・照合・再処理での ingest_runs の読み取り（dataEditor は読み取りを含む）。
+# optionchan_tokyo だけで、旧データセット optionchan には付けない。
+# クエリのジョブを作る bigquery.jobUser はプロジェクト単位なので infra/bootstrap/ingest.tf（#34）
 resource "google_bigquery_dataset_iam_member" "ingest_editor" {
   project    = var.project_id
   dataset_id = google_bigquery_dataset.tokyo.dataset_id

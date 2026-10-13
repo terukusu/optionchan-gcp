@@ -44,3 +44,34 @@ resource "google_bigquery_table" "this" {
     prevent_destroy = true
   }
 }
+
+# 最新版の選択（#34、target.md 3.2）: スナップショットごとに最新の完了した実行の行だけを返すテーブル関数。
+# 回収・再処理は同じスナップショットを追記で書き直すので、表示・集計・比較は生テーブルではなくこれを使う。
+# ビューでなくテーブル関数にするのは、期間の引数を必須にして option_price の require_partition_filter と
+# ingest_runs の全件スキャンを避けるため。本文は sql/latest/<名前>.sql（プロジェクトとデータセットはここで入れる）。
+# データを持たないので削除の保護はしない（切り戻しは revert の PR で消える）
+resource "google_bigquery_routine" "latest" {
+  for_each = toset(["latest_runs", "spot_price_latest", "future_price_latest", "option_price_latest"])
+
+  project      = var.project_id
+  dataset_id   = google_bigquery_dataset.tokyo.dataset_id
+  routine_id   = each.key
+  routine_type = "TABLE_VALUED_FUNCTION"
+  language     = "SQL"
+  description  = "スナップショットごとに最新の完了した実行（ingest_runs）の行だけを返す。期間は [start_at, end_at)（sql/latest/${each.key}.sql）"
+  definition_body = trimspace(templatefile("${path.module}/../../sql/latest/${each.key}.sql", {
+    project = var.project_id
+    dataset = google_bigquery_dataset.tokyo.dataset_id
+  }))
+
+  arguments {
+    name      = "start_at"
+    data_type = jsonencode({ typeKind = "TIMESTAMP" })
+  }
+  arguments {
+    name      = "end_at"
+    data_type = jsonencode({ typeKind = "TIMESTAMP" })
+  }
+
+  depends_on = [google_bigquery_table.this]
+}
