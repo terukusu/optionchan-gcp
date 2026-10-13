@@ -2,8 +2,8 @@
 # plan に差分があるときだけ apply job が動き、Environment prod の承認を待つ（差分 0 なら承認待ちを作らない）。
 # plan ファイルは artifact で渡さない（公開リポジトリの artifact は誰でも取得でき、state 由来の値を含む）。
 # apply は承認後にもう一度 plan して適用する。
-# 取り込みのイメージ（#33）: タグは入力の git のハッシュ（.github/scripts/ingest-image.sh）。Artifact Registry に無ければ
-# apply job が GCP の認証より前にビルド・検査し、認証後に push してから digest で apply する。
+# 取り込み（ingest、#33）・ビューアー（viewer、#53）のイメージ: タグは入力の git のハッシュ（.github/scripts/image.sh）。
+# Artifact Registry に無ければ apply job が GCP の認証より前にビルド・検査し、認証後に push してから digest で apply する。
 name: deploy
 
 on:
@@ -55,7 +55,8 @@ jobs:
       id-token: write
     outputs:
       changes: ${{ steps.plan.outputs.changes }}
-      image_exists: ${{ steps.image.outputs.exists }}
+      ingest_exists: ${{ steps.ingest_image.outputs.exists }}
+      viewer_exists: ${{ steps.viewer_image.outputs.exists }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -70,9 +71,12 @@ jobs:
           service_account: ${{ vars.GCP_SA_TF_PLAN }}
 
       # Artifact Registry にあれば digest、無ければタグ参照で plan する（無ければ Cloud Run に差分が出て apply job が動く）
-      - name: イメージの解決
-        id: image
-        run: .github/scripts/ingest-image.sh resolve >> "$GITHUB_OUTPUT"
+      - name: イメージの解決（ingest）
+        id: ingest_image
+        run: .github/scripts/image.sh ingest resolve >> "$GITHUB_OUTPUT"
+      - name: イメージの解決（viewer）
+        id: viewer_image
+        run: .github/scripts/image.sh viewer resolve >> "$GITHUB_OUTPUT"
 
       - name: terraform plan（prod）
         id: plan
@@ -80,9 +84,12 @@ jobs:
         env:
           # 取り込み用のポリシー ID。ログに出さないよう secret にして、この step だけに渡す
           TF_VAR_alert_policy_ids: ${{ secrets.TF_ALERT_POLICY_IDS || '{}' }}
-          TF_VAR_ingest_image: ${{ steps.image.outputs.image }}
-          IMAGE_TAG: ${{ steps.image.outputs.tag }}
-          IMAGE_EXISTS: ${{ steps.image.outputs.exists }}
+          TF_VAR_ingest_image: ${{ steps.ingest_image.outputs.image }}
+          TF_VAR_viewer_image: ${{ steps.viewer_image.outputs.image }}
+          INGEST_TAG: ${{ steps.ingest_image.outputs.tag }}
+          INGEST_EXISTS: ${{ steps.ingest_image.outputs.exists }}
+          VIEWER_TAG: ${{ steps.viewer_image.outputs.tag }}
+          VIEWER_EXISTS: ${{ steps.viewer_image.outputs.exists }}
         run: |
           rc=0
           { terraform init -input=false -no-color \
@@ -99,11 +106,15 @@ jobs:
             echo
             terraform show -json tfplan | jq -r "$PLAN_SUMMARY_JQ"
             echo
-            if [ "$IMAGE_EXISTS" = true ]; then
-              echo "イメージ ingest: \`${IMAGE_TAG}\` は既存"
-            else
-              echo "イメージ ingest: \`${IMAGE_TAG}\` は未作成（apply job がビルド・push する）"
-            fi
+            image_line() {  # 名前 タグ 有無
+              if [ "$3" = true ]; then
+                echo "- イメージ $1: \`$2\` は既存"
+              else
+                echo "- イメージ $1: \`$2\` は未作成（apply job がビルド・push する）"
+              fi
+            }
+            image_line ingest "$INGEST_TAG" "$INGEST_EXISTS"
+            image_line viewer "$VIEWER_TAG" "$VIEWER_EXISTS"
             echo
             if [ "$changes" = true ]; then
               echo "差分あり: apply job が Environment prod の承認を待つ。"
@@ -125,9 +136,9 @@ jobs:
         with:
           persist-credentials: false
 
-      # ビルドは GCP の認証より前に行う（依存の取得中に資格情報ファイルが無いように）。中身の確認は ci.yml の ingest-image と同じ
-      - name: イメージのビルド（未作成のときだけ）
-        if: needs.plan.outputs.image_exists != 'true'
+      # ビルドは GCP の認証より前に行う（依存の取得中に資格情報ファイルが無いように）。中身の確認は ci.yml の ingest-image / viewer-image と同じ
+      - name: イメージのビルド（ingest、未作成のときだけ）
+        if: needs.plan.outputs.ingest_exists != 'true'
         run: |
           docker build -f apps/ingest/Dockerfile -t ingest:build .
           docker run --rm ingest:build python -c 'import optionchan_ingest.app'
@@ -135,6 +146,12 @@ jobs:
           found=$(docker run --rm --entrypoint sh ingest:build -c \
             'find / -xdev \( -name auth.txt -o -name auth.json -o -path /app/functions -o -path /app/tests -o -name .git \) 2>/dev/null || true' | wc -l)
           test "$found" -eq 0
+
+      - name: イメージのビルド（viewer、未作成のときだけ）
+        if: needs.plan.outputs.viewer_exists != 'true'
+        run: |
+          docker build -t viewer:build apps/viewer
+          .github/scripts/viewer-image-check.sh viewer:build
 
       - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
         with:
@@ -149,44 +166,55 @@ jobs:
       - name: イメージの push と digest の解決
         id: image
         env:
-          BUILT: ${{ needs.plan.outputs.image_exists != 'true' }}
+          INGEST_BUILT: ${{ needs.plan.outputs.ingest_exists != 'true' }}
+          VIEWER_BUILT: ${{ needs.plan.outputs.viewer_exists != 'true' }}
         run: |
-          script=.github/scripts/ingest-image.sh
-          resolved=$("$script" resolve)
-          if grep -qx 'exists=false' <<<"$resolved"; then
-            if [ "$BUILT" != true ]; then
-              echo "イメージが Artifact Registry に無いが、この job ではビルドしていない（plan の後に消えた可能性）。deploy をやり直す。"
+          script=.github/scripts/image.sh
+          configured=false
+          for name in ingest viewer; do
+            built_var="${name^^}_BUILT"
+            resolved=$("$script" "$name" resolve)
+            if grep -qx 'exists=false' <<<"$resolved"; then
+              if [ "${!built_var}" != true ]; then
+                echo "イメージ ${name} が Artifact Registry に無いが、この job ではビルドしていない（plan の後に消えた可能性）。deploy をやり直す。"
+                exit 1
+              fi
+              ref=$(sed -n 's/^image=//p' <<<"$resolved")
+              if [ "$configured" != true ]; then
+                # 出力は認証中のアカウント名を含みうるのでマスクを通す（pipefail で失敗は伝わる）
+                gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet 2>&1 | sed -E "$MASK_SED"
+                configured=true
+              fi
+              docker tag "${name}:build" "$ref"
+              docker push --quiet "$ref" 2>&1 | sed -E "$MASK_SED"
+              resolved=$("$script" "$name" resolve)
+            fi
+            image=$(sed -n 's/^image=//p' <<<"$resolved")
+            tag=$(sed -n 's/^tag=//p' <<<"$resolved")
+            if [[ "$image" != *@sha256:* ]]; then
+              echo "digest が得られない: ${image}"
               exit 1
             fi
-            ref=$(sed -n 's/^image=//p' <<<"$resolved")
-            # 出力は認証中のアカウント名を含みうるのでマスクを通す（pipefail で失敗は伝わる）
-            gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet 2>&1 | sed -E "$MASK_SED"
-            docker tag ingest:build "$ref"
-            docker push --quiet "$ref" 2>&1 | sed -E "$MASK_SED"
-            resolved=$("$script" resolve)
-          fi
-          image=$(sed -n 's/^image=//p' <<<"$resolved")
-          tag=$(sed -n 's/^tag=//p' <<<"$resolved")
-          if [[ "$image" != *@sha256:* ]]; then
-            echo "digest が得られない: ${image}"
-            exit 1
-          fi
-          echo "image=$image" >> "$GITHUB_OUTPUT"
-          digest=${image##*@sha256:}
-          echo "イメージ ingest: \`${tag}\`（digest \`sha256:${digest:0:12}\`）" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "${name}=${image}" >> "$GITHUB_OUTPUT"
+            digest=${image##*@sha256:}
+            echo "イメージ ${name}: \`${tag}\`（digest \`sha256:${digest:0:12}\`）" | tee -a "$GITHUB_STEP_SUMMARY"
+          done
 
       - name: terraform apply（prod）
         working-directory: infra/prod
         env:
           # 取り込み用のポリシー ID。ログに出さないよう secret にして、この step だけに渡す
           TF_VAR_alert_policy_ids: ${{ secrets.TF_ALERT_POLICY_IDS || '{}' }}
-          TF_VAR_ingest_image: ${{ steps.image.outputs.image }}
+          TF_VAR_ingest_image: ${{ steps.image.outputs.ingest }}
+          TF_VAR_viewer_image: ${{ steps.image.outputs.viewer }}
         run: |
           # Cloud Run には digest でだけデプロイする
-          if [[ "$TF_VAR_ingest_image" != *@sha256:* ]]; then
-            echo "TF_VAR_ingest_image が digest 参照でない"
-            exit 1
-          fi
+          for v in TF_VAR_ingest_image TF_VAR_viewer_image; do
+            if [[ "${!v}" != *@sha256:* ]]; then
+              echo "${v} が digest 参照でない"
+              exit 1
+            fi
+          done
           rc=0
           { terraform init -input=false -no-color \
               && terraform apply -auto-approve -input=false -no-color; } > apply.log 2>&1 || rc=$?

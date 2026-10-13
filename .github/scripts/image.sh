@@ -1,30 +1,54 @@
 #!/usr/bin/env bash
-# 取り込み（Cloud Run ingest）のイメージのタグと参照を求める（#33）。ci.yml と deploy.yml で共用する。
+# Cloud Run のイメージ（取り込み ingest #33、ビューアー viewer #53）のタグと参照を求める。ci.yml と deploy.yml で共用する。
 #
-#   ingest-image.sh paths    イメージの入力パスを 1 行 1 件で出す（apps/ingest/tests/test_image_inputs.py が使う）
-#   ingest-image.sh tag      入力パスの git のハッシュからタグ src-<20hex> を出す（同じ入力なら同じタグ）
-#   ingest-image.sh resolve  tag / image / exists を GITHUB_OUTPUT の形式（key=value）で出す。
+#   image.sh <name> paths    イメージの入力パスを 1 行 1 件で出す（apps/<name>/tests/test_image_inputs.py が使う）
+#   image.sh <name> tag      入力パスの git のハッシュからタグ src-<20hex> を出す（同じ入力なら同じタグ）
+#   image.sh <name> resolve  tag / image / exists を GITHUB_OUTPUT の形式（key=value）で出す。
 #                            Artifact Registry にタグがあれば image は digest 参照・exists=true、
 #                            無ければタグ参照・exists=false。権限・API などそれ以外の失敗は exit 1
 #
-# タグはコミット済みの内容（HEAD）から求める。作業ツリーの未コミットの変更は反映されない。
+# <name> は ingest か viewer。タグはコミット済みの内容（HEAD）から求める。作業ツリーの未コミットの変更は反映されない。
 # resolve は gcloud を使う（CI では google-github-actions/auth の資格情報、ローカルでは所有者の資格情報）。
 set -euo pipefail
 
 REPO="asia-northeast1-docker.pkg.dev/optionchan-222710/optionchan"
-IMAGE_NAME="ingest"
 
+usage() {
+  echo "usage: $0 {ingest|viewer} {paths|tag|resolve}" >&2
+  exit 2
+}
+
+IMAGE_NAME="${1:-}"
 # イメージの入力。.dockerignore の許可リスト（! の行）と Dockerfile・.dockerignore 自身。
-# 片方だけ直すとテストが落ちる（apps/ingest/tests/test_image_inputs.py）
-INPUT_PATHS=(
-  apps/ingest/Dockerfile
-  apps/ingest/pyproject.toml
-  apps/ingest/uv.lock
-  apps/ingest/src
-  config/trading_calendar.toml
-  schema/tokyo
-  .dockerignore
-)
+# 片方だけ直すとテストが落ちる（apps/<name>/tests/test_image_inputs.py）。
+# ingest の並びを変えるとタグが変わり、同じ中身のイメージを作り直すことになる（並びは #33 のまま）
+case "$IMAGE_NAME" in
+  ingest)
+    # ビルド context はリポジトリ直下（docker build -f apps/ingest/Dockerfile .）
+    INPUT_PATHS=(
+      apps/ingest/Dockerfile
+      apps/ingest/pyproject.toml
+      apps/ingest/uv.lock
+      apps/ingest/src
+      config/trading_calendar.toml
+      schema/tokyo
+      .dockerignore
+    )
+    ;;
+  viewer)
+    # ビルド context は apps/viewer（docker build apps/viewer）
+    INPUT_PATHS=(
+      apps/viewer/Dockerfile
+      apps/viewer/.dockerignore
+      apps/viewer/pyproject.toml
+      apps/viewer/uv.lock
+      apps/viewer/package.json
+      apps/viewer/package-lock.json
+      apps/viewer/src
+    )
+    ;;
+  *) usage ;;
+esac
 
 # gcloud のエラーは認証中のアカウント名やプロジェクト番号を含みうるので、そのまま出さない
 MASK='s/[0-9]{9,}/<num>/g; s/[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+\.)+[A-Za-z]{2,}/<email>/g'
@@ -64,12 +88,9 @@ cmd_resolve() {
   fi
 }
 
-case "${1:-}" in
+case "${2:-}" in
   paths) cmd_paths ;;
   tag) cmd_tag ;;
   resolve) cmd_resolve ;;
-  *)
-    echo "usage: $0 {paths|tag|resolve}" >&2
-    exit 2
-    ;;
+  *) usage ;;
 esac

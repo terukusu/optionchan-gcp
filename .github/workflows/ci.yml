@@ -115,20 +115,7 @@ jobs:
       - name: docker build
         run: docker build -t viewer:ci apps/viewer
       - name: イメージの中身の確認
-        run: |
-          docker run --rm -e GCP_PROJECT=example-project viewer:ci python -c 'import optionchan_viewer.app'
-          pkg=$(docker run --rm viewer:ci python -c 'import optionchan_viewer, os; print(os.path.dirname(optionchan_viewer.__file__))')
-          # auth.txt・.git・テスト・node_modules がイメージに入っていないこと
-          found=$(docker run --rm --entrypoint sh viewer:ci -c \
-            'find / -xdev \( -name auth.txt -o -name auth.json -o -name .git -o -name node_modules -o -path "*/optionchan_viewer/tests" \) 2>/dev/null || true' | wc -l)
-          test "$found" -eq 0
-          # テンプレートが CDN（外部の script）を参照しないこと
-          cdn=$(docker run --rm --entrypoint sh viewer:ci -c \
-            "grep -rlE '<script[^>]*src=\"(https?:)?//' $pkg/templates || true" | wc -l)
-          test "$cdn" -eq 0
-          # 同梱したブラウザ用ライブラリ（package-lock.json から作ったもの）が 4 つあること
-          n=$(docker run --rm --entrypoint sh viewer:ci -c "ls $pkg/static/vendor/*.js" | wc -l)
-          test "$n" -eq 4
+        run: .github/scripts/viewer-image-check.sh viewer:ci
 
   terraform-plan:
     runs-on: ubuntu-latest
@@ -158,18 +145,24 @@ jobs:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_SA_TF_PLAN }}
 
-      # 取り込みのイメージ（#33）: Artifact Registry にあれば digest、無ければタグ参照で plan する（ビルドは承認後の apply job）
-      - name: イメージの解決
-        id: image
-        run: .github/scripts/ingest-image.sh resolve >> "$GITHUB_OUTPUT"
+      # 取り込み（#33）・ビューアー（#53）のイメージ: Artifact Registry にあれば digest、無ければタグ参照で plan する（ビルドは承認後の apply job）
+      - name: イメージの解決（ingest）
+        id: ingest_image
+        run: .github/scripts/image.sh ingest resolve >> "$GITHUB_OUTPUT"
+      - name: イメージの解決（viewer）
+        id: viewer_image
+        run: .github/scripts/image.sh viewer resolve >> "$GITHUB_OUTPUT"
 
       - name: terraform plan（prod）
         working-directory: infra/prod
         env:
           TF_VAR_alert_policy_ids: ${{ secrets.TF_ALERT_POLICY_IDS || '{}' }}
-          TF_VAR_ingest_image: ${{ steps.image.outputs.image }}
-          IMAGE_TAG: ${{ steps.image.outputs.tag }}
-          IMAGE_EXISTS: ${{ steps.image.outputs.exists }}
+          TF_VAR_ingest_image: ${{ steps.ingest_image.outputs.image }}
+          TF_VAR_viewer_image: ${{ steps.viewer_image.outputs.image }}
+          INGEST_TAG: ${{ steps.ingest_image.outputs.tag }}
+          INGEST_EXISTS: ${{ steps.ingest_image.outputs.exists }}
+          VIEWER_TAG: ${{ steps.viewer_image.outputs.tag }}
+          VIEWER_EXISTS: ${{ steps.viewer_image.outputs.exists }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           rc=0
@@ -187,12 +180,16 @@ jobs:
             echo
             terraform show -json tfplan | jq -r "$PLAN_SUMMARY_JQ"
             echo
-            if [ "$IMAGE_EXISTS" = true ]; then
-              digest=${TF_VAR_ingest_image##*@sha256:}
-              echo "イメージ ingest: \`${IMAGE_TAG}\` は既存（digest \`sha256:${digest:0:12}\` で plan）"
-            else
-              echo "イメージ ingest: \`${IMAGE_TAG}\` は未作成（マージ後、承認された apply job がビルド・push してから digest で apply する）"
-            fi
+            image_line() {  # 名前 タグ 有無 参照
+              local digest=${4##*@sha256:}
+              if [ "$3" = true ]; then
+                echo "- イメージ $1: \`$2\` は既存（digest \`sha256:${digest:0:12}\` で plan）"
+              else
+                echo "- イメージ $1: \`$2\` は未作成（マージ後、承認された apply job がビルド・push してから digest で apply する）"
+              fi
+            }
+            image_line ingest "$INGEST_TAG" "$INGEST_EXISTS" "$TF_VAR_ingest_image"
+            image_line viewer "$VIEWER_TAG" "$VIEWER_EXISTS" "$TF_VAR_viewer_image"
             echo
             echo "対象コミット: ${HEAD_SHA}（全文は公開しない。アドレスと操作のみ）"
           } > summary.md

@@ -1,4 +1,5 @@
-# iam / iamcredentials / sts は WIF に必要（#10）、run は取り込みの Cloud Run に必要（#33）、bigquerydatatransfer は定期クエリ（#40）。残りは有効化済みで、宣言しても変更は起きない。
+# iam / iamcredentials / sts は WIF に必要（#10）、run は取り込みの Cloud Run に必要（#33）、bigquerydatatransfer は定期クエリ（#40）、
+# iap はビューアーの IAP（#53）。残りは有効化済みで、宣言しても変更は起きない。
 # destroy でも API は無効化しない（現行構成が使っているものがある）。
 locals {
   services = toset([
@@ -11,6 +12,7 @@ locals {
     "monitoring.googleapis.com",
     "run.googleapis.com",
     "bigquerydatatransfer.googleapis.com",
+    "iap.googleapis.com",
   ])
 }
 

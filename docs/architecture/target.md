@@ -250,7 +250,7 @@ infra/
 
 - Terraform（google / google-beta プロバイダ）、state は GCS（バージョニング有効）
 - 既存リソースとフェーズ 0 で gcloud で作ったリソースは `import` ブロックで取り込む（作り直さない）。BigQuery のテーブルは `deletion_protection = true`
-- アプリ: `uv`、`ruff`、`pytest`。コンテナは自前の Dockerfile で GitHub Actions がビルドし、Artifact Registry に push（digest 固定）。タグはイメージの入力パスの git のハッシュ（`src-<20 桁>`、`.github/scripts/ingest-image.sh`）で、同じ入力ならビルドしない（#33）
+- アプリ: `uv`、`ruff`、`pytest`。コンテナは自前の Dockerfile で GitHub Actions がビルドし、Artifact Registry に push（digest 固定）。タグはイメージの入力パスの git のハッシュ（`src-<20 桁>`、`.github/scripts/image.sh`）で、同じ入力ならビルドしない（#33）
 - GitHub Actions:
   - PR: テスト・lint・`terraform plan`（`sa-tf-plan`、結果を PR にコメント）
   - `master` へのマージ: ビルド・push → イメージ digest を変数に `terraform apply`（`sa-tf-apply`、Environment `prod` の承認）。ビルドは承認後の apply job で、GCP の認証より前に行う（依存の取得中に資格情報が無いように）。デプロイ経路は Terraform 1 本にし、`gcloud run deploy` との二重管理をしない

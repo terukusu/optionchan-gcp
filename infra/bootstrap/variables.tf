@@ -36,3 +36,18 @@ variable "github_owner_id" {
     error_message = "github_owner_id は数字だけで指定する。"
   }
 }
+
+# ビューアー（Cloud Run viewer）を IAP 越しに開けるユーザー（#53）。メールはコード・リポジトリに置かず、
+# ローカルの infra/bootstrap/local.auto.tfvars（*.tfvars は gitignore 済み）に書く（runbook「ビューアー（#13）」）。
+# 既定値は持たない: 既定を [] にすると、ファイルを置き忘れた apply で付与が消えるため（忘れたら plan がエラーで止まる）。
+# サービス viewer が無いうちは付与できないので、prod の apply の前は []、後に ["user:<メール>"] にする。
+variable "viewer_iap_members" {
+  description = "IAP 越しに viewer を開けるプリンシパル（例: [\"user:<メール>\"]）。サービスの作成前は []"
+  type        = list(string)
+
+  validation {
+    # domain: は不可（domain:gmail.com のような書き方で誰でも開ける＝誰でも BigQuery の課金を発生させられる状態になるため）
+    condition     = alltrue([for m in var.viewer_iap_members : can(regex("^(user|group):[^\\s@]+@[^\\s@]+$", m))])
+    error_message = "viewer_iap_members の各要素は user:<メール> か group:<メール>（domain: / allUsers / allAuthenticatedUsers は不可）。"
+  }
+}
