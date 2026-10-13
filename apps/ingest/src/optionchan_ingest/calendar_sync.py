@@ -7,6 +7,9 @@ ingest は最新版（ビュー trading_calendar_latest）を読み、読めな�
   --dry-run: 取得・検証して結果をログに出すだけ（書かない）
   --accept: 前の版との差分の検証（上書き可の問題）を越えて受け入れる（ページの形・祝日・年末年始の問題は越えない）
   --print-toml: 最新版から config/trading_calendar.toml を作って標準出力に出す（JPX にはアクセスしない）
+  --update-toml: 最新版と TOML の今日以降の休業日・covered_until が違えば TOML を書き換え、標準出力に JSON
+      {"status": "changed" | "unchanged" | "toml_newer", "title", "body"}（PR のタイトル・本文）を出す。
+      workflow calendar-toml（#66）が使う。TOML の covered_until の方が新しければ書き換えない（toml_newer）
   終了コード: 0 = 更新・変化なし・dry-run、1 = 失敗・拒否、2 = 引数の誤り
 
 処理（run_sync）:
@@ -19,6 +22,7 @@ ingest は最新版（ビュー trading_calendar_latest）を読み、読めな�
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -393,18 +397,42 @@ def _reason(text: str) -> str:
     return text
 
 
+def _update_toml(path: Path, text: str, loaded: jc.LoadedVersion, today: date) -> int:
+    change = jc.toml_change(text, loaded.version, today)
+    result = {"status": "unchanged", "title": None, "body": None}
+    if change.toml_newer:
+        result["status"] = "toml_newer"
+        print(
+            f"TOML の covered_until（{change.covered_until[0]}）の方が最新版（{change.covered_until[1]}）より新しいので"
+            "書き換えない",
+            file=sys.stderr,
+        )
+    elif change.changed:
+        result["status"] = "changed"
+        result["title"], result["body"] = jc.toml_pr_text(change, loaded.version_at, today)
+        path.write_text(change.text, encoding="utf-8")
+    print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
 def main(argv: list[str] | None = None, deps: SyncDeps | None = None, base_path: Path | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m optionchan_ingest.calendar_sync")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="取得・検証だけ（書かない）")
     mode.add_argument("--print-toml", action="store_true", help="最新版から trading_calendar.toml を作って出す")
+    mode.add_argument(
+        "--update-toml",
+        action="store_true",
+        help="最新版と違えば trading_calendar.toml を書き換え、PR の文面を JSON で出す",
+    )
     parser.add_argument("--accept", type=_reason, metavar="理由", help="前の版との差分の検証を越えて受け入れる")
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return EXIT_USAGE if e.code else EXIT_OK
-    if args.accept and args.print_toml:
-        print("--accept と --print-toml は一緒に使えない", file=sys.stderr)
+    toml_mode = args.print_toml or args.update_toml
+    if args.accept and toml_mode:
+        print("--accept と --print-toml / --update-toml は一緒に使えない", file=sys.stderr)
         return EXIT_USAGE
 
     # 生 HTML のバケットは使わない（Settings の必須を満たすだけ）
@@ -418,7 +446,7 @@ def main(argv: list[str] | None = None, deps: SyncDeps | None = None, base_path:
     deadline = Deadline(settings.CALENDAR_JOB_DEADLINE_SECONDS, time.monotonic)
     now = deps.clock()
 
-    if args.print_toml:
+    if toml_mode:
         try:
             loaded = bounded(deadline, "calendar_load", settings.CALENDAR_LOAD_TIMEOUT_SECONDS, deps.load_latest)
         except (QueryFailed, jc.CalendarDataError, DeadlineExceeded) as e:
@@ -428,8 +456,11 @@ def main(argv: list[str] | None = None, deps: SyncDeps | None = None, base_path:
             print("最新版が無い", file=sys.stderr)
             return EXIT_FAILED
         text = Path(path).read_text(encoding="utf-8")
-        sys.stdout.write(jc.render_toml(text, loaded.version, now.astimezone(JST).date()))
-        return EXIT_OK
+        today = now.astimezone(JST).date()
+        if args.print_toml:
+            sys.stdout.write(jc.render_toml(text, loaded.version, today))
+            return EXIT_OK
+        return _update_toml(Path(path), text, loaded, today)
 
     common = {"trigger": "job"}
     try:

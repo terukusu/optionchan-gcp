@@ -15,7 +15,7 @@ import re
 import tomllib
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 from lxml import html as lxml_html
 
@@ -585,7 +585,7 @@ def ingest_sanity(loaded: LoadedVersion, current_closed, today: date) -> list[st
     return problems
 
 
-# ---- TOML の生成（config/trading_calendar.toml を最新版に合わせる。PR は手で出す） ----
+# ---- TOML の生成（config/trading_calendar.toml を最新版に合わせる。PR は workflow calendar-toml が出す（#66）） ----
 
 
 def render_toml(base_text: str, version: Version, today: date) -> str:
@@ -609,3 +609,89 @@ def render_toml(base_text: str, version: Version, today: date) -> str:
     if set(data["closed_dates"]) != {d for d in version.closed_dates if d >= today}:
         raise ValueError("生成した TOML の closed_dates が版と合わない")
     return text
+
+
+@dataclass(frozen=True)
+class TomlChange:
+    """今の TOML と最新版の違い（今日以降の休業日と covered_until。過ぎた休業日・コメントだけの違いは数えない）"""
+
+    text: str  # 最新版に合わせた TOML（render_toml）
+    added: tuple[tuple[date, str], ...]  # (日付, コメント) 今日以降で版にだけある休業日
+    removed: tuple[tuple[date, str], ...]  # (日付, コメント) 今日以降で TOML にだけある休業日
+    covered_until: tuple[date, date]  # (TOML, 版)
+
+    @property
+    def toml_newer(self) -> bool:
+        """TOML の covered_until の方が新しい（手で延ばした。ingest は TOML を使う）ので版に合わせない"""
+        return self.covered_until[0] > self.covered_until[1]
+
+    @property
+    def changed(self) -> bool:
+        return bool(self.added or self.removed) or self.covered_until[0] != self.covered_until[1]
+
+
+_TOML_DATE_LINE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*,?\s*(?:#\s*(.*?))?\s*$")
+
+
+def _toml_comments(text: str) -> dict[date, str]:
+    """closed_dates の各行のコメント（無ければ空文字）"""
+    m = re.search(r"(?ms)^closed_dates = \[(.*?)^\]", text)
+    comments = {}
+    for line in (m.group(1) if m else "").splitlines():
+        hit = _TOML_DATE_LINE.match(line)
+        if hit:
+            comments[date.fromisoformat(hit.group(1))] = hit.group(2) or ""
+    return comments
+
+
+def toml_change(base_text: str, version: Version, today: date) -> TomlChange:
+    """今の TOML（base_text）と版の違い。text は render_toml の結果（changed でなければ使わない）"""
+    data = tomllib.loads(base_text)
+    old_closed = {d for d in data["closed_dates"] if d >= today}
+    new_closed = {d for d in version.closed_dates if d >= today}
+    text = render_toml(base_text, version, today)
+    old_comments, new_comments = _toml_comments(base_text), _toml_comments(text)
+    return TomlChange(
+        text=text,
+        added=tuple((d, new_comments.get(d, "")) for d in sorted(new_closed - old_closed)),
+        removed=tuple((d, old_comments.get(d, "")) for d in sorted(old_closed - new_closed)),
+        covered_until=(data["covered_until"], version.covered_until),
+    )
+
+
+def toml_pr_text(change: TomlChange, version_at: datetime, today: date) -> tuple[str, str]:
+    """PR のタイトルと本文（Markdown）"""
+    old, new = change.covered_until
+    parts = []
+    if change.added:
+        parts.append(f"休業日 +{len(change.added)}")
+    if change.removed:
+        parts.append(f"休業日 -{len(change.removed)}")
+    if old != new:
+        parts.append(f"covered_until {old.isoformat()} → {new.isoformat()}")
+    title = f"取引カレンダーの TOML を BigQuery の最新版に合わせる（{'、'.join(parts)}）"
+
+    def items(days):
+        return [f"  - {d.isoformat()}" + (f"（{c}）" if c else "") for d, c in days] or ["  - なし"]
+
+    body = "\n".join(
+        [
+            "`config/trading_calendar.toml` の `closed_dates` / `covered_until` を BigQuery の取引カレンダーの最新版"
+            f"（`trading_calendar_latest`、version_at {version_at.astimezone(UTC).isoformat()}）に合わせる。",
+            "workflow `calendar-toml`（#66）が `python -m optionchan_ingest.calendar_sync --update-toml` で生成した。",
+            "",
+            f"- covered_until: {old.isoformat()} → {new.isoformat()}" + ("" if old != new else "（変わらない）"),
+            "- 追加した休業日:",
+            *items(change.added),
+            "- 削除した休業日:",
+            *items(change.removed),
+            "",
+            f"{today.isoformat()} より前の休業日は TOML に書かないので、過ぎた日の削除は差分に数えない。"
+            "コメント（確定/予定・名称）は版の値で書き直す。",
+            "",
+            "確認: JPX「祝日取引」のページ（https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html ）と"
+            "休業日が合うこと。マージすると ingest のイメージが作り直され、deploy の承認が要る"
+            "（docs/runbook.md「取引カレンダー（#63）」の「TOML」）。",
+        ]
+    )
+    return title, body + "\n"

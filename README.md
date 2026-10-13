@@ -53,7 +53,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * プロジェクト ID・GitHub リポジトリ名・state のバケット名は既定値を持たない（clone した人が自分の値を渡す）。`TF_VAR_project_id`（bootstrap は `TF_VAR_github_repository` も）と `terraform init -backend-config="bucket=<PROJECT_ID>-tfstate"`（bootstrap は `<PROJECT_ID>-tfstate-bootstrap`）で渡す
 
 * .github/workflows
-  * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
+  * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）、`calendar-toml.yml`（毎日、取引カレンダーの TOML が BigQuery の最新版と違えば更新の PR を出す。#66）
   * repository variables `GCP_PROJECT_ID`（GCP プロジェクト ID）・`TF_STATE_BUCKET`（prod の state のバケット）・`GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY` と secret `GCP_WIF_PROVIDER` を使う。設定は docs/runbook.md の「GitHub の設定（bootstrap の後、PR を出す前）」
 
 ## テストの実行

@@ -570,8 +570,57 @@ def test_main_print_toml(capsys):
     assert run_main(["--print-toml"], FakeSync()) == 1
 
 
+def run_update_toml(tmp_path, fake, text=None):
+    path = tmp_path / "trading_calendar.toml"
+    path.write_text(text or (REPO_ROOT / "config" / "trading_calendar.toml").read_text(encoding="utf-8"), "utf-8")
+    code = calendar_sync.main(["--update-toml"], deps=fake.deps(), base_path=path)
+    return code, path
+
+
+def test_main_update_toml_unchanged(tmp_path, capsys):
+    before = (REPO_ROOT / "config" / "trading_calendar.toml").read_text(encoding="utf-8")
+    code, path = run_update_toml(tmp_path, FakeSync(latest=loaded()))
+    assert code == 0
+    assert json.loads(capsys.readouterr().out) == {"status": "unchanged", "title": None, "body": None}
+    assert path.read_text(encoding="utf-8") == before
+
+
+def test_main_update_toml_changed(tmp_path, capsys):
+    version = jc.build_version(jc.parse_jpx_page(std_html(confirmed_until=date(2027, 12, 31))))
+    code, path = run_update_toml(tmp_path, FakeSync(latest=loaded(version)))
+    assert code == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "changed"
+    assert "covered_until 2027-06-30 → 2027-12-31" in out["title"]
+    assert "version_at 2026-10-14T21:40:00+00:00" in out["body"]
+    assert load_calendar(path).covered_until == date(2027, 12, 31)
+
+
+def test_main_update_toml_toml_newer(tmp_path, capsys):
+    text = (REPO_ROOT / "config" / "trading_calendar.toml").read_text(encoding="utf-8")
+    newer = text.replace("covered_until = 2027-06-30", "covered_until = 2027-12-31")
+    code, path = run_update_toml(tmp_path, FakeSync(latest=loaded()), newer)
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "toml_newer"
+    assert path.read_text(encoding="utf-8") == newer
+
+
+def test_main_update_toml_load_failure(tmp_path, capsys):
+    assert run_update_toml(tmp_path, FakeSync())[0] == 1
+    assert run_update_toml(tmp_path, FakeSync(load_error=QueryFailed("HTTP 403")))[0] == 1
+    assert capsys.readouterr().out == ""
+
+
 @pytest.mark.parametrize(
-    "argv", [["--accept", ""], ["--unknown"], ["--dry-run", "--print-toml"], ["--print-toml", "--accept", "x"]]
+    "argv",
+    [
+        ["--accept", ""],
+        ["--unknown"],
+        ["--dry-run", "--print-toml"],
+        ["--print-toml", "--accept", "x"],
+        ["--update-toml", "--accept", "x"],
+        ["--update-toml", "--print-toml"],
+    ],
 )
 def test_main_usage(capsys, argv):
     assert run_main(argv, FakeSync()) == 2

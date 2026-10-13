@@ -37,6 +37,21 @@ resource "google_bigquery_table" "trading_calendar_latest" {
   depends_on = [google_bigquery_table.trading_calendar]
 }
 
+# workflow calendar-toml（#66）の読み取り。最新版のビューとその元のテーブルだけ（データセット全体には付けない）。
+# SA・借用・bigquery.jobUser は infra/bootstrap/calendar_toml.tf（bootstrap を先に apply する。SA が無いと付与が失敗する）
+resource "google_bigquery_table_iam_member" "calendar_toml_reader" {
+  for_each = {
+    trading_calendar        = google_bigquery_table.trading_calendar.table_id
+    trading_calendar_latest = google_bigquery_table.trading_calendar_latest.table_id
+  }
+
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.tokyo.dataset_id
+  table_id   = each.value
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:sa-calendar-toml@${var.project_id}.iam.gserviceaccount.com"
+}
+
 # 手動の取り込み（定期起動しない）: gcloud run jobs execute calendar-sync --region ... [--args=--dry-run] --wait
 # 引数: --dry-run（書かない）/ --accept=<理由>（前の版との差分の検証を越える）。権限は sa-ingest と共用。
 # タスクのタイムアウト 600 秒（アプリは settings.CALENDAR_JOB_DEADLINE_SECONDS = 300 秒）、リトライ 0。
