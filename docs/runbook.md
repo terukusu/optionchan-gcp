@@ -1039,18 +1039,19 @@ jq '.displayName = "optionchan: 試験 M2 ingest" | .documentation.subject = "[o
     | .alertStrategy.notificationRateLimit.period = "300s"
     | .conditions[0].conditionMatchedLog.filter |= sub("severity>=ERROR"; "severity>=INFO")' \
   monitoring/ingest-m2-errors.json > $T/t2.json
-# M1: 2xx を 5xx にする（5xx の系列が無い = データ無しで発火）
+# M1: しきい値を極端に大きくする（15 分の 2xx が 1 億未満 = 常に真で発火）。
+# 5xx に変えて「データ無し」で鳴らす方法は、一度もデータの無い系列は評価されず鳴らなかった（2026-10-13）
 jq '.displayName = "optionchan: 試験 M1 ingest" | .documentation.subject = "[optionchan] 試験 M1 ingest（削除予定）"
-    | .conditions[0].conditionThreshold.filter |= sub("\"2xx\""; "\"5xx\"")' \
+    | .conditions[0].conditionThreshold.thresholdValue = 100000000' \
   monitoring/ingest-m1-liveness.json > $T/t1.json
 jq -r '.conditions[0].conditionMatchedLog.filter' $T/t2.json | grep -c 'severity>=INFO'   # 1
-jq -r '.conditions[0].conditionThreshold.filter' $T/t1.json | grep -c '"5xx"'   # 1
+jq -r '.conditions[0].conditionThreshold.thresholdValue' $T/t1.json   # 100000000
 gcloud monitoring policies create --project=$P --policy-from-file=$T/t2.json --notification-channels="$CH" --format='value(displayName)'
 gcloud monitoring policies create --project=$P --policy-from-file=$T/t1.json --notification-channels="$CH" --format='value(displayName)'
 rm -rf $T
 ```
 
-- 試験 M2 は数分で、試験 M1 は 5〜10 分でメールが届く見込み。30 分待っても届かなければ、ポリシーのインシデント（コンソールの Alerting）と通知チャネルを見る
+- 試験 M2 は数分で、試験 M1 は 5〜10 分でメールが届く見込み（2026-10-13 の実施: M2 は作成から約 28 分、M1 は約 4 分でインシデントが開いた）。30 分待っても届かなければ、ポリシーのインシデント（コンソールの Alerting）と通知チャネルを見る
 - 受信した日時（分まで）を #35 にコメントする（メール本文は貼らない）
 - 削除（表示名が完全一致で 1 件のときだけ消す）:
 
