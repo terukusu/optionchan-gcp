@@ -6,9 +6,10 @@ import google.auth.exceptions
 import pytest
 import requests
 from google.api_core import exceptions
+from google.cloud.storage.exceptions import DataCorruption, InvalidResponse
 
 from optionchan_ingest import io_bq, settings
-from optionchan_ingest.io_bq import BigQueryWriter, WriteFailed
+from optionchan_ingest.io_bq import BigQueryQuery, BigQueryWriter, QueryFailed, WriteFailed
 from optionchan_ingest.io_gcs import AlreadyExists, RawStore, StorageFailed
 from optionchan_ingest.io_jpx import fetch_page
 from optionchan_ingest.parser import JpxUnavailable
@@ -260,3 +261,251 @@ def test_append_required_missing_raises_before_send():
     with pytest.raises(ValueError):
         w.append("spot_price", [{"price": 1.0}])
     assert client.calls == []
+
+
+# --- GCS: 回収・再処理用の一覧と読み出し（#34） ---
+
+
+class ListingBlob:
+    def __init__(self, name, generation, time_created):
+        self.name, self.generation, self.time_created = name, generation, time_created
+
+
+class ListingClient:
+    def __init__(self, blobs=None, error=None):
+        self.blobs = blobs or []
+        self.error = error
+        self.kwargs = None
+        self.read = None
+
+    def bucket(self, name):
+        client = self
+
+        class Bucket:
+            def blob(self, blob_name, generation=None):
+                class Blob:
+                    def download_as_bytes(self, timeout, retry):
+                        client.read = (blob_name, generation, timeout, retry)
+                        if client.error:
+                            raise client.error
+                        return b"data"
+
+                return Blob()
+
+        return Bucket()
+
+    def list_blobs(self, bucket_name, **kwargs):
+        self.kwargs = {"bucket": bucket_name, **kwargs}
+        if self.error:
+            raise self.error
+        return iter(self.blobs)
+
+
+def test_raw_store_list_offsets_and_fields():
+    created = datetime(2026, 10, 12, 1, 46, 9, tzinfo=UTC)
+    client = ListingClient([ListingBlob("raw/2026/10/12/20261012T1046.json.gz", "17", created)])
+    store = RawStore("b", client=client)
+    objects = store.list("raw/2026/10/12/20261012T0500.json.gz", "raw/2026/10/12/20261012T1101.json.gz", timeout=10)
+    assert [(o.name, o.generation, o.time_created) for o in objects] == [
+        ("raw/2026/10/12/20261012T1046.json.gz", 17, created)
+    ]
+    kwargs = client.kwargs
+    assert kwargs["bucket"] == "b" and kwargs["prefix"] == "raw/"
+    assert (kwargs["start_offset"], kwargs["end_offset"]) == (
+        "raw/2026/10/12/20261012T0500.json.gz",
+        "raw/2026/10/12/20261012T1101.json.gz",
+    )
+    assert kwargs["fields"] == "items(name,generation,timeCreated),nextPageToken"
+    assert kwargs["timeout"] == (2.5, 2.5)  # 1 回の試行 5 秒
+    assert kwargs["retry"].timeout == 5  # 最後の試行も 10 秒内に終わる範囲でだけ再試行する
+
+
+def test_raw_store_read_with_generation():
+    client = ListingClient()
+    store = RawStore("b", client=client)
+    assert store.read("raw/x.json.gz", 123, timeout=3) == b"data"
+    name, generation, timeout, retry = client.read
+    assert (name, generation, timeout, retry) == ("raw/x.json.gz", 123, (1.5, 1.5), None)
+
+
+@pytest.mark.parametrize(
+    "error", [exceptions.ServiceUnavailable("down"), requests.exceptions.ReadTimeout("slow"), exceptions.NotFound("x")]
+)
+def test_raw_store_list_and_read_errors_are_storage_failed(error):
+    store = RawStore("b", client=ListingClient(error=error))
+    with pytest.raises(StorageFailed):
+        store.list("raw/a", "raw/b")
+    with pytest.raises(StorageFailed):
+        store.read("raw/a", 1)
+
+
+def test_raw_store_list_with_real_client_pages():
+    """実物の storage.Client で、一覧の全ページを読み、offset・prefix・fields がクエリに入ること（通信はしない）"""
+    import json as jsonlib
+    from urllib.parse import parse_qs, urlparse
+
+    from google.auth.credentials import AnonymousCredentials
+    from google.cloud import storage
+
+    class Response:
+        def __init__(self, body):
+            self.status_code = 200
+            self.headers = {"content-type": "application/json"}
+            self.content = jsonlib.dumps(body).encode()
+            self.text = self.content.decode()
+
+        def json(self):
+            return jsonlib.loads(self.content)
+
+    class Session:
+        is_mtls = False
+
+        def __init__(self):
+            self.queries = []
+
+        def request(self, method, url, *args, **kwargs):
+            parsed = urlparse(url)
+            if not parsed.path.endswith("/o"):
+                raise AssertionError(f"想定外の呼び出し {method} {parsed.path}")
+            query = parse_qs(parsed.query)
+            self.queries.append(query)
+            item = {
+                "name": "raw/2026/10/12/20261012T1046.json.gz",
+                "generation": "5",
+                "timeCreated": "2026-10-12T01:46:09.123Z",
+            }
+            if "pageToken" not in query:
+                return Response({"items": [item], "nextPageToken": "t2"})
+            return Response({"items": [{**item, "name": "raw/2026/10/12/20261012T1047.json.gz", "generation": "6"}]})
+
+    http = Session()
+    client = storage.Client(project="test", credentials=AnonymousCredentials(), _http=http)
+    objects = RawStore("b", client=client).list(
+        "raw/2026/10/12/20261012T0500.json.gz", "raw/2026/10/12/20261012T1101.json.gz"
+    )
+    assert [(o.name[-13:], o.generation) for o in objects] == [("T1046.json.gz", 5), ("T1047.json.gz", 6)]
+    assert objects[0].time_created == datetime(2026, 10, 12, 1, 46, 9, 123000, tzinfo=UTC)
+    first = http.queries[0]
+    assert first["prefix"] == ["raw/"]
+    assert first["startOffset"] == ["raw/2026/10/12/20261012T0500.json.gz"]
+    assert first["endOffset"] == ["raw/2026/10/12/20261012T1101.json.gz"]
+    assert first["fields"] == ["items(name,generation,timeCreated),nextPageToken"]
+    assert http.queries[1]["pageToken"] == ["t2"]
+
+
+# --- BigQuery: 完了記録のクエリ（jobs.query の REST、#34） ---
+
+
+class QueryResponse:
+    def __init__(self, status, body):
+        self.status_code = status
+        self.body = body
+
+    def json(self):
+        if isinstance(self.body, Exception):
+            raise self.body
+        return self.body
+
+
+class QuerySession:
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    def post(self, url, json, timeout):
+        self.calls.append({"url": url, "json": json, "timeout": timeout})
+        if isinstance(self.result, Exception):
+            raise self.result
+        return self.result
+
+
+START = datetime(2026, 10, 11, 19, 59, 20, tzinfo=UTC)
+END = datetime(2026, 10, 12, 2, 1, 20, tzinfo=UTC)
+
+
+def query_client(result):
+    session = QuerySession(result)
+    return BigQueryQuery("p", "optionchan_tokyo", "asia-northeast1", session=session), session
+
+
+OK_BODY = {
+    "jobComplete": True,
+    "totalRows": "2",
+    "rows": [{"f": [{"v": "gs://b/raw/2026/10/12/20261012T1046.json.gz#5"}]}, {"f": [{"v": "gs://b/raw/x#6"}]}],
+}
+
+
+def test_completed_sources_request_uses_parameters():
+    from optionchan_ingest.parser import JST
+
+    client, session = query_client(QueryResponse(200, OK_BODY))
+    start_jst = START.astimezone(JST)
+    assert client.completed_sources(start_jst, END, timeout=15) == [
+        "gs://b/raw/2026/10/12/20261012T1046.json.gz#5",
+        "gs://b/raw/x#6",
+    ]
+    (call,) = session.calls
+    assert call["url"] == "https://bigquery.googleapis.com/bigquery/v2/projects/p/queries"
+    body = call["json"]
+    assert body["useLegacySql"] is False
+    assert body["location"] == "asia-northeast1"
+    assert body["parameterMode"] == "NAMED"
+    assert body["queryParameters"] == [
+        {
+            "name": "start_at",
+            "parameterType": {"type": "TIMESTAMP"},
+            "parameterValue": {"value": "2026-10-11 19:59:20.000000+00:00"},  # JST で渡しても UTC にする
+        },
+        {
+            "name": "end_at",
+            "parameterType": {"type": "TIMESTAMP"},
+            "parameterValue": {"value": "2026-10-12 02:01:20.000000+00:00"},
+        },
+    ]
+    sql = body["query"]
+    assert "`p.optionchan_tokyo.ingest_runs`" in sql
+    assert "@start_at" in sql and "@end_at" in sql
+    assert "2026" not in sql  # 時刻をクエリ文字列に埋め込まない
+    assert call["timeout"] == (5, 10)
+    assert body["timeoutMs"] == 9000  # 読み取りタイムアウトより 1 秒短く
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        QueryResponse(200, {"jobComplete": False}),
+        QueryResponse(200, {**OK_BODY, "pageToken": "next"}),
+        QueryResponse(200, {**OK_BODY, "totalRows": "3"}),
+        QueryResponse(200, {"jobComplete": True, "errors": [{"reason": "x"}]}),
+        QueryResponse(200, ValueError("not json")),
+        QueryResponse(500, {"error": {"message": "backend error"}}),
+        QueryResponse(403, {"error": {"message": "Access Denied"}}),
+        requests.exceptions.ReadTimeout("slow"),
+        requests.exceptions.ConnectionError("reset"),
+        google.auth.exceptions.RefreshError("token"),
+    ],
+)
+def test_query_failures_are_query_failed(result):
+    client, _ = query_client(result)
+    with pytest.raises(QueryFailed):
+        client.completed_sources(START, END)
+
+
+def test_query_empty_result():
+    client, _ = query_client(QueryResponse(200, {"jobComplete": True, "totalRows": "0"}))
+    assert client.completed_sources(START, END) == []
+
+
+def test_query_rejects_naive_time():
+    client, session = query_client(QueryResponse(200, OK_BODY))
+    with pytest.raises(ValueError):
+        client.completed_sources(datetime(2026, 10, 12), END)
+    assert session.calls == []
+
+
+@pytest.mark.parametrize("error", [DataCorruption(None, "md5 mismatch"), InvalidResponse(None, "bad")])
+def test_raw_store_read_corruption_is_storage_failed(error):
+    """チェックサムの不一致・想定外の応答（どちらも Exception の直下）も StorageFailed にする"""
+    store = RawStore("b", client=ListingClient(error=error))
+    with pytest.raises(StorageFailed):
+        store.read("raw/a", 1)

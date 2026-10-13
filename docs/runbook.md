@@ -735,11 +735,13 @@ $TF -chdir=infra/prod plan -input=false -detailed-exitcode > /dev/null; echo $? 
 |---|---|---|
 | Scheduler `ingest`（asia-northeast1） | `* * * * *` Asia/Tokyo、POST `/`、OIDC（`sa-scheduler`、audience = サービスの URL）、リトライ 0、`attempt_deadline` 50 秒、`paused = var.ingest_paused` | `infra/prod/ingest.tf` |
 | Cloud Run `ingest`（asia-northeast1） | 第1世代、CPU 0.5・512Mi・リクエスト中だけ CPU、同時実行 1、0〜2 インスタンス、50 秒、ingress internal、`sa-ingest`、digest 指定、環境変数 `GCP_PROJECT` / `RAW_BUCKET` / `BQ_DATASET` | `infra/prod/ingest.tf` |
+| Cloud Run ジョブ `reprocess`（asia-northeast1） | 手動実行だけ（定期起動しない）。同じイメージで `python -m optionchan_ingest.reprocess`、CPU 1・512Mi、タスク 1、タイムアウト 3600 秒、リトライ 0、`sa-ingest` | `infra/prod/ingest.tf` |
 | BigQuery `optionchan_tokyo` | asia-northeast1、PHYSICAL、タイムトラベル 168 時間。テーブル `spot_price` / `future_price` / `option_price` / `ingest_runs` | `schema/tokyo/`（`infra/prod/data.tf` が読む） |
+| テーブル関数（最新版の選択） | `optionchan_tokyo.latest_runs` / `spot_price_latest` / `future_price_latest` / `option_price_latest`（引数 `start_at`, `end_at`） | `sql/latest/`（`infra/prod/data.tf` が読む） |
 | GCS `optionchan-222710-raw` | 生 HTML（`raw/YYYY/MM/DD/YYYYMMDDTHHMM.json.gz`）。ソフト削除 7 日、期限なし | `infra/bootstrap/ingest.tf` |
-| 権限 | `sa-ingest`: `optionchan_tokyo` の `dataEditor`、バケットの `objectCreator`・`objectViewer`（削除・上書きなし）。`sa-scheduler`: サービス `ingest` の `run.invoker` だけ | `infra/bootstrap/ingest.tf`、`infra/prod/iam.tf` |
+| 権限 | `sa-ingest`: `optionchan_tokyo` の `dataEditor`、プロジェクトの `bigquery.jobUser`（回収・照合・再処理のクエリ、#34）、バケットの `objectCreator`・`objectViewer`（削除・上書きなし）。`sa-scheduler`: サービス `ingest` の `run.invoker` だけ | `infra/bootstrap/ingest.tf`、`infra/prod/iam.tf` |
 
-時間外・休場日はアプリが 204 を返して何もしない（JPX にもアクセスしない）。取引時間中は 1 限月のページを毎分、2 限月のページは更新時だけ取得する。
+時間外・休場日はアプリが 204 を返して何もしない（JPX にもアクセスしない）。取引時間中は 1 限月のページを毎分、2 限月のページは更新時だけ取得する。毎時 0 分（JST）は、通常の処理の後に取りこぼしを回収し、07:00 は前日分を照合する（「回収と照合」）。
 
 ### 変数
 
@@ -861,6 +863,101 @@ curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" -G \
   | jq '[.timeSeries[].points[].value.doubleValue] | add'   # × 23（月の取引日）× 0.5 が 18 万未満
 ```
 
+### 回収と照合（#34）
+
+毎時 0 分（JST。Scheduler の予定時刻 `X-CloudScheduler-ScheduleTime`、無ければ実時刻）のリクエストは、通常の処理（取引時間中は #38 の待ち 8 秒 + 取得・書き込み）の後に、同じ期限 45 秒の残りで次を行う。応答（status・outcome）は通常の処理の結果のまま（回収の失敗は応答を変えない）。
+
+- 回収: 名前の時刻が直近 6 時間の生 HTML のうち、`ingest_runs` に完了記録が無く、作成から 3 分以上たったものを古い順に最大 10 件、保存済みの生 HTML から読み直して追記する（`trigger = recovery`、新しい `ingest_run_id`、今の `PARSER_VERSION`。JPX にはアクセスしない）。1 件を始めるのは残りが 15 秒以上のとき（07:00 の回は照合の分の 15 秒を残す）。作成から 3 分以上の生 HTML が無ければ BigQuery にクエリしない（時間外・休場日）
+- 照合（07:00 の回だけ、回収の後）: 名前の時刻が前日 07:00〜当日 07:00 の生 HTML の数・完了記録のある数・未回収の数と名前（先頭 20 件）。生 HTML が 0 件の日はクエリしない
+- 設定は `apps/ingest` の `settings.py`（`RECOVERY_*`・`RECONCILE_*`）
+
+対象になるのは「生 HTML はあるのに完了記録が無い」スナップショット（`write_failed`・`deadline_exceeded`・作成の応答だけ失われた `storage_failed` など）。生 HTML が無い取りこぼし（JPX の障害・停止中）は埋められない。
+
+ログ（`jsonPayload.event`）:
+
+| event | severity | 意味 |
+|---|---|---|
+| `recovery` | INFO（残りがあれば WARNING） | 回収のまとめ: `listed`（窓の生 HTML）・`old_enough`（3 分以上）・`completed`・`pending`（未完了）・`recovered`・`parse_failed`・`write_failed`・`storage_failed`・`remaining`（上限・期限で残した件数。次の 0 分に回る）・`queried`・`elapsed_ms` |
+| `recovered` | INFO | 1 件の回収（`object`・`ingest_run_id`・`rows`） |
+| `recovery_parse_failed` | WARNING | 生 HTML から行を作れない（元の実行が ERROR `parse_failed` を出し済み）。6 時間の窓にある間は毎時試す |
+| `write_failed` / `storage_failed`（`trigger=recovery`、`stage=recovery_read`） | ERROR | 回収の書き込み・読み出しの失敗。次の 0 分に再試行される |
+| `recovery_item_failed` | ERROR | 1 件の処理の想定外の例外（`object`・`error_type`）。その件を飛ばして次へ進む（再処理ジョブでは `reprocess_item_failed`） |
+| `recovery_failed` | ERROR | 一覧・クエリの失敗、想定外の例外（`stage`）。その回の回収はしない |
+| `recovery_skipped` | WARNING | 期限の残りが足りず回収しなかった（`reason`）。次の 0 分に回る |
+| `raw_reconciled` | INFO | 照合: `window_start`・`raw`・`completed`・`unresolved`・`unresolved_objects` |
+| `raw_unrecovered` | ERROR | 照合で未回収が 1 件以上（内容は `raw_reconciled` と同じ）。#11 の AC 4 の日次の数値 |
+| `reconcile_failed` | ERROR | 照合の一覧・クエリの失敗・期限 |
+
+`raw_unrecovered` を受けたとき:
+
+1. 同じ窓の `recovery_parse_failed` / `parse_failed` のログで、未回収の名前ごとに原因を見る（`gcloud logging read "... AND jsonPayload.object=\"<名前>\"" --project $P`）
+2. 解析の失敗ならパーサーを直す PR（`PARSER_VERSION` を上げる）をデプロイしてから、「再処理ジョブ」で `--only-missing` を実行する
+3. 書き込み・読み出しの失敗（BigQuery・GCS の障害が 6 時間以上続いた等）なら、そのまま「再処理ジョブ」で `--only-missing` を実行する
+4. 結果（件数と原因の分類）を #11 にコメントする（名前の一覧・ログの全文は貼らない）
+
+確認（0 分の回の結果。窓は「ログ」と同じ `$W` の形で、毎時 0〜1 分を含む時間帯にする）:
+
+```sh
+gcloud logging read "$W AND jsonPayload.event=(\"recovery\" OR \"recovery_skipped\" OR \"raw_reconciled\")" --project $P --format=json \
+  | jq -c '.[].jsonPayload | {event, schedule_time, listed, old_enough, pending, recovered, remaining, raw, unresolved, elapsed_ms}'
+# 0 分のリクエスト全体（通常の処理 + 回収）の時間 = recovery の elapsed_ms（期限の起点から）
+gcloud logging read "$W AND jsonPayload.event=\"recovery\"" --project $P --format=json \
+  | jq '[.[].jsonPayload.elapsed_ms] | max'   # 45000 未満
+```
+
+コスト: 対象が無い回は GCS の一覧 1 回だけ。クエリは平日で 1 日 25 回程度（1 回の課金は最小の 10MB）。確認（翌日、`creation_time` で 1 日に絞る）:
+
+```sh
+bq query --location=$L --use_legacy_sql=false --format=prettyjson '
+SELECT COUNT(*) jobs, SUM(total_bytes_billed) billed
+FROM `region-asia-northeast1`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+WHERE creation_time >= TIMESTAMP("<その日 00:00 JST の UTC>") AND creation_time < TIMESTAMP("<翌日 00:00 JST の UTC>")
+  AND STARTS_WITH(user_email, "sa-ingest@")'   # 30 件以下、1 GiB 以下
+```
+
+### 再処理ジョブ（#34）
+
+保存済みの生 HTML から、名前の時刻が `[start, end)` のスナップショットを今のイメージの `PARSER_VERSION` で作り直して追記する（`trigger = reprocess`。置換は追記のみ = target.md 3.1 の (b)。古い版は消さず、最新版の選択で新しい版が選ばれる）。JPX にはアクセスしない。BigQuery への追記なので、実行は所有者の判断で行う。
+
+- `--start` / `--end`: タイムゾーン付きの ISO8601（`2026-10-13T08:45:00+09:00` か `2026-10-12T23:45:00Z`。無いと終了コード 2）
+- `--only-missing`: 完了記録のあるものを飛ばす（取りこぼしだけを埋める）。付けなければ期間内をすべて作り直す（パーサーの修正後）
+- `--dry-run`: 対象の件数と先頭 20 件の名前をログに出すだけ（GCS の一覧と BigQuery のクエリだけ）
+- `--limit N`: 処理する件数の上限（古い順）
+- 終了コード: 0 = すべて成功、1 = 失敗が 1 件以上（ERROR `reprocess_failed`、`reason=items_failed`。1 件の想定外の例外は ERROR `reprocess_item_failed` を出して次へ進む）または一覧・クエリ・設定の失敗（`stage`）、2 = 引数の誤り、3 = 期限（3300 秒）で途中終了（`reason=deadline`。同じ範囲を `--only-missing` で再実行）
+- 1 件 1〜2 秒、1 日 約 1,200 件なので、長い期間は 1 日ずつ分けて実行する。回収（毎時）と同じスナップショットを同時に書いても、最新版の選択で 1 件が選ばれるだけ
+
+```sh
+gcloud run jobs execute reprocess --region $L --project $P --wait \
+  --args=--start=2026-10-13T07:00:00+09:00,--end=2026-10-14T07:00:00+09:00,--only-missing,--dry-run
+# ログで件数を見てから、--dry-run を外して実行する
+gcloud logging read "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"reprocess\" AND jsonPayload.event=\"reprocess_done\"" \
+  --project $P --limit 5 --format=json \
+  | jq -c '.[].jsonPayload | {dry_run, listed, skipped_completed, targets, over_limit, processed, ok, parse_failed, write_failed, remaining}'
+```
+
+`--args` は `,` 区切り（値に `,` を含めない）。`+09:00` はそのまま渡せる。ジョブのログは `resource.type="cloud_run_job"`（サービスとは別。#35 の M2 の条件に入れる）。
+
+### 最新版の読み方（#34）
+
+回収・再処理は同じスナップショットを新しい `ingest_run_id` で追記するので、生テーブルを直接数えると重複する。書き込みの途中で失敗した実行の行（完了記録の無い残骸）も生テーブルに残る。表示・集計・比較はテーブル関数で読む:
+
+- `optionchan_tokyo.latest_runs(start_at, end_at)`: `snapshot_at` が `[start_at, end_at)` の `ingest_runs` のうち、スナップショットごとに最新の 1 件（`finished_at` の降順、同時刻なら `ingest_run_id` の降順）
+- `optionchan_tokyo.spot_price_latest` / `future_price_latest` / `option_price_latest(start_at, end_at)`: `created_at` が同じ範囲で、`latest_runs` の実行の行だけ
+
+期間の引数は必須（`option_price` のパーティションの絞り込み）。確認（T0〜T0+1 時間。行数が一致、重複 0、所属なし 0）:
+
+```sh
+bq query --location=$L --use_legacy_sql=false --parameter="t0:STRING:$T0" --format=prettyjson '
+WITH lr AS (SELECT * FROM `optionchan_tokyo.latest_runs`(TIMESTAMP(@t0), TIMESTAMP_ADD(TIMESTAMP(@t0), INTERVAL 1 HOUR))),
+o AS (SELECT * FROM `optionchan_tokyo.option_price_latest`(TIMESTAMP(@t0), TIMESTAMP_ADD(TIMESTAMP(@t0), INTERVAL 1 HOUR)))
+SELECT
+  (SELECT COUNT(*) FROM o) option_rows,
+  (SELECT SUM(rows_option) FROM lr) expected_rows,
+  (SELECT COUNT(*) FROM (SELECT 1 FROM o GROUP BY created_at, type, target_price, last_trading_day HAVING COUNT(*) > 1)) dup_keys,
+  (SELECT COUNT(*) FROM o WHERE ingest_run_id NOT IN (SELECT ingest_run_id FROM lr)) orphan_rows,
+  (SELECT COUNT(*) - COUNT(DISTINCT snapshot_at) FROM lr) dup_snapshots'
+```
+
 ### 停止・再開
 
 ```sh
@@ -869,7 +966,7 @@ gcloud scheduler jobs pause ingest --location $L --project $P   # この PR が�
 gcloud scheduler jobs describe ingest --location $L --project $P --format='value(state)'   # PAUSED
 ```
 
-通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。止めている間の取りこぼしは 11c（#34）の回収の対象。
+通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系の値で補うかは #12 で扱う）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
 
 ### 切り戻し
 
@@ -877,9 +974,11 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 |---|---|---|
 | R1 新系の起動を止める（最初に行う） | 上の「停止・再開」 | 新系の取り込みが止まるだけ。旧系・データ・生 HTML はそのまま |
 | R2 イメージを前の版に戻す | 原因のコミットを revert する PR。plan が前の入力のタグを解決し、Artifact Registry に残っていれば（直近 5 版）その digest、無ければ apply job がビルドし直す | 1 回の apply で新しいリビジョン |
-| R3 計算資源を消す | Scheduler・Cloud Run・invoker の定義を消す PR（Cloud Run は `deletion_protection = false`）。plan の要約が delete 3 だけであることを見てマージ | 新系が無くなる。データセット・テーブル・バケット・SA は残す |
+| R3 計算資源を消す | Scheduler・Cloud Run（サービス・ジョブ `reprocess`）・invoker・テーブル関数の定義を消す PR（Cloud Run は `deletion_protection = false`）。plan の要約が delete だけ（その件数）であることを見てマージ | 新系が無くなる。データセット・テーブル・バケット・SA は残す |
 
-データは消さない（テーブルは `deletion_protection`、データセット・テーブル・バケットは `prevent_destroy` と `deletion_policy = "PREVENT"`）。並行稼働中に入った行は追記のみで、11c の最新版ビューで選別する。
+データは消さない（テーブルは `deletion_protection`、データセット・テーブル・バケットは `prevent_destroy` と `deletion_policy = "PREVENT"`）。並行稼働中に入った行は追記のみで、最新版の選択（テーブル関数、「最新版の読み方」）で選別する。
+
+#34（回収・再処理・テーブル関数）だけを戻すときは、そのコミットを revert する PR（plan はサービスのイメージの update 1、ジョブ・テーブル関数の delete 5）。回収・再処理で書かれた行は消さない（同じスナップショットの 1 件だけが最新版として選ばれるので害は無い）。bootstrap の `bigquery.jobUser` は使われなければ無害なので残してよい（外すなら bootstrap の revert と所有者の apply）。
 
 ## 取引カレンダーの更新
 

@@ -34,8 +34,10 @@ RUN_BLOCKS = list(resource_blocks(RUN_RESOURCE))
 
 
 def test_cloud_run_exists():
-    # 検査が空振りしないように（ingest は #33 で作る）
-    assert any('google_cloud_run_v2_service.ingest' in name for name, _ in RUN_BLOCKS)
+    # 検査が空振りしないように（サービス ingest は #33、ジョブ reprocess は #34 で作る）
+    names = [name for name, _ in RUN_BLOCKS]
+    assert any('google_cloud_run_v2_service.ingest' in name for name in names)
+    assert any('google_cloud_run_v2_job.reprocess' in name for name in names)
 
 
 @pytest.mark.parametrize('name,body', RUN_BLOCKS, ids=[n for n, _ in RUN_BLOCKS])

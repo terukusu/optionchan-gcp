@@ -4,6 +4,7 @@
 schema/tokyo/*.json・config/trading_calendar.toml だけを直せば差し替えられるようにする。
 """
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -67,8 +68,37 @@ FETCH_AT_SECOND = 8.0
 # 上限: 待ち 20 秒 + JPX 15 秒でも期限 45 秒の内側に残りがある値
 MAX_FETCH_AT_SECOND = 20.0
 # BigQuery Storage Write API: テーブルごとに 1 回、開始から応答まで 15 秒（残り時間で頭打ち）。
-# リトライなし（失敗は write_failed、回収は 11c）
+# リトライなし（失敗は write_failed、毎時の回収（recovery.py）が拾う）
 BQ_APPEND_TIMEOUT_SECONDS = 15
+
+# --- 取りこぼしの回収・日次の照合・再処理（#34、target.md 3.1） ---
+# 毎時 0 分（JST。Scheduler の予定時刻、無ければ実時刻）のリクエストで、通常の処理の後に
+# 同じ期限（45 秒）の残りで回収する。
+# 対象: 名前の時刻が直近 RECOVERY_LOOKBACK_HOURS 時間の生 HTML のうち、ingest_runs に完了記録が無く、
+# 作成から RECOVERY_MIN_AGE_SECONDS 秒以上たったもの（実行中の取り込み（最大 50 秒）と重ならない）を古い順に最大
+# RECOVERY_MAX_ITEMS 件。1 件を始めるのは残りが RECOVERY_MIN_REMAINING_SECONDS 秒以上のときだけ
+# （取引時間中は #38 の待ち 8 秒 + 通常の処理の後なので、残りはおよそ 30 秒）
+RECOVERY_LOOKBACK_HOURS = 6
+RECOVERY_MIN_AGE_SECONDS = 180
+RECOVERY_MAX_ITEMS = 10
+RECOVERY_MIN_REMAINING_SECONDS = 15
+# 日次の照合: この JST の時:分のリクエストで、回収の後に前日のこの時刻〜当日のこの時刻の生 HTML と完了記録を数える
+RECONCILE_AT = (7, 0)
+# 照合の回は、照合（一覧 + クエリ）の分の時間を回収に使わせない
+RECONCILE_RESERVE_SECONDS = 15
+# 照合・再処理のログに名前を載せる上限
+RECONCILE_LOG_MAX = 20
+# 再処理ジョブ（Cloud Run ジョブ reprocess）の期限。タスクのタイムアウト 3600 秒より前に止めて残りの件数を出す
+REPROCESS_DEADLINE_SECONDS = 3300
+# 再処理で 1 件を始める残り時間の下限（1 件の最悪 = 読み出し 10 秒 + 追記 15 秒 × 4）
+REPROCESS_MIN_REMAINING_SECONDS = 70
+# 完了記録のクエリ（BigQuery jobs.query の REST）。リトライなし（次の回に任せる）
+BQ_QUERY_TIMEOUT_SECONDS = 15
+BQ_CONNECT_TIMEOUT_SECONDS = 5
+# 生 HTML の一覧・読み出し（読み取りなので、最後の試行が timeout 内に終わる範囲で再試行する。1 回の試行の上限）
+GCS_LIST_TIMEOUT_SECONDS = 10
+GCS_READ_TIMEOUT_SECONDS = 10
+GCS_READ_ATTEMPT_TIMEOUT_SECONDS = 5
 
 # 1 限月あたりの行使価格の下限（構造の検査。実測の最小は 1 スナップショット 84 行 = 2 限月 × 2 種別 × 21）
 MIN_STRIKES = 10
@@ -92,6 +122,7 @@ class Settings:
     schema_dir: Path
     dry_run: bool
     fetch_at_second: float = FETCH_AT_SECOND
+    bq_location: str = ""  # クエリのジョブを実行する場所（データセットの場所）
 
     @classmethod
     def from_env(cls, env=None):
@@ -100,15 +131,23 @@ class Settings:
         raw_bucket = env.get("RAW_BUCKET", "")
         if not raw_bucket and not dry_run:
             raise RuntimeError("RAW_BUCKET が未設定")
+        schema_dir = Path(env.get("SCHEMA_DIR", DEFAULT_SCHEMA_DIR))
         return cls(
             project=env.get("GCP_PROJECT") or None,
             dataset=env.get("BQ_DATASET", "optionchan_tokyo"),
             raw_bucket=raw_bucket or "dry-run",
             calendar_path=Path(env.get("CALENDAR_PATH", DEFAULT_CALENDAR_PATH)),
-            schema_dir=Path(env.get("SCHEMA_DIR", DEFAULT_SCHEMA_DIR)),
+            schema_dir=schema_dir,
             dry_run=dry_run,
             fetch_at_second=_fetch_at_second(env.get("INGEST_FETCH_AT_SECOND", "")),
+            bq_location=env.get("BQ_LOCATION") or dataset_location(schema_dir),
         )
+
+
+def dataset_location(schema_dir: Path) -> str:
+    """データセットの場所（schema/tokyo/tables.json の dataset.location。Terraform もここを読む）"""
+    with open(Path(schema_dir) / "tables.json", encoding="utf-8") as f:
+        return json.load(f)["dataset"]["location"]
 
 
 def _fetch_at_second(text: str) -> float:

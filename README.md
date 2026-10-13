@@ -22,6 +22,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * 新しい取り込み（Cloud Run サービス、Python 3.13・uv。#11 で旧系と並行稼働させる）。JPX のページを毎分取得し、生 HTML（2 ページを gzip した JSON）を GCS に、行を BigQuery（`optionchan_tokyo`、東京、Storage Write API）に書く。Cloud Run `ingest`（asia-northeast1）を Scheduler `ingest` が毎分起動する。デプロイは deploy workflow（イメージのビルド・push も含む、#33）。確認・停止・切り戻しは docs/runbook.md の「新しい取り込み（ingest）」
   * ローカルの動作確認は `INGEST_DRY_RUN=1`（GCS・BigQuery に書かず、件数と proto のサイズだけをログに出す）
   * 取引時間中は分の頭から 8 秒まで待ってから JPX を取得する（#38。ローカルでも実時刻で待つ。`INGEST_FETCH_AT_SECOND=0` で待たない）
+  * 毎時 0 分に取りこぼし（生 HTML はあるが完了記録 `ingest_runs` が無いもの）を回収し、07:00 に前日分を照合する。期間を指定した作り直しは Cloud Run ジョブ `reprocess`（手動、#34）。手順は docs/runbook.md の「回収と照合」「再処理ジョブ」
 
 * config
   * 取引カレンダー（`trading_calendar.toml`）。更新手順は docs/runbook.md の「取引カレンダーの更新」
@@ -29,14 +30,17 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 * schema
   * BigQueryのスキーマ。`schema/tokyo/` は新しい取り込みのテーブル（東京）の定義と設定（`tables.json`）
 
+* sql
+  * BigQuery の SQL。`sql/latest/` はスナップショットごとに最新の完了版を選ぶテーブル関数の本文（Terraform が読む。使い方は docs/runbook.md の「最新版の読み方」）
+
 * monitoring
   * Cloud Monitoring のアラートポリシー定義（JSON）とバックテスト。作成・試験発報の手順は docs/runbook.md の「監視アラート」
 
 * tests
-  * functions・監視アラート定義・GitHub Actions の workflow のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
+  * functions・監視アラート定義・GitHub Actions の workflow・Terraform・`sql/` の静的検査のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
 
 * infra
-  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込みの SA・生 HTML のバケットと権限。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo`・Cloud Run / Scheduler `ingest`。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
+  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込みの SA・生 HTML のバケットと権限。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo` とテーブル関数・Cloud Run / Scheduler `ingest`・Cloud Run ジョブ `reprocess`。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
 
 * .github/workflows
   * `ci.yml`（PR で pytest（`apps/ingest` を含む）・terraform plan・取り込みのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）

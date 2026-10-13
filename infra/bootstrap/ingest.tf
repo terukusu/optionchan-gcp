@@ -1,5 +1,5 @@
 # 新しい取り込み（Cloud Run ingest、#33）の実行用 SA・生 HTML のバケットと、それらへの付与。
-# prod が作るリソース（データセット・サービス）への付与は prod の iam.tf。sa-ingest の bigquery.jobUser は 11c（#34）で足す。
+# prod が作るリソース（データセット・サービス・ジョブ）への付与は prod の iam.tf。プロジェクト単位の付与（jobUser）はここ。
 
 resource "google_service_account" "ingest" {
   project         = var.project_id
@@ -52,6 +52,14 @@ resource "google_storage_bucket_iam_member" "raw_ingest" {
   bucket = google_storage_bucket.raw.name
   role   = each.value
   member = google_service_account.ingest.member
+}
+
+# 毎時の回収・日次の照合・再処理ジョブ（#34）が ingest_runs をクエリするためのジョブ作成（プロジェクト単位でしか付けられない）。
+# データの読み取りは prod の optionchan_tokyo の dataEditor（旧データセット optionchan には何も付けない）
+resource "google_project_iam_member" "ingest_job_user" {
+  project = var.project_id
+  role    = "roles/bigquery.jobUser"
+  member  = google_service_account.ingest.member
 }
 
 # Scheduler のサービスエージェントが OIDC トークンを発行するのに必要（#19 の調査で未付与を確認）。

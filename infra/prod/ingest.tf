@@ -60,7 +60,7 @@ resource "google_cloud_run_v2_service" "ingest" {
 }
 
 # Scheduler の無料枠（3 ジョブ）は旧系で使い切っているので 1 本だけ（target.md 3.1）。
-# リトライ 0（次の分に任せる。回収は 11c）、attempt_deadline はサービスのタイムアウトと同じ 50 秒
+# リトライ 0（次の分に任せる。回収は毎時 0 分、#34）、attempt_deadline はサービスのタイムアウトと同じ 50 秒
 resource "google_cloud_scheduler_job" "ingest" {
   project          = var.project_id
   name             = "ingest"
@@ -88,4 +88,54 @@ resource "google_cloud_scheduler_job" "ingest" {
     google_cloud_run_v2_service_iam_member.scheduler_invoker,
     google_bigquery_dataset_iam_member.ingest_editor,
   ]
+}
+
+# 再処理ジョブ（#34、target.md 3.1）: 保存済みの生 HTML から期間を指定して作り直す（追記のみ、JPX にアクセスしない）。
+# 手動で実行する（定期起動しない）: gcloud run jobs execute reprocess --region ... --args=--start=...,--end=... --wait
+# 既定の args は付けない（引数なしの実行は終了コード 2 で何もしない）。権限は sa-ingest と共用（target.md 3.5）。
+# タスクのタイムアウト 3600 秒（アプリは settings.REPROCESS_DEADLINE_SECONDS = 3300 秒で止めて残りを出す）、リトライ 0。
+# deletion_protection = false: データを持たないので、切り戻しを 1 つの PR で行えるようにする
+resource "google_cloud_run_v2_job" "reprocess" {
+  project             = var.project_id
+  name                = "reprocess"
+  location            = var.region
+  deletion_protection = false
+
+  template {
+    task_count  = 1
+    parallelism = 1
+
+    template {
+      service_account = local.sa_ingest
+      timeout         = "3600s"
+      max_retries     = 0
+
+      containers {
+        image   = var.ingest_image
+        command = ["python", "-m", "optionchan_ingest.reprocess"]
+
+        resources {
+          limits = {
+            cpu    = "1"
+            memory = "512Mi"
+          }
+        }
+
+        env {
+          name  = "GCP_PROJECT"
+          value = var.project_id
+        }
+        env {
+          name  = "RAW_BUCKET"
+          value = local.raw_bucket
+        }
+        env {
+          name  = "BQ_DATASET"
+          value = google_bigquery_dataset.tokyo.dataset_id
+        }
+      }
+    }
+  }
+
+  depends_on = [google_bigquery_table.this]
 }
