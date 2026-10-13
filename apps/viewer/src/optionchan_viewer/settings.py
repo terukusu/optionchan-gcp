@@ -19,8 +19,6 @@ GiB = 1024**3
 
 # 探す範囲・読む期間の上限（リクエストの値に依らない固定値）
 SEARCH_DAYS = 14  # 最新のスナップショット・1 時間足を探す範囲（年末年始の休場を含む）
-ATM_DAYS = 7  # /atm_data の期間（現行と同じ）
-ATM_BUCKET_SECONDS = 300  # /atm_data の 5 分平均（SQL 側の値。テストで一致を見る）
 ATM_IV_MONTH_DAYS = 10  # /atm_iv_data の限月を決める範囲（現行の t1 と同じ）
 ATM_IV_FILL_MAX_DAYS = 3  # /atm_iv_data で 1 時間足になっていない分を生データから補う最大の日数
 D_DEFAULT, D_MIN, D_MAX = 7, 1, 100  # /atm_iv_data の d（日数）

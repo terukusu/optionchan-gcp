@@ -5,7 +5,7 @@
 データセットは OPTIONCHAN_BQ_DATASET（既定 optionchan_tokyo）。gcloud / bq の構成は
 CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
 
-- ロジックの同値（AC 5）: 固定値の CTE（option_price・atm_iv・ingest_runs の代わり）に、現行の 3 関数の SQL
+- ロジックの同値（AC 5）: 固定値の CTE（option_price・atm_iv・ingest_runs の代わり）に、現行の 2 関数の SQL
   （legacy_sql.py）と新しい SQL（テーブル関数の参照を、固定値の CTE を期間で絞ったものに置き換える）を当て、
   CSV（csvfmt.py）を比べる。新しい SQL は api.py の手順（2 段のクエリ・パラメータ）どおりに流す
   （runner を bq CLI にしたもの）。テーブルは読まない（課金 0）
@@ -79,10 +79,10 @@ def ts(v):
 
 TYPES = {
     "snapshot_at": ts, "last_started_at": ts, "started_at": ts,
-    "time": int, "o1_call_price_time": int, "o1_put_price_time": int, "o2_call_price_time": int,
+    "o1_call_price_time": int, "o1_put_price_time": int, "o2_call_price_time": int,
     "o2_put_price_time": int,
     "o1_put_is_atm": lambda v: v == "true", "o2_put_is_atm": lambda v: v == "true",
-    "open": float, "high": float, "low": float, "close": float, "iv": float, "price": float,
+    "open": float, "high": float, "low": float, "close": float,
     "o1_call_iv": float, "o1_put_iv": float, "o2_call_iv": float, "o2_put_iv": float,
 }
 
@@ -227,77 +227,6 @@ def test_diff_smile_no_snapshot_is_503():
         legacy_sql.legacy_smile_rows([])
 
 
-# ---- /atm_data ----
-
-def m(minute, hour=5, day=13):
-    return utc(day, hour, minute)
-
-
-ATM_OPTIONS = [
-    # M1 の ATM（call と put の両方を平均する。現行どおり type を絞らない）
-    opt(m(1), 1, 25000, M1, 18.0, 300, is_atm=True),
-    opt(m(1), 2, 25000, M1, 19.0, 280, is_atm=True),
-    # 同じ 5 分の中で ATM の行使価格が変わる（平均する）
-    opt(m(4, 5), 2, 25125, M1, 19.5, 250, is_atm=True),
-    # iv が NULL の行（AVG は NULL を除く）、5 分の中が全部 NULL の iv
-    opt(m(7), 2, 25000, M1, None, 270, is_atm=True),
-    opt(m(12), 2, 25000, M1, None, None, is_atm=True),
-    # 取引の無い時間をはさんで前日・6 日前
-    opt(m(30, 22, 12), 2, 24875, M1, 20.25, 310, is_atm=True),
-    opt(m(10, 8, 7), 2, 24500, M1, 21.0, 500, is_atm=True),
-    # ATM でない行・満了した限月（M0）・2 限月（M2）は使わない
-    opt(m(1), 2, 25500, M1, 30.0, 999, is_atm=False),
-    opt(m(1), 2, 25000, M0, 40.0, 999, is_atm=True),
-    opt(m(1), 2, 25000, M2, 17.0, 600, is_atm=True),
-    # 7 日より前は使わない
-    opt(m(0, 5, 6), 2, 25000, M1, 50.0, 999, is_atm=True),
-]
-ATM_TYPES = {"atm": {"target_price": float}}
-
-
-def legacy_atm_csv(options, now):
-    rows = typed(bq(with_fixtures(legacy_sql.atm_query(now), fixtures(options))), {"target_price": float})
-    if not rows:
-        raise IndexError("現行は df['time'].iloc[-1] で IndexError（500）")
-    return csvfmt.atm_csv(rows)
-
-
-def test_atm_same_as_legacy():
-    new = api.atm_data(fixture_runner(fixtures(ATM_OPTIONS), ATM_TYPES), NOW)
-    assert new == legacy_atm_csv(ATM_OPTIONS, NOW)
-    lines = new.split("\n")
-    assert len(lines) == 1 + 5 + 1
-    t = int(datetime(2026, 10, 13, 5, 0, tzinfo=UTC).timestamp())
-    assert lines[0] == str(t + 600)
-    # 05:00〜05:05: (25000 + 25000 + 25125) / 3、iv (18 + 19 + 19.5) / 3 = 18.83 → 18.8
-    assert lines[-4] == f"{t},25041.7,18.8,276.7"
-    # iv が NULL の行だけの 5 分、全部 NULL の 5 分は空のセル
-    assert lines[-3] == f"{t + 300},25000.0,,270.0"
-    assert lines[-2] == f"{t + 600},25000.0,,"
-    assert lines[-1] == ""
-
-
-def test_diff_atm_period_start_is_closed():
-    # 違い: 現行は created_at > now − 7 日（開区間）、新は [now − 7 日, now)。ちょうど 7 日前の行だけが差になる
-    edge = [opt(utc(6, 6, 0), 2, 25000, M1, 20.0, 300, is_atm=True), opt(m(1), 2, 25000, M1, 19.0, 280, is_atm=True)]
-    new = api.atm_data(fixture_runner(fixtures(edge), ATM_TYPES), NOW).split("\n")
-    old = legacy_atm_csv(edge, NOW).split("\n")
-    assert new[0] == old[0] and len(new) == len(old) + 1
-    assert new[1] == f"{int(datetime(2026, 10, 6, 6, 0, tzinfo=UTC).timestamp())},25000.0,20.0,300.0"
-    assert new[2:] == old[1:]
-
-
-def test_diff_atm_month_only_in_old_data():
-    # 違い: 現行は限月を全期間の option_price から決める。期間内に行の無い限月（今日以降で、7 日より前にしか行が無い）が
-    # 最小だと現行は 0 行（IndexError で 500）、新は期間内の最小の限月（M1）を表示する。
-    # 実データでは起きない（今日以降の限月は毎分の行がある）
-    old_only = [opt(utc(1, 5, 0), 2, 25000, date(2026, 10, 16), 20.0, 300, is_atm=True),
-                opt(m(1), 2, 25000, M1, 19.0, 280, is_atm=True)]
-    with pytest.raises(IndexError):
-        legacy_atm_csv(old_only, NOW)
-    assert api.atm_data(fixture_runner(fixtures(old_only), ATM_TYPES), NOW).split("\n")[1].endswith(",19.0,280.0")
-
-
 # ---- /atm_iv_data ----
 
 def h(hour, day=13, minute=0):
@@ -413,13 +342,12 @@ def dry_run_params(now):
     return {
         "latest_snapshot": {"start_at": now - timedelta(days=14), "end_at": now},
         "smile": {"start_at": now - timedelta(minutes=1), "end_at": now - timedelta(minutes=1) + timedelta(seconds=1)},
-        "atm": {"start_at": now - timedelta(days=7), "end_at": now, "today": api.jst_date(now)},
         "atm_iv_meta": {"start_at": now - timedelta(days=14), "end_at": now},
         "atm_iv": api.atm_iv_params(now, None, 100, 0),
     }
 
 
-@pytest.mark.parametrize("name", ["latest_snapshot", "smile", "atm", "atm_iv_meta", "atm_iv"])
+@pytest.mark.parametrize("name", ["latest_snapshot", "smile", "atm_iv_meta", "atm_iv"])
 def test_dry_run_real_tables(name, record_property):
     now = datetime.now(UTC).replace(microsecond=0)
     nbytes = bq(real_sql(name), dry_run_params(now)[name], dry_run=True, maximum_bytes=GiB)

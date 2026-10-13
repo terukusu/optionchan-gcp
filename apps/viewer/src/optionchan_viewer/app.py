@@ -1,4 +1,4 @@
-"""ビューアー（Flask）。ページ 4 つ（/ /smile /atm /atm_iv）と CSV の API 3 つ（/smile_data /atm_data /atm_iv_data）。
+"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 2 つ（/smile_data /atm_iv_data）。
 
 URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
 """
@@ -68,10 +68,6 @@ def create_app(runner=None, clock=None) -> Flask:
     def smile():
         return render_template("smile.html")
 
-    @app.get("/atm")
-    def atm():
-        return render_template("atm.html")
-
     @app.get("/atm_iv")
     def atm_iv():
         return render_template("atm_iv.html")
@@ -79,10 +75,6 @@ def create_app(runner=None, clock=None) -> Flask:
     @app.get("/smile_data")
     def smile_data():
         return csv_response("smile_data", lambda: api.smile_data(runner, clock()))
-
-    @app.get("/atm_data")
-    def atm_data():
-        return csv_response("atm_data", lambda: api.atm_data(runner, clock()))
 
     @app.get("/atm_iv_data")
     def atm_iv_data():

@@ -53,14 +53,6 @@ def test_smile_csv():
     assert text.endswith("\n") and lines[-1] == ""
 
 
-def test_atm_csv():
-    rows = [
-        {"time": 1760335200, "target_price": 25000.0, "iv": 18.3, "price": 210.5},
-        {"time": 1760335500, "target_price": 25125.0, "iv": None, "price": 200.0},
-    ]
-    assert csvfmt.atm_csv(rows) == "1760335500\n1760335200,25000.0,18.3,210.5\n1760335500,25125.0,,200.0\n"
-
-
 def test_atm_iv_csv():
     rows = [
         {"open": 18.0, "high": 19.5, "low": 17.75, "close": 19.0, "started_at": datetime(2026, 10, 12, 0, tzinfo=UTC)},

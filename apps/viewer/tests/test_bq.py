@@ -42,7 +42,6 @@ class FakeClient:
 PARAMS = {
     "latest_snapshot": {"start_at": NOW, "end_at": NOW},
     "smile": {"start_at": NOW, "end_at": NOW},
-    "atm": {"start_at": NOW, "end_at": NOW, "today": date(2026, 10, 13)},
     "atm_iv_meta": {"start_at": NOW, "end_at": NOW},
     "atm_iv": atm_iv_params(NOW, None, 7, 0),
 }

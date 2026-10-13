@@ -77,14 +77,6 @@ def smile_data(runner, now: datetime) -> str:
     return csvfmt.smile_csv(snapshot_at, atm, rows)
 
 
-def atm_data(runner, now: datetime) -> str:
-    now = _utc(now)
-    rows = runner("atm", {"start_at": now - timedelta(days=st.ATM_DAYS), "end_at": now, "today": jst_date(now)})
-    if not rows:
-        raise NoData("no_atm_rows")
-    return csvfmt.atm_csv(rows)
-
-
 def atm_iv_params(now: datetime, last_started_at: datetime | None, d: int, n: int) -> dict:
     """/atm_iv_data のクエリ 2 のパラメータ（純粋関数。テストで期間を検査する）"""
     now = _utc(now)
