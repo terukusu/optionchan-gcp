@@ -57,7 +57,7 @@
     "name": "ingest_run_id",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "取り込み実行の ID（UUID4）。ingest_runs と結合して最新版を選ぶ"
+    "description": "取り込み実行の ID（UUID4。旧系から移した行（#12）は legacy-<created_at の UTC, YYYYMMDDTHHMMSSZ>）。ingest_runs と結合して最新版を選ぶ"
   },
   {
     "name": "parser_version",

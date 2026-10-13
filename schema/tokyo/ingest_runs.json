@@ -3,7 +3,7 @@
     "name": "ingest_run_id",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "取り込み実行の ID（UUID4）"
+    "description": "取り込み実行の ID（UUID4）。旧系から移した行（#12）は legacy-<snapshot_at の UTC, YYYYMMDDTHHMMSSZ>"
   },
   {
     "name": "snapshot_at",
@@ -21,7 +21,7 @@
     "name": "source_object",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "元の生 HTML（gs://<bucket>/<name>#<generation>）"
+    "description": "元の生 HTML（gs://<bucket>/<name>#<generation>）。旧系から移した行（#12）は legacy:optionchan"
   },
   {
     "name": "source_generation",
@@ -33,13 +33,13 @@
     "name": "parser_version",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "解析コードの版"
+    "description": "解析コードの版（旧系から移した行（#12）は legacy）"
   },
   {
     "name": "trigger",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "起動のきっかけ（scheduler / recovery / reprocess）"
+    "description": "起動のきっかけ（scheduler / recovery / reprocess。旧系から移した行（#12）は legacy_import）"
   },
   {
     "name": "rows_spot",

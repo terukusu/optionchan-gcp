@@ -126,14 +126,16 @@ gcloud alpha services quota list --service=bigquery.googleapis.com --consumer=pr
 
 （`quota list` の生の出力は override 名にプロジェクト番号を含むので貼らない。）
 
-下げる前に、今日（太平洋時間）のスキャン量が新しい上限より十分小さいことを確認する（超えていると、その日の残りのクエリがすぐ失敗する）:
+下げる前に、今日（太平洋時間）のスキャン量（以下「今日のスキャン量」）が新しい上限より十分小さいことを確認する（超えていると、その日の残りのクエリがすぐ失敗する）。上限はプロジェクト全体（全リージョン）にかかるので、US（旧系）と東京（新系・移行）を合計する。スクリプトの親ジョブ（`statement_type = "SCRIPT"`）は子の文の量を重ねて数えるので除く:
 
 ```sh
-bq query --project_id=$P --use_legacy_sql=false '
-SELECT ROUND(SUM(total_bytes_processed) / POW(1024, 3), 2) AS gib
-FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
-WHERE job_type = "QUERY"
-  AND creation_time >= TIMESTAMP(CURRENT_DATE("America/Los_Angeles"), "America/Los_Angeles")'
+for r in region-us region-asia-northeast1; do
+  bq query --project_id=$P --location=$([ $r = region-us ] && echo US || echo asia-northeast1) --use_legacy_sql=false --format=csv "
+  SELECT IFNULL(SUM(total_bytes_processed), 0) AS bytes
+  FROM \`$r\`.INFORMATION_SCHEMA.JOBS_BY_PROJECT
+  WHERE job_type = 'QUERY' AND IFNULL(statement_type, '') != 'SCRIPT'
+    AND creation_time >= TIMESTAMP(CURRENT_DATE('America/Los_Angeles'), 'America/Los_Angeles')" | tail -n +2
+done | awk '{ s += $1 } END { printf "%.2f GiB\n", s / 1024 / 1024 / 1024 }'   # 2 リージョンの合計
 ```
 
 設定（既定値から 10% を超えて下げるので `--force` が必要）:
@@ -861,14 +863,14 @@ LEFT JOIN (SELECT * FROM c WHERE k = "o") o USING (ingest_run_id)'
 ログ（T0 の 5 分後から 1 時間。直後の数分は IAM の伝播待ちで 403 がありうるので、出た件数だけ記録する）:
 
 ```sh
-W="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\" AND timestamp>=\"<T0+5m の RFC3339>\" AND timestamp<\"<T0+65m の RFC3339>\""
-gcloud logging read "$W AND severity>=ERROR AND jsonPayload.event:*" --project $P --format='value(jsonPayload.event)' | sort | uniq -c   # 0 件（stale だけは時刻と件数を記録）
-gcloud logging read "$W AND jsonPayload.event=\"ingested\"" --project $P --format=json \
+LF="resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\" AND timestamp>=\"<T0+5m の RFC3339>\" AND timestamp<\"<T0+65m の RFC3339>\""
+gcloud logging read "$LF AND severity>=ERROR AND jsonPayload.event:*" --project $P --format='value(jsonPayload.event)' | sort | uniq -c   # 0 件（stale だけは時刻と件数を記録）
+gcloud logging read "$LF AND jsonPayload.event=\"ingested\"" --project $P --format=json \
   | jq '[.[].jsonPayload.elapsed_ms] | sort | {n: length, max: .[-1], p50: .[(length / 2 | floor)]}'   # max < 45000
-gcloud logging read "$W AND (textPayload:\"gunicorn\" OR textPayload:\"Booting worker\")" --project $P --format='value(severity)' | sort | uniq -c   # 起動行の severity を Issue に記録
+gcloud logging read "$LF AND (textPayload:\"gunicorn\" OR textPayload:\"Booting worker\")" --project $P --format='value(severity)' | sort | uniq -c   # 起動行の severity を Issue に記録
 ```
 
-時間外（平日 07:00〜07:30 JST）: `$W` の時刻を差し替えて `httpRequest.status!=204 AND log_name="projects/$P/logs/run.googleapis.com%2Frequests"` が 0 件、同じ窓の `ingest_runs`（`snapshot_at` で絞る）が 0 行。
+時間外（平日 07:00〜07:30 JST）: `$LF` の時刻を差し替えて `httpRequest.status!=204 AND log_name="projects/$P/logs/run.googleapis.com%2Frequests"` が 0 件、同じ窓の `ingest_runs`（`snapshot_at` で絞る）が 0 行。
 
 Terraform の差分 0: `gh workflow run deploy.yml --ref master` の plan が「差分なし」、bootstrap の `plan -detailed-exitcode` が 0。差分が出たら（CPU の `0.5` の正規化など）、コードを実態に合わせる PR を出す。
 
@@ -880,17 +882,17 @@ JPX のページは分単位の更新時刻が変わった後、分の頭の数�
 - 記録: 取引時間中のログに `wait_ms`（待った時間）と `page1_fetch_second`（1 限月ページの取得時刻の分内の秒）が出る。生 HTML の各ページの `fetched_at` にも取得時刻がある（封筒の形式は変えていない）
 - コスト: 待ちも課金対象のインスタンス時間になる。月の vCPU 秒の上限見積もりは 約 16.5 万（無料枠 18 万。target.md 7.2）。10 秒にすると上限 約 19.4 万で超えるので、秒を延ばすときは試算し直す。無料枠は請求先アカウントで他プロジェクトと共有している
 
-確認（「ログ」と同じ `$W`、取引時間中の窓）:
+確認（「ログ」と同じ `$LF`、取引時間中の窓）:
 
 ```sh
-gcloud logging read "$W AND jsonPayload.event=\"ingested\"" --project $P --format=json \
+gcloud logging read "$LF AND jsonPayload.event=\"ingested\"" --project $P --format=json \
   | jq '[.[].jsonPayload | {s: .page1_fetch_second, w: .wait_ms}] | {n: length, min_second: (map(.s) | min), max_wait_ms: (map(.w) | max)}'   # min_second >= 8
 ```
 
 時間外の 204 が待っていないこと（平日 07:00〜07:30 JST の窓。`latency` は "0.012s" の形）:
 
 ```sh
-gcloud logging read "$W AND log_name=\"projects/$P/logs/run.googleapis.com%2Frequests\" AND httpRequest.status=204" --project $P --format=json \
+gcloud logging read "$LF AND log_name=\"projects/$P/logs/run.googleapis.com%2Frequests\" AND httpRequest.status=204" --project $P --format=json \
   | jq '[.[].httpRequest.latency | rtrimstr("s") | tonumber] | {n: length, max: max}'   # max < 1
 ```
 
@@ -938,13 +940,13 @@ curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" -G \
 3. 書き込み・読み出しの失敗（BigQuery・GCS の障害が 6 時間以上続いた等）なら、そのまま「再処理ジョブ」で `--only-missing` を実行する
 4. 結果（件数と原因の分類）を #11 にコメントする（名前の一覧・ログの全文は貼らない）
 
-確認（0 分の回の結果。窓は「ログ」と同じ `$W` の形で、毎時 0〜1 分を含む時間帯にする）:
+確認（0 分の回の結果。窓は「ログ」と同じ `$LF` の形で、毎時 0〜1 分を含む時間帯にする）:
 
 ```sh
-gcloud logging read "$W AND jsonPayload.event=(\"recovery\" OR \"recovery_skipped\" OR \"raw_reconciled\")" --project $P --format=json \
+gcloud logging read "$LF AND jsonPayload.event=(\"recovery\" OR \"recovery_skipped\" OR \"raw_reconciled\")" --project $P --format=json \
   | jq -c '.[].jsonPayload | {event, schedule_time, listed, old_enough, pending, recovered, remaining, raw, unresolved, elapsed_ms}'
 # 0 分のリクエスト全体（通常の処理 + 回収）の時間 = recovery の elapsed_ms（期限の起点から）
-gcloud logging read "$W AND jsonPayload.event=\"recovery\"" --project $P --format=json \
+gcloud logging read "$LF AND jsonPayload.event=\"recovery\"" --project $P --format=json \
   | jq '[.[].jsonPayload.elapsed_ms] | max'   # 45000 未満
 ```
 
@@ -1291,16 +1293,16 @@ bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json \
 
 DTS の定期クエリは作成直後に 1 回ずつ自動で実行され、4 本が同時に走る。2026-10-13 の作成時は、legacy-stage が `staged_window` を作り直している途中に legacy-copy が走り、コピー先の `staged_window` が空になった（メタデータは 1 行、クエリでは 0 行）。legacy-compare が `copy is not for the window ... (staged: null)` で失敗したら、legacy-copy を再実行してから legacy-compare を再実行する。毎朝の実行は 07:02 → 07:10 → 07:30 の順なので起きない。
 
-本番の結果テーブル・作業用データセットへの書き込みなので、実行は所有者が行う。同じ日を再実行しても行は置き換わるだけ（重複しない）。窓の日付 W（日中立会の日付、JST）の分は、`run_time` を W の UTC の 22:02 / 22:15 / 22:30（JST の W+1 日 07:02 / 07:15 / 07:30）にする。突き合わせは stage → copy → compare の順に、前の実行が `SUCCEEDED` になってから次を実行する。
+本番の結果テーブル・作業用データセットへの書き込みなので、実行は所有者が行う。同じ日を再実行しても行は置き換わるだけ（重複しない）。窓の日付 `WD`（日中立会の日付、JST）の分は、`run_time` を `WD` の UTC の 22:02 / 22:15 / 22:30（JST の `WD`+1 日 07:02 / 07:15 / 07:30）にする（`WD` は #12 の作業ディレクトリ `WDIR` と別の名前）。突き合わせは stage → copy → compare の順に、前の実行が `SUCCEEDED` になってから次を実行する。
 
 ```sh
-W=2026-10-14   # 窓の日付
-bq mk --transfer_run --run_time="${W}T22:15:00Z" "$(tc quality-daily $L)"
-bq mk --transfer_run --run_time="${W}T22:02:00Z" "$(tc legacy-stage us)"
+WD=2026-10-14   # 窓の日付
+bq mk --transfer_run --run_time="${WD}T22:15:00Z" "$(tc quality-daily $L)"
+bq mk --transfer_run --run_time="${WD}T22:02:00Z" "$(tc legacy-stage us)"
 # stage が SUCCEEDED になってから（コピーは run_time に関係なく今の作業用データセットを運ぶ）
 bq mk --transfer_run --run_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(tc legacy-copy $L)"
 # copy が SUCCEEDED になってから
-bq mk --transfer_run --run_time="${W}T22:30:00Z" "$(tc legacy-compare $L)"
+bq mk --transfer_run --run_time="${WD}T22:30:00Z" "$(tc legacy-compare $L)"
 bq ls --transfer_run --run_attempt=LATEST --max_results=1 --format=json "$(tc legacy-compare $L)" | jq -c '.[] | {runTime, state}'
 ```
 
@@ -1406,7 +1408,7 @@ IMP=optionchan_import
 E='<YYYY-MM-DD> 22:00:00+00'   # 範囲の終わり: 開始する土曜の 07:00 JST（前日の金曜 22:00 UTC）。この書式のまま（下の比較が文字列）
 S0='2018-10-01 00:00:00+00'     # 範囲の始まり（旧系の最初のパーティションは 2018-10-19）
 C0='2026-10-12 23:39:00+00'     # 新系の最初のスナップショット（並行稼働の範囲の始まり。新系の行はこれ以降だけ）
-W=<スクラッチのディレクトリ>       # 結果の CSV・JSON を置く（リポジトリ・Issue に貼らない）
+WDIR=<スクラッチのディレクトリ>    # 結果の CSV・JSON を置く（リポジトリ・Issue に貼らない）
 # SQL の名前を入れる（第 2 引数: 一時データセット / fingerprint の読み先）
 render() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" \
   -e "s/[$]{import_dataset}/${2:-$IMP}/g" -e "s/[$]{source_dataset}/${2:-$IMP}/g" "sql/legacy_import/$1.sql"; }
@@ -1427,11 +1429,12 @@ SELECT table_name, COUNT(*) parts, MIN(partition_id) first, SUM(total_rows) n
 FROM optionchan.INFORMATION_SCHEMA.PARTITIONS WHERE table_name IN ("spot_price", "future_price", "option_price") GROUP BY 1'
 ```
 
+- `insert.sql`・`verify.sql` はスクリプト（`DECLARE`・`IF` を含む複数の文）なので、全体に `--dry_run` をかけても最初の文しか検証されない（見積もりのバイト数も最初の文の分だけ）。文ごとの検証・見積もりは `tests/test_legacy_import_bq.py`（DELETE・INSERT を 1 文ずつ dry run）で行う。`fingerprint.sql` は 1 文なので `--dry_run` で全体を見積もれる
 - データセットコピーの転送料の基準を、#40 の `legacy-copy`（毎日 約 100MB）の課金で確かめる。課金エクスポート（「予算アラートを受けたとき」の 1. のクエリ）を `service.description = "BigQuery"` で SKU ごとに見て、リージョン間の転送の SKU の量が `optionchan_legacy_stage` の表の物理・論理のどちらに近いかを見る。物理なら転送は 約 4.8GB で 約 55 円、論理なら 約 73GiB で 約 880 円（月の予算 500 円の 50% / 80% の通知が出る。それでも進めるかを決める）。判断（基準・見込み額・進めるか）を #12 にコメントする。論理基準で進めるなら、#12 の AC 9（転送 約 100 円以下）を見込み額に直してから始める
 
 ### 1. クエリ量上限を一時的に上げる
 
-全件のスキャンが 5 回（下の見積もり。合計 約 390GiB）あるので、「BigQuery のクエリ量上限」の設定コマンドで `--value=614400`（600GiB）にする。フィンガープリント・検証のやり直し 1 回分（約 75〜165GiB）と、日曜朝の定期実行の分の余裕を持たせる。その日（太平洋時間）の使用量（「BigQuery のクエリ量上限」の「今日のスキャン量」のクエリ）が 550GiB を超えたら、次のリセットまで新しい全件スキャンを始めない。作業の後に 6. で戻す。
+全件のスキャンが 5 回（下の見積もり。合計 約 390GiB）あるので、「BigQuery のクエリ量上限」の設定コマンドで `--value=614400`（600GiB）にする。フィンガープリント・検証のやり直し 1 回分（約 75〜165GiB）と、日曜朝の定期実行の分の余裕を持たせる。その日（太平洋時間）の使用量（「BigQuery のクエリ量上限」の「今日のスキャン量」のクエリ。US と東京の合計）が 550GiB を超えたら、次のリセットまで新しい全件スキャンを始めない。作業の後に 6. で戻す。
 
 ### 2. 一時データセットとコピー
 
@@ -1454,17 +1457,25 @@ for t in spot_price future_price option_price; do
 done   # 土曜の午後は旧系に書き込みが無いので、行数が同じこと
 ```
 
+**当日の最初の判断点: データセットコピー（`cross_region_copy`）の完了**。本番の規模（旧系の全表、論理 約 73GiB）のコピーは試していない（#40 の `legacy-copy` は 1 日分 約 100MB）。ここまでで書き込んだのは一時データセット `optionchan_import` だけで（コピーの宛先は `--target_dataset=$IMP`）、`optionchan_tokyo` には何も書いていない。失敗しても `optionchan_tokyo`・旧系・新系の取り込みは無傷。次のどれかなら 3. に進まない:
+
+- 実行の `state` が `FAILED` / `CANCELLED`（理由は `bq show --format=json --transfer_run <実行名>` の `errorStatus` か、Cloud Logging の `resource.type="bigquery_dts_config"`。ERROR は新系の M2 で通知されることがある）
+- 数時間たっても `SUCCEEDED` にならない
+- 一時データセットに表が揃わない・行数が旧系と合わない
+
+失敗したら: 一時的な原因（内部エラー・クォータ）なら、実行中の実行が無いことを確かめて手で 1 回だけ実行し直す（`overwrite_destination_table` で上書きされる）。続けて失敗する・原因が権限や制限なら、その週末は中止する: DTS を消し（6. の 1 行目）、一時データセットを消し（`bq rm -r -f -d $P:$IMP`）、1. で上げたクエリ量上限を戻し、結果（状態・エラーの要約）を #12 にコメントする。
+
 1 時間足（`atm_*`）もコピーされる。これは 5. の後、6. の後片付けの前に「1 時間足（#49）」の「過去分の移行」で移す（この節の SQL では移さない）。
 
 ### 3. コピーの検証
 
 ```sh
 render fingerprint optionchan | qr "$S0" "$E" --location=US --format=csv --max_rows=100000 \
-  --maximum_bytes_billed=85899345920 > $W/fp-us.csv
+  --maximum_bytes_billed=85899345920 > $WDIR/fp-us.csv
 render fingerprint | qr "$S0" "$E" --location=$L --format=csv --max_rows=100000 \
-  --maximum_bytes_billed=85899345920 > $W/fp-import.csv
-wc -l $W/fp-us.csv $W/fp-import.csv   # 同じ行数（日 × 3 表 + 見出し。約 6,800）
-diff $W/fp-us.csv $W/fp-import.csv && echo MATCH
+  --maximum_bytes_billed=85899345920 > $WDIR/fp-import.csv
+wc -l $WDIR/fp-us.csv $WDIR/fp-import.csv   # 同じ行数（日 × 3 表 + 見出し。約 6,800）
+diff $WDIR/fp-us.csv $WDIR/fp-import.csv && echo MATCH
 ```
 
 - `MATCH` でなければ、違う日・表を見て、DTS の実行を 1 回やり直し（上書き）、`fp-import.csv` を作り直す。続けて違うなら止める（一時データセットを消して終わり。`optionchan_tokyo` には何も書いていない）
@@ -1475,9 +1486,9 @@ diff $W/fp-us.csv $W/fp-import.csv && echo MATCH
 移行前の基準値（並行稼働の範囲だけ。新系の行はここにしか無い）:
 
 ```sh
-render verify | qr "$C0" "$E" --location=$L --format=json --maximum_bytes_billed=10737418240 > $W/verify-before.json
-jq -c '.[-1][0] | {missing_snapshots, overlap_snapshots, new_snapshots, new_rows_spot, new_rows_future, new_rows_option}' $W/verify-before.json
-# missing_snapshots = 並行稼働中の新系の取りこぼし（legacy_compare_daily の legacy_only_snapshots の合計と同じ見込み）。overlap 等は 0
+render verify | qr "$C0" "$E" --location=$L --format=json --maximum_bytes_billed=10737418240 > $WDIR/verify-before.json
+jq -c '.[-1][0] | {missing_snapshots, overlap_snapshots, new_snapshots, new_rows_spot, new_rows_future, new_rows_option}' $WDIR/verify-before.json
+# missing_snapshots = 並行稼働中の新系の取りこぼし（legacy_compare_daily の compare_date が 2026-10-13〜E の前日（金曜）の legacy_only_snapshots の合計と同じ見込み）。overlap 等は 0
 ```
 
 書き込む前に `optionchan_tokyo` の 4 表のテーブルスナップショットを一時データセットに取る（期限 14 日。移行は追記と `legacy-` の行の削除だけなので、ベースの表との差分の保存料はほぼ 0）:
@@ -1493,26 +1504,26 @@ bq ls --format=json $P:$IMP | jq -r '.[] | select(.type == "SNAPSHOT") | .tableR
 
 ```sh
 s='2018-01-01 00:00:00+00'; e='2019-01-01 00:00:00+00'
-render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $W/insert-2018.json
-jq -c '.[-1][0]' $W/insert-2018.json                      # snapshots > 0
-render verify | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=21474836480 > $W/verify-2018.json
-jq -c '.[-1][0] | del(.mismatch_samples)' $W/verify-2018.json   # 5. の 7 項目が 0、missing_snapshots も 0
-render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $W/insert-2018-again.json
-jq -c '.[-1][0]' $W/insert-2018-again.json                # snapshots = 0（流し直しても重複しない）
+render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $WDIR/insert-2018.json
+jq -c '.[-1][0]' $WDIR/insert-2018.json                      # snapshots > 0
+render verify | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=21474836480 > $WDIR/verify-2018.json
+jq -c '.[-1][0] | del(.mismatch_samples)' $WDIR/verify-2018.json   # 5. の 7 項目が 0、missing_snapshots も 0
+render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $WDIR/insert-2018-again.json
+jq -c '.[-1][0]' $WDIR/insert-2018-again.json                # snapshots = 0（流し直しても重複しない）
 ```
 
 どれかが期待と違えば止めて、下の「切り戻し」を 2018 年の範囲で行う。よければ残りの年を流す（1 本の DML で変えられるパーティションは 4,000 まで。旧系は 2,256 だが、やり直しの単位を小さくする）:
 
 ```sh
-for y in $(seq 2019 2026); do
+for y in $(seq 2019 ${E:0:4}); do   # E の年まで（E は YYYY-MM-DD で始まる）
   s="$y-01-01 00:00:00+00"; e="$((y + 1))-01-01 00:00:00+00"; [[ "$e" > "$E" ]] && e=$E
-  render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $W/insert-$y.json \
+  render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $WDIR/insert-$y.json \
     || { echo "failed: $y"; break; }
-  echo "$y $(jq -c '.[-1][0] | {snapshots, rows_spot, rows_future, rows_option}' $W/insert-$y.json)"
+  echo "$y $(jq -c '.[-1][0] | {snapshots, rows_spot, rows_future, rows_option}' $WDIR/insert-$y.json)"
 done
 ```
 
-- 1 年 約 1,000 万〜1.1 億行（option）。1 回 数分の見込み
+- 1 年 約 1,500 万（2018 年。10 月から）〜1.5 億行（2026 年。2026-10 の時点で既に 約 1.5 億行で、E までにさらに増える）（旧 `option_price`）。論理 1 年 最大 14〜15GiB（2026 年）で、`--maximum_bytes_billed`（50GiB）に収まる。1 回 数分の見込み
 - 失敗したら、原因（クォータ・権限・`legacy_import: ...` の `ERROR()`）を直して**同じ年から**流し直す。前回の残骸（データの表に書けて完了記録の無い `legacy-` 行）は `insert.sql` の最初に消え、完了記録のある T は選ばれないので重複しない
 - `legacy_import: end_at ... is after the last checked window end`: E が品質チェック済みの窓より後。E を直す
 - `legacy_import: duplicate ingest_run_id`: 秒未満の `created_at` がある（2026-10 の実測では無い）。その年を止めて調べる
@@ -1520,9 +1531,9 @@ done
 ### 5. 移行の検証
 
 ```sh
-render verify | qr "$S0" "$E" --location=$L --format=json --maximum_bytes_billed=214748364800 > $W/verify-after.json
-jq -c '.[-1][0] | del(.mismatch_samples)' $W/verify-after.json
-jq -c '.[-1][0].mismatch_samples' $W/verify-after.json
+render verify | qr "$S0" "$E" --location=$L --format=json --maximum_bytes_billed=214748364800 > $WDIR/verify-after.json
+jq -c '.[-1][0] | del(.mismatch_samples)' $WDIR/verify-after.json
+jq -c '.[-1][0].mismatch_samples' $WDIR/verify-after.json
 ```
 
 - `missing_snapshots`・`overlap_snapshots`・`unknown_legacy_runs`・`bad_run_ids`・`row_mismatches`・`orphan_rows`・`run_count_mismatches` がすべて 0
@@ -1533,10 +1544,11 @@ jq -c '.[-1][0].mismatch_samples' $W/verify-after.json
 T0 前後（最新版で見て、日ごとに新旧が重ならず、旧系の日は旧系の件数どおり）:
 
 ```sh
-q --location=$L --format=pretty --maximum_bytes_billed=10737418240 --parameter="e:TIMESTAMP:$E" '
+# 範囲は C0 の 7 日前〜E（新系の稼働前の数日と並行稼働の全期間）。スキャンは 1 日 約 30MB（created_at・ingest_run_id だけ）なので 10GiB で足りる
+q --location=$L --format=pretty --maximum_bytes_billed=10737418240 --parameter="c0:TIMESTAMP:$C0" --parameter="e:TIMESTAMP:$E" '
 SELECT DATE(TIMESTAMP_SUB(created_at, INTERVAL 7 HOUR), "Asia/Tokyo") AS d, COUNT(*) AS n,
   COUNTIF(STARTS_WITH(ingest_run_id, "legacy-")) AS legacy, COUNT(DISTINCT created_at) AS snapshots
-FROM `optionchan_tokyo.option_price_latest`(TIMESTAMP_SUB(@e, INTERVAL 10 DAY), @e)
+FROM `optionchan_tokyo.option_price_latest`(TIMESTAMP_SUB(@c0, INTERVAL 7 DAY), @e)
 GROUP BY d ORDER BY d'
 # 2026-10-12 まで: n = legacy = fp-import.csv のその日の option_price の n。2026-10-13 以降: legacy は取りこぼしの分だけ
 # 同じ T の移行の記録が 2 件以上（同じ年を二重に流した）: 0
@@ -1546,7 +1558,7 @@ SELECT COUNT(*) FROM (
   WHERE snapshot_at >= @s AND snapshot_at < @e AND trigger = "legacy_import" GROUP BY snapshot_at HAVING COUNT(*) > 1)'
 ```
 
-直近 10 日より前の日は、上の verify で足りる: 移行の記録は T ごとに 1 件（上の検査）で新系の記録と重ならない（`overlap_snapshots = 0`）ので、最新版のテーブル関数は移行の記録の T ごとに `legacy-` の行をすべて返す。その行は T ごとに旧系と同じ（`row_mismatches = 0`）で、旧系のすべての T に記録がある（`missing_snapshots = 0`）。したがって新系の稼働前の日は、最新版の行 = 旧系の行になる。
+C0 の 7 日より前の日は、上の verify で足りる: 移行の記録は T ごとに 1 件（上の検査）で新系の記録と重ならない（`overlap_snapshots = 0`）ので、最新版のテーブル関数は移行の記録の T ごとに `legacy-` の行をすべて返す。その行は T ごとに旧系と同じ（`row_mismatches = 0`）で、旧系のすべての T に記録がある（`missing_snapshots = 0`）。したがって新系の稼働前の日は、最新版の行 = 旧系の行になる。
 
 結果は件数・要約だけを #12 にコメントする（`verify-after.json` の 0 の項目と `migrated_rows_*`、`fp` の一致、スキャン量）。CSV・JSON の全文は貼らない。
 
@@ -1563,11 +1575,11 @@ bq ls --format=json $P:$IMP | jq -r '.[] | "\(.type) \(.tableReference.tableId)"
 
 スナップショットの期限（14 日）が過ぎたら、データセットごと消す: `bq rm -r -f -d $P:$IMP`（`bq ls --project_id=$P` に `optionchan_import` が無いこと）。
 
-クエリ量上限を `--value=32768 --force` に戻す（「BigQuery のクエリ量上限」。その日のスキャン量が 32GiB を超えているときは、太平洋時間の 0 時を過ぎてから戻す。超えたまま下げると、その日の残りのクエリ（品質チェック・突き合わせを含む）が失敗する）。
+クエリ量上限を `--value=32768 --force` に戻す（「BigQuery のクエリ量上限」。その日のスキャン量（「今日のスキャン量」のクエリ。US と東京の合計）が 32GiB を超えているときは、太平洋時間の 0 時を過ぎてから戻す。超えたまま下げると、その日の残りのクエリ（品質チェック・突き合わせを含む）が失敗する）。
 
 ### 切り戻し
 
-移行行だけを消す。完了記録を先に消す（その時点でテーブル関数から見えなくなる）→ データの表の順。年の範囲だけ戻すときは `$S0` / `$E` をその年の範囲にする。土曜の午後〜日曜に行う（上の「いつ行うか」）。
+移行行だけを消す。完了記録を先に消す（その時点でテーブル関数から見えなくなる）→ データの表の順。年の範囲だけ戻すときは、下の `"$S0" "$E"` をその年の範囲（4. の `"$s" "$e"`）に置き換える（`S0`・`E` は上書きしない。5. の検証で使う）。土曜の午後〜日曜に行う（上の「いつ行うか」）。
 
 ```sh
 qr "$S0" "$E" --location=$L '
@@ -1594,7 +1606,7 @@ done
 ### 他の仕組みとの関係
 
 - **最新版のテーブル関数**: 変えない。移行行は `legacy-` の完了記録で選ばれる。移行行の記録は `finished_at = T` なので、同じ T を新系が回収・再処理すれば新系の版が選ばれる
-- **品質チェック（`quality_daily`）**: E 以降の窓だけを見るので、移行行で違反は出ない。過去の日を「再実行・バックフィル」で手で流し直すと、旧系の重複（`dup_keys`）・欠け（`missing_table`）・#4 の日付ずれ（`price_time_*`・`sunday`）で違反が出うる（`ingest_run_id` が `legacy-` の行で見分ける）。その結果は誤報として扱う
+- **品質チェック（`quality_daily`）**: E 以降の窓だけを見るので、移行行で違反は出ない。過去の日を「再実行・バックフィル」で手で流し直すと、旧系の重複（`dup_keys`）・欠け（`missing_table`）・旧系のページの形の違い（`atm_not_1`・`months_not_2`）・#4 の日付ずれ（`price_time_*`・`sunday`）で違反が出うる（`ingest_run_id` が `legacy-` の行で見分ける）。その結果は誤報として扱う
 - **新旧の突き合わせ（`legacy_compare_daily`）**: 新系側から `legacy-` の行を除く（`sql/legacy/compare.sql`）。取りこぼしを補った日を再実行しても `legacy_only` は 0 にならない（新系の取りこぼしの記録として残る）
 - **回収・再処理**: 完了記録の `source_object = 'legacy:optionchan'` は生 HTML の名前と一致しないので、回収・`--only-missing` の判定には影響しない（取りこぼしを補った T に生 HTML があれば、再処理すると新系の版が選ばれる）
 - **#4（過去データの補正）**: 移行の後に別ステップで行う。`price_time_raw` は移行行では NULL で、#4 が元の値を残す
@@ -1603,8 +1615,8 @@ done
 
 E から旧系を止めるまでの新系の取りこぼし（`legacy_compare_daily` の `legacy_only_snapshots` が 1 以上の日）は、旧系を止める前に同じ `insert.sql` で補う。一時データセットの代わりに #40 の `optionchan_legacy_copy`（旧スキーマのまま、1 日分）を使う。行うのは上の「いつ行うか」と同じ土曜の午後〜日曜（新系の書き込みが無く、legacy-stage / legacy-copy の手動実行が毎朝 07:02〜07:30 の定期実行と重ならない）。1 日分なのでクエリ量上限は変えなくてよい:
 
-1. 補う日 W ごとに「再実行・バックフィル」の手順で legacy-stage → legacy-copy を流す（compare は不要）
-2. `render insert optionchan_legacy_copy | qr "<W の 07:00 JST の UTC>" "<W+1 の 07:00 JST の UTC>" --location=$L --format=json`、続けて同じ範囲で `render verify optionchan_legacy_copy` を流し、5. と同じ項目が 0 であることを見る
+1. 補う日ごとに `WD` をその日にして、「日次の品質チェックと新旧の突き合わせ（#40）」の「再実行・バックフィル」の手順で legacy-stage → legacy-copy を流す（compare は不要）
+2. `render insert optionchan_legacy_copy | qr "<WD の 07:00 JST の UTC>" "<WD+1 の 07:00 JST の UTC>" --location=$L --format=json`、続けて同じ範囲で `render verify optionchan_legacy_copy` を流し、5. と同じ項目が 0 であることを見る
 3. 作業用データセットは翌朝の定期実行で前日分に戻る
 4. 補った日の 1 時間足を「1 時間足（#49）」の「再実行・バックフィル」で作り直す
 
@@ -1632,7 +1644,7 @@ E から旧系を止めるまでの新系の取りこぼし（`legacy_compare_da
 「日次の品質チェックと新旧の突き合わせ（#40）」の「変数」（`P`・`L`・`SQ`・`tc`）に加えて:
 
 ```sh
-W=<スクラッチのディレクトリ>   # 結果の JSON を置く（リポジトリ・Issue に貼らない）
+WDIR=<スクラッチのディレクトリ>   # 結果の JSON を置く（リポジトリ・Issue に貼らない。#12 と同じでよい）
 # sql/ohlc/<名前>.sql の名前を入れる（第 2 引数: legacy_dataset / source_dataset / import_dataset に入れるデータセット）
 ro() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" -e "s/[$]{legacy_dataset}/optionchan/g" \
   -e "s/[$]{source_dataset}/${2:-optionchan}/g" -e "s/[$]{import_dataset}/${2:-optionchan_import}/g" "sql/ohlc/$1.sql"; }
@@ -1733,8 +1745,8 @@ ORDER BY window_date' | tail -n +2 | rdays   # 行が無ければ何もしない
 **旧系の同値の確認**（target.md 3.2「過去 30 日分で現行と同値」。US、30 日 約 0.5GB）。範囲は UTC の正時:
 
 ```sh
-ro legacy_check | qr '2026-09-12 00:00:00+00' '2026-10-13 00:00:00+00' --location=US --format=json > $W/legacy-check.json
-jq -c '.[-1][] | {tbl, recomputed, legacy_keys, match, late, differ, legacy_only, recomputed_only, legacy_dup_keys, legacy_conflict_keys}' $W/legacy-check.json
+ro legacy_check | qr '2026-09-12 00:00:00+00' '2026-10-13 00:00:00+00' --location=US --format=json > $WDIR/legacy-check.json
+jq -c '.[-1][] | {tbl, recomputed, legacy_keys, match, late, differ, legacy_only, recomputed_only, legacy_dup_keys, legacy_conflict_keys}' $WDIR/legacy-check.json
 # differ・legacy_only・recomputed_only が 0。late は UTC 23 時台（旧系の集計の時点で未着だった行の分）
 ```
 
@@ -1746,8 +1758,8 @@ jq -c '.[-1][] | {tbl, recomputed, legacy_keys, match, late, differ, legacy_only
 U=2026-10-14   # UTC の日
 s="$U 00:00:00+00"; e="$(date -u -d "$U + 1 day" +%F) 00:00:00+00"
 bars=$(ro export optionchan | qr "$s" "$e" --location=US --format=json | jq -r '.[0].bars')
-[ "$bars" != null ] && ro compare | qr "$s" "$e" --parameter="legacy_bars:STRING:$bars" --location=$L --format=json > $W/compare-$U.json
-jq -c '.[-1][] | {tbl, legacy_keys, new_keys, match, differ, legacy_only, new_only, legacy_dup_keys, conflict_keys, max_abs_diff}' $W/compare-$U.json
+[ "$bars" != null ] && ro compare | qr "$s" "$e" --parameter="legacy_bars:STRING:$bars" --location=$L --format=json > $WDIR/compare-$U.json
+jq -c '.[-1][] | {tbl, legacy_keys, new_keys, match, differ, legacy_only, new_only, legacy_dup_keys, conflict_keys, max_abs_diff}' $WDIR/compare-$U.json
 ```
 
 - `legacy_only` / `new_only`: 片方にだけある 1 時間足。新系の取りこぼし（その時間の `legacy_compare_daily` の `legacy_only_snapshots`）・旧系の 23 時台の欠け・新系だけの時間（保存条件の差）で説明できるかを見る
@@ -1762,23 +1774,23 @@ jq -c '.[-1][] | {tbl, legacy_keys, new_keys, match, differ, legacy_only, new_on
 - 新系に既にあるキーは上書きしない（流し直しても増えない）。値は旧系のまま（旧系の 23 時台の欠け・2019〜2020 年の一部の表だけ欠けた日もそのまま。直すなら 4. と同じ手動実行でその日を作り直す）
 
 ```sh
-C='2026-10-12 22:00:00+00'; S0='2018-01-01 00:00:00+00'
+C='2026-10-12 22:00:00+00'; S0_OHLC='2018-01-01 00:00:00+00'   # #12 の S0（2018-10-01）を上書きしない
 # 1. コピーの検証: US の旧 3 表と一時データセットの同じ範囲が一致
-ro fingerprint optionchan | qr "$S0" "$C" --location=US --format=json > $W/ohlc-fp-us.json
-ro fingerprint optionchan_import | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-fp-import.json
-diff <(jq -S . $W/ohlc-fp-us.json) <(jq -S . $W/ohlc-fp-import.json) && echo MATCH   # MATCH でなければ止める
+ro fingerprint optionchan | qr "$S0_OHLC" "$C" --location=US --format=json > $WDIR/ohlc-fp-us.json
+ro fingerprint optionchan_import | qr "$S0_OHLC" "$C" --location=$L --format=json > $WDIR/ohlc-fp-import.json
+diff <(jq -S . $WDIR/ohlc-fp-us.json) <(jq -S . $WDIR/ohlc-fp-import.json) && echo MATCH   # MATCH でなければ止める
 # 2. 移行（3 表に書く。結果は表ごとの inserted・skipped_existing・conflict_keys・dup_rows_collapsed）
-ro import | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-import.json; jq -c '.[-1][]' $W/ohlc-import.json
+ro import | qr "$S0_OHLC" "$C" --location=$L --format=json > $WDIR/ohlc-import.json; jq -c '.[-1][]' $WDIR/ohlc-import.json
 #    もう一度流して inserted が 0（冪等）
-ro import | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-import-again.json; jq -c '.[-1][] | {tbl, inserted}' $W/ohlc-import-again.json
+ro import | qr "$S0_OHLC" "$C" --location=$L --format=json > $WDIR/ohlc-import-again.json; jq -c '.[-1][] | {tbl, inserted}' $WDIR/ohlc-import-again.json
 # 3. 移行の検証: 新系の fp_clean_* = 旧系の fp_clean_*、新系の rows_ = keys = 旧系の keys − conflict_keys、新系の conflict_keys 0
-ro fingerprint optionchan_tokyo | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-fp-tokyo.json
-jq -c '.[] | {tbl, keys, conflict_keys, fp_clean_xor, fp_clean_sum}' $W/ohlc-fp-us.json
-jq -c '.[] | {tbl, rows_, keys, conflict_keys, fp_clean_xor, fp_clean_sum}' $W/ohlc-fp-tokyo.json
+ro fingerprint optionchan_tokyo | qr "$S0_OHLC" "$C" --location=$L --format=json > $WDIR/ohlc-fp-tokyo.json
+jq -c '.[] | {tbl, keys, conflict_keys, fp_clean_xor, fp_clean_sum}' $WDIR/ohlc-fp-us.json
+jq -c '.[] | {tbl, rows_, keys, conflict_keys, fp_clean_xor, fp_clean_sum}' $WDIR/ohlc-fp-tokyo.json
 # 4. 作り直し（1 日ずつ順に。全日が SUCCEEDED であること）
 #  4a. 中身の違う重複のキーがある窓の日付（移さなかったキー。窓は JST 07:00 区切りなので、UTC 23 時台のキーは翌日の窓に入る）。
 #      一時データセットから出す。2026-10-13 の旧系では 2019-07-01 と 2019-07-02 の 2 日
-qr "$S0" "$C" --location=$L --format=csv '
+qr "$S0_OHLC" "$C" --location=$L --format=csv '
 SELECT DISTINCT FORMAT_DATE("%F", DATE(TIMESTAMP_SUB(started_at, INTERVAL 7 HOUR), "Asia/Tokyo")) AS window_date
 FROM (
   SELECT started_at FROM optionchan_import.atm_iv WHERE started_at >= @start_at AND started_at < @end_at
@@ -1790,13 +1802,13 @@ FROM (
   SELECT started_at FROM optionchan_import.atm_target_price WHERE started_at >= @start_at AND started_at < @end_at
   GROUP BY last_trading_day, time_frame, started_at HAVING COUNT(DISTINCT TO_JSON_STRING(STRUCT(open, high, low, close))) > 1
 )
-ORDER BY window_date' | tail -n +2 > $W/ohlc-conflict-days.txt
-cat $W/ohlc-conflict-days.txt
-rdays < $W/ohlc-conflict-days.txt          # all SUCCEEDED（その窓の移行済みの行も再計算で置き換わる）
+ORDER BY window_date' | tail -n +2 > $WDIR/ohlc-conflict-days.txt
+cat $WDIR/ohlc-conflict-days.txt
+rdays < $WDIR/ohlc-conflict-days.txt          # all SUCCEEDED（その窓の移行済みの行も再計算で置き換わる）
 #  4b. C 以降の窓（窓の日付 2026-10-13 〜 E の前日（金曜）。#12 で新系の取りこぼしが旧系の行で埋まった）
 days 2026-10-13 <E の前日（金曜）> | rdays   # all SUCCEEDED
 #  4c. 確認: 作り直した窓ごとに 3 表のキーの数が同じで、キーの重複が無い（4a の日付と 4b の範囲）
-for d in $(cat $W/ohlc-conflict-days.txt); do
+for d in $(cat $WDIR/ohlc-conflict-days.txt); do
   q --location=$L --format=csv --parameter="d:DATE:$d" '
   SELECT @d AS window_date, tbl, COUNT(*) AS bars, COUNT(DISTINCT FORMAT("%t|%t", last_trading_day, started_at)) AS keys
   FROM (SELECT "atm_iv" AS tbl, * FROM optionchan_tokyo.atm_iv UNION ALL SELECT "atm_option_price", * FROM optionchan_tokyo.atm_option_price
@@ -1810,7 +1822,7 @@ done   # 日ごとに 3 表の bars が同じ、bars = keys
 
 - 2. の `skipped_existing` は、移行の前に C より前の窓を手動実行していなければ 0
 - 結果は件数・要約だけを #49 にコメントする（フィンガープリントの値は貼らない。一致したかどうかだけ）
-- 切り戻し（移行行だけを消す。C より前は移行行だけ）: `qr "$S0" "$C" --location=$L 'DELETE FROM optionchan_tokyo.<表> WHERE started_at >= @start_at AND started_at < @end_at'` を 3 表で。4a で作り直した窓（2019-07-01・2019-07-02）の 1 時間足も消える
+- 切り戻し（移行行だけを消す。C より前は移行行だけ）: `qr "$S0_OHLC" "$C" --location=$L 'DELETE FROM optionchan_tokyo.<表> WHERE started_at >= @start_at AND started_at < @end_at'` を 3 表で。4a で作り直した窓（2019-07-01・2019-07-02）の 1 時間足も消える
 
 ### 停止・削除
 
@@ -1969,7 +1981,7 @@ Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、�
 OLD_REGION=us-east1
 OLD_JOBS="minutely_task create_timeframe"
 HTTP_FNS="smile_data atm_data atm_iv_data"
-W=<スクラッチのディレクトリ>   # 停止前後の記録を置く（リポジトリ・Issue に貼らない）
+WDIR=<スクラッチのディレクトリ>   # 停止前後の記録を置く（リポジトリ・Issue に貼らない）
 # App Engine の servingStatus を見る / 変える（gcloud app update に servingStatus のフラグが無いので Admin API を直接呼ぶ）
 app_status() { curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
   "https://appengine.googleapis.com/v1/apps/$P" | jq -r '.servingStatus // .error.message'; }
@@ -2014,7 +2026,7 @@ legacy_state() {
 
 上から順に。1 つの端末で。
 
-1. 停止前の記録: `legacy_state > $W/legacy-before.txt; curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/" > $W/app-before.txt`（旧 URL は IAP のログインへのリダイレクトで 302 のはず。scheduler 2 行が `ENABLED`、invoker 3 行が `["allUsers"]`、app が `SERVING`、アラート 4 本、DTS 5 本がすべて `disabled=false`）
+1. 停止前の記録: `legacy_state > $WDIR/legacy-before.txt; curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/" > $WDIR/app-before.txt`（旧 URL は IAP のログインへのリダイレクトで 302 のはず。scheduler 2 行が `ENABLED`、invoker 3 行が `["allUsers"]`、app が `SERVING`、アラート 4 本、DTS 5 本がすべて `disabled=false`）
 2. 新系の取りこぼしを補う: 「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。E から金曜の窓までで `legacy_compare_daily` の `legacy_only_snapshots` が 1 以上の日すべて。**Terraform の apply（手順 4）の前に行う**（DTS を無効にすると legacy-stage / legacy-copy の手動実行ができない）。補った日の 1 時間足も作り直す
 3. 1 時間足の旧系の同値の確認を直近 30 日でもう一度流し、件数を #49 に記録する（「1 時間足（#49）」の「旧系との突き合わせ」。`insert_ohlc` を止める前の最後の記録）
 4. Terraform: `infra/prod/variables.tf` の `legacy_stopped` の既定値を `true` にする PR を出す。PR の plan の要約が **update 3**（`google_bigquery_data_transfer_config.legacy_stage` / `legacy_copy` / `legacy_compare` の `disabled`）と **delete 2**（`google_monitoring_alert_policy.this["m1"]` / `["m2"]`）だけであることを見てマージし、deploy の `apply` job を承認する。**Scheduler より先に**行う（先に Scheduler を止めると旧系の M1 が 35 分前後で鳴る）
@@ -2041,7 +2053,7 @@ legacy_state() {
    ```
 
 8. 旧コードの削除の PR（EPIC 終了条件 7）: `appengine/`、`functions_py/atm_iv/`、`functions/main.py` の `smile_data`・`atm_data`・`check_auth` と `auth.txt` の読み込み、`memo.txt` の該当のデプロイ手順。`download_jpx` / `load_jpx_into_bq`（`functions/main.py` の残り）・`functions_py/timeframe/`（`insert_ohlc`）のコードは #24 まで残す（切り戻しで再開する関数の記録）。plan の差分は 0。判定は `grep -rlE "open\(['\"]auth\.txt" --include=*.py apps functions functions_py appengine` が 0 件（`apps/viewer/tests/test_image.py` は「イメージに auth.txt が無い」ことの検査で文字列を含むので、EPIC の測定コマンドの `grep -rl auth.txt` には当たる。この検査は数えない）
-9. 停止後の記録: `legacy_state > $W/legacy-after.txt; diff $W/legacy-before.txt $W/legacy-after.txt`。差分が次のとおりであること
+9. 停止後の記録: `legacy_state > $WDIR/legacy-after.txt; diff $WDIR/legacy-before.txt $WDIR/legacy-after.txt`。差分が次のとおりであること
 
    - scheduler 2 行が `PAUSED`、invoker 3 行が `[]`、app が `USER_DISABLED`
    - アラートは `optionchan: M1 ingest ...`・`optionchan: M2 ingest ...` の 2 本だけ（どちらも `True`）
@@ -2061,7 +2073,7 @@ legacy_state() {
     gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ingest" AND httpRequest.status>=200 AND httpRequest.status<300' \
       --project=$P --freshness=5m --format='value(timestamp)' | grep -c .   # 4〜5
     # 手順 7 の 1 時間後: 旧 URL が配信されないこと（手順 1 の記録（302）と違い、200・302 でない）
-    curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/"; cat $W/app-before.txt
+    curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/"; cat $WDIR/app-before.txt
     ```
 
     新系の ingest の 2xx が 0 なら、新系の M1 より先に「新しい取り込み（ingest）」の手順で原因を見る（旧系の停止とは独立しているはずなので、旧系を戻す前に新系を調べる）
