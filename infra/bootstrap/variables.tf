@@ -1,7 +1,7 @@
+# 既定値は持たない（リポジトリは誰でも clone して自分のプロジェクトで使う前提）。TF_VAR_project_id か tfvars で渡す
 variable "project_id" {
   description = "GCP プロジェクト ID"
   type        = string
-  default     = "optionchan-222710"
 }
 
 variable "region" {
@@ -13,7 +13,11 @@ variable "region" {
 variable "github_repository" {
   description = "WIF で借用を許す GitHub リポジトリ（owner/name）。apply SA の subject に使う"
   type        = string
-  default     = "terukusu/optionchan-gcp"
+
+  validation {
+    condition     = can(regex("^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$", var.github_repository))
+    error_message = "github_repository は <owner>/<name> の形で指定する。"
+  }
 }
 
 # GitHub の数値 ID はコード・tfvars に置かない。apply 時に gh api から TF_VAR_ で渡す（runbook「Terraform」）。

@@ -9,7 +9,7 @@ allowed-tools: [Bash, Read, Write]
 
 このスキルは Issue という **入れ物** を作る責務に限定される。why / what / AC / スコープ境界等の **解釈情報の生成は `/implement-issue` Phase 1（リファインメント）が担当** する。bug の症状・再現手順・環境、および feature / spike の会話文脈に現れた事実情報のみ、起票者しか持たない情報として起票時に記載する。
 
-対象リポジトリ: `terukusu/optionchan-gcp`（個人プロジェクト。日経225オプション価格を JPX ページから毎分スクレイピング → GCS → BigQuery に蓄積し、App Engine で可視化）。
+対象リポジトリ: 作業ディレクトリの git リポジトリ（`gh` が向いている GitHub リポジトリ。fork・clone して使う人は自分のもの）。コマンドの前に `REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` で `<owner>/<name>` を取り、（取った `REPO` が自分のリポジトリか確認する。fork を clone して upstream があると元リポジトリになることがあるので、そのときは `gh repo set-default` で選び直すようユーザーに依頼する）`--repo "$REPO"` で渡す（GraphQL の owner / name は `${REPO%/*}` / `${REPO#*/}`）。（日経225オプション価格を JPX ページから毎分スクレイピング → GCS → BigQuery に蓄積し、ビューアーで可視化するツール）。
 
 ## 使い方
 
@@ -72,7 +72,7 @@ AC は 1 件ずつ「**何を実行したらどういう結果で pass か**」�
 2.
 
 ## 環境
-<本番 GCP (optionchan-222710) / ローカル> / 対象: <関数名・App Engine・BigQuery テーブル名など、観測した対象>
+<本番 GCP / ローカル> / 対象: <関数名・App Engine・BigQuery テーブル名など、観測した対象>
 ```
 
 - 「期待動作」は解釈情報のため含めない
@@ -152,13 +152,13 @@ atm_iv の集計にも影響する。                                         �
 
 ## 実行手順
 
-1. `gh auth status` で認証を確認し、`gh repo view terukusu/optionchan-gcp --json name -q .name` が成功することを確認する（gh のアカウント切替は環境変数 `GH_CONFIG_DIR` 等でユーザーが行う。スキル側で `gh auth switch` や設定変更をしない）。失敗ならユーザーに報告して中断
+1. `gh auth status` で認証を確認し、`REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` が成功することを確認する（gh のアカウント切替は環境変数 `GH_CONFIG_DIR` 等でユーザーが行う。スキル側で `gh auth switch` や設定変更をしない）。失敗ならユーザーに報告して中断
 2. `$ARGUMENTS` が空なら「タイトルまたはトピックを指定してください」と報告して中断
 3. **種類判定**（曖昧なら feature）
 4. **ラベル決定**（`gh label list` で存在確認）
 5. **種類別の本文生成**（「事実情報の記載」に従う。骨格見出しを推測で埋めない）
 6. **本文ファイル作成**: `mktemp "${TMPDIR:-/tmp}/create-issue-body-XXXXXX.md"` で一意な一時ファイルを取得し、本文を書き出す（固定パスは使わない）
-7. `gh issue create --repo terukusu/optionchan-gcp --title '<タイトル>' --body-file '<本文ファイル>' [--label '<ラベル>']` で起票（タイトルはシングルクォートで囲む）
+7. `gh issue create --repo "$REPO" --title '<タイトル>' --body-file '<本文ファイル>' [--label '<ラベル>']` で起票（タイトルはシングルクォートで囲む）
 8. 成否によらず `rm -f '<本文ファイル>'` で後始末
 9. Issue URL を報告し、種類判定の結果とその理由を添える
 10. 次の一手として `/implement-issue <issue-num>` を案内する（起票直後は why / what / AC が無いので `/implement-issue-lite` の適用条件を満たさない）

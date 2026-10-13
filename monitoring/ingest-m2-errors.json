@@ -3,13 +3,7 @@
   "documentation": {
     "subject": "[optionchan] M2 新しい取り込みで ERROR ログ",
     "mimeType": "text/markdown",
-    "content": "Cloud Run `ingest`・ジョブ `reprocess`・定期クエリ（BigQuery Data Transfer Service の `quality-daily`・`legacy-*`）が severity ERROR 以上のログを出しました（`parse_failed`・`write_failed`・`stale`・`raw_unrecovered`、定期クエリの `quality:`（品質チェックの違反）・`legacy_compare:`（説明できない差分）など。リクエストログの 5xx・メモリ超過などのシステムログを含む。`recovery_failed` は除く）。通知は 1 時間に 1 回までなので、対応時は直近の ERROR をすべて見てください。\n\n一次対応は runbook の「新しい取り込みの監視」節の「M2 を受けたとき」を参照してください。",
-    "links": [
-      {
-        "displayName": "runbook: 新しい取り込みの監視",
-        "url": "https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#%E6%96%B0%E3%81%97%E3%81%84%E5%8F%96%E3%82%8A%E8%BE%BC%E3%81%BF%E3%81%AE%E7%9B%A3%E8%A6%9635"
-      }
-    ]
+    "content": "Cloud Run `ingest`・ジョブ `reprocess`・定期クエリ（BigQuery Data Transfer Service の `quality-daily`・`legacy-*`）が severity ERROR 以上のログを出しました（`parse_failed`・`write_failed`・`stale`・`raw_unrecovered`、定期クエリの `quality:`（品質チェックの違反）・`legacy_compare:`（説明できない差分）など。リクエストログの 5xx・メモリ超過などのシステムログを含む。`recovery_failed` は除く）。通知は 1 時間に 1 回までなので、対応時は直近の ERROR をすべて見てください。\n\n一次対応はリポジトリの `docs/runbook.md` の「新しい取り込みの監視（#35）」節の「M2 を受けたとき」を参照してください。"
   },
   "combiner": "OR",
   "conditions": [

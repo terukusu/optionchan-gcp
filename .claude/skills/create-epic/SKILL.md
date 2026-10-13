@@ -9,7 +9,7 @@ allowed-tools: [Bash, Read, Write]
 
 このスキルは EPIC（複数の子 Issue を束ねる tracking Issue）の **入れ物と中身を同時に確定させる** 責務を持つ。EPIC は実装対象ではないので **EPIC に `/implement-issue` を走らせない**。したがって EPIC には後段のリファインメントが無く、`create-issue` の「起票時は骨格のみ」原則を適用すると why / 終了条件 / 子集合を誰も埋めない。**子 Issue の起票と実装は `/create-issue` → `/implement-issue`（または `/implement-epic`）の経路に載せる**。
 
-対象リポジトリ: `terukusu/optionchan-gcp`（個人プロジェクト）。EPIC の典型例: 「python37 で動いている関数群のランタイム移行」「本番デプロイ済みコードと git のドリフト解消」「テスト基盤の導入」など、複数の独立した変更とデプロイを伴う取り組み。
+対象リポジトリ: 作業ディレクトリの git リポジトリ（`gh` が向いている GitHub リポジトリ。fork・clone して使う人は自分のもの）。コマンドの前に `REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` で `<owner>/<name>` を取り、（取った `REPO` が自分のリポジトリか確認する。fork を clone して upstream があると元リポジトリになることがあるので、そのときは `gh repo set-default` で選び直すようユーザーに依頼する）`--repo "$REPO"` で渡す（GraphQL の owner / name は `${REPO%/*}` / `${REPO#*/}`）。EPIC の典型例: 「python37 で動いている関数群のランタイム移行」「本番デプロイ済みコードと git のドリフト解消」「テスト基盤の導入」など、複数の独立した変更とデプロイを伴う取り組み。
 
 ## 使い方
 
@@ -27,7 +27,7 @@ allowed-tools: [Bash, Read, Write]
 
 `--dry-run` では GitHub への書き込み（本文改訂 / ラベル / サブイシュー紐付け / Issue 起票）を一切行わず、変更案の出力だけを行う。
 
-既存 EPIC の一覧: `gh issue list --repo terukusu/optionchan-gcp --state open --search "EPIC in:title"`（EPIC でない Issue も混じるので目視で選別する）。
+既存 EPIC の一覧: `gh issue list --repo "$REPO" --state open --search "EPIC in:title"`（EPIC でない Issue も混じるので目視で選別する）。
 
 ## 原則
 
@@ -61,11 +61,11 @@ EPIC 本文を改訂する前に、必ず元本文を **退避コメント** と
 4. **終了条件を書く**: 各行に (a) 指標名 (b) 比較ペア（as-is 実測値 → 目標値） (c) 測定手段（コマンド / クエリ）(d) 判定担当の子 Issue を書く。閾値と測定手段を持たない表現（「十分に安定」等）は不可。その場で数値化できなければ、判定基準を決める spike を `/create-issue` で切って判定担当にする
 5. **子 Issue の初期集合を決める**: 既存 Issue で足りるものは流用し、無いものは `/create-issue` で起票する（中身は `/implement-issue` Phase 1 が埋める）。本番デプロイを伴う子は 1 Issue = 1 デプロイ単位（関数単位など）に分け、ロールバック可能な粒度にする
 6. **依存関係と着手順を書く**: 子 Issue 間の依存と、順序の根拠（リスク / 効果 / 確度）を表で書く
-7. **起票**: `mktemp "${TMPDIR:-/tmp}/create-epic-body-XXXXXX.md"` に本文を書き出し、`gh issue create --repo terukusu/optionchan-gcp --title 'EPIC: <タイトル>' --body-file '<本文ファイル>'` で起票。成否によらず `rm -f` する
+7. **起票**: `mktemp "${TMPDIR:-/tmp}/create-epic-body-XXXXXX.md"` に本文を書き出し、`gh issue create --repo "$REPO" --title 'EPIC: <タイトル>' --body-file '<本文ファイル>'` で起票。成否によらず `rm -f` する
 8. **サブイシュー紐付け**: 子 Issue を GitHub のサブイシュー機能で紐付ける（本文のチェックボックスだけでは構造にならない）。例:
    ```bash
-   CHILD_ID=$(gh api repos/terukusu/optionchan-gcp/issues/<子番号> -q .id)
-   gh api -X POST repos/terukusu/optionchan-gcp/issues/<EPIC番号>/sub_issues -F sub_issue_id="$CHILD_ID"
+   CHILD_ID=$(gh api repos/$REPO/issues/<子番号> -q .id)
+   gh api -X POST repos/$REPO/issues/<EPIC番号>/sub_issues -F sub_issue_id="$CHILD_ID"
    ```
 
 EPIC 本文のテンプレート（**`### 子 Issue と着手順` と `### 終了条件（判定担当つき）` の 2 見出しは `/implement-epic` が読むので名前を変えない**）:
@@ -101,7 +101,7 @@ EPIC 本文のテンプレート（**`### 子 Issue と着手順` と `### 終�
 ### 前段（読み取り。`--dry-run` でも共通）
 
 1. 対象 EPIC の本文 / ラベル / 更新時刻: `gh issue view <番号> --json number,title,state,body,labels,updatedAt`
-2. サブイシューの現況: `gh api graphql -f query='query{repository(owner:"terukusu",name:"optionchan-gcp"){issue(number:<番号>){subIssues(first:50){totalCount nodes{number title state}}}}}'`
+2. サブイシューの現況: `gh api graphql -f owner="${REPO%/*}" -f name="${REPO#*/}" -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issue(number:<番号>){subIssues(first:50){totalCount nodes{number title state}}}}}'`
 3. 本文が列挙する子 Issue の state と本文記述の差分を把握する
 4. **着手前スナップショット**（本文 / ラベル集合 / サブイシュー件数 / `updatedAt`）を控える。dry-run では最後に突合して無改変を確認する
 

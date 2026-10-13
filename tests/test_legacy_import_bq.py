@@ -1,6 +1,6 @@
 """過去データの移行（#12）の SQL を BigQuery で実際に動かす検査（tests/test_sql_bq.py と同じ流儀）。
 
-CI では動かさない（BigQuery の認証が要る）。手元で `OPTIONCHAN_BQ_TEST=1 python -m pytest -q tests/test_legacy_import_bq.py`。
+CI では動かさない（BigQuery の認証が要る）。手元で `OPTIONCHAN_BQ_TEST=1 OPTIONCHAN_BQ_PROJECT=<PROJECT_ID> python -m pytest -q tests/test_legacy_import_bq.py`。
 - 固定値の検査: insert.sql の移す T の選び方（`-- result:begin`〜`-- result:end`）と verify.sql の検証を、`-- source:begin`〜`-- source:end`
   を固定値の CTE に差し替えて SELECT だけ実行する（テーブルを読まない。課金 0 バイト）
 - 実テーブルの dry run: 一時データセット（optionchan_import）はまだ無いので、旧スキーマの列を持つ東京の optionchan_legacy_copy で代える
@@ -14,7 +14,10 @@ import pytest
 
 from test_sql_bq import FUTURE, GiB, MiB, OPTION, PROJECT, SPOT, TOKYO, between, bq, cte, literal, read, render
 
-pytestmark = pytest.mark.skipif(os.environ.get('OPTIONCHAN_BQ_TEST') != '1', reason='OPTIONCHAN_BQ_TEST=1 のときだけ')
+pytestmark = pytest.mark.skipif(
+    os.environ.get('OPTIONCHAN_BQ_TEST') != '1' or not PROJECT,
+    reason='OPTIONCHAN_BQ_TEST=1 と OPTIONCHAN_BQ_PROJECT のときだけ',
+)
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 SQL_DIR = os.path.join(ROOT, 'sql', 'legacy_import')

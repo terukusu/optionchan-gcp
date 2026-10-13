@@ -1,0 +1,12 @@
+# infra/bootstrap の変数の例。コピーして infra/bootstrap/local.auto.tfvars を作り、自分の値を入れる
+# （*.tfvars は gitignore 済み。コミットしない）。手順は docs/runbook.md の「Terraform」。
+#
+# project_id・github_repository は runbook の手順どおり TF_VAR_project_id / TF_VAR_github_repository で渡すなら書かない。
+# ここに書くと *.auto.tfvars が環境変数より優先される。
+# project_id        = "<PROJECT_ID>"
+# github_repository = "<OWNER>/<REPO>"
+
+# GitHub の数値 ID（github_repository_id / github_owner_id）はここにも書かず、apply のたびに gh api から TF_VAR_ で渡す。
+
+# ビューアーを IAP 越しに開けるユーザー（#53）。サービス viewer の作成前は []、後は ["user:<メール>"]
+viewer_iap_members = []

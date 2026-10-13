@@ -46,13 +46,15 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 
 * tests
   * functions・監視アラート定義・GitHub Actions の workflow・Terraform・`sql/` の静的検査のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片
-  * `tests/test_sql_bq.py` は定期クエリの SQL を BigQuery で固定値の入力に対して動かす検査と、実テーブルの dry run（CI では動かさない。`OPTIONCHAN_BQ_TEST=1 .venv/bin/python -m pytest -q tests/test_sql_bq.py`。gcloud の構成は環境変数で渡す）。`tests/test_legacy_import_bq.py`（#12）・`tests/test_ohlc_bq.py`（#49）も同じ
+  * `tests/test_sql_bq.py` は定期クエリの SQL を BigQuery で固定値の入力に対して動かす検査と、実テーブルの dry run（CI では動かさない。`OPTIONCHAN_BQ_TEST=1 OPTIONCHAN_BQ_PROJECT=<PROJECT_ID> .venv/bin/python -m pytest -q tests/test_sql_bq.py`。プロジェクトの既定値は無い。gcloud の構成は環境変数で渡す）。`tests/test_legacy_import_bq.py`（#12）・`tests/test_ohlc_bq.py`（#49）も同じ
 
 * infra
   * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込み・ビューアーの SA・生 HTML のバケットと権限、IAP のアクセス許可。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo` とテーブル関数・Cloud Run / Scheduler `ingest`・Cloud Run ジョブ `reprocess`・定期クエリ（DTS）・Cloud Run `viewer`（IAP）。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
+  * プロジェクト ID・GitHub リポジトリ名・state のバケット名は既定値を持たない（clone した人が自分の値を渡す）。`TF_VAR_project_id`（bootstrap は `TF_VAR_github_repository` も）と `terraform init -backend-config="bucket=<PROJECT_ID>-tfstate"`（bootstrap は `<PROJECT_ID>-tfstate-bootstrap`）で渡す
 
 * .github/workflows
   * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
+  * repository variables `GCP_PROJECT_ID`（GCP プロジェクト ID）・`TF_STATE_BUCKET`（prod の state のバケット）・`GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY` と secret `GCP_WIF_PROVIDER` を使う。設定は docs/runbook.md の「GitHub の設定（bootstrap の後、PR を出す前）」
 
 ## テストの実行
 Python 3.11 の venv を作り、リポジトリ直下で実行する。

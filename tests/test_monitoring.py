@@ -1,12 +1,13 @@
 import importlib.util
 import json
 import os
+import re
 from datetime import datetime, timedelta
 
 import pytest
 
 MONITORING_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'monitoring'))
-RUNBOOK_URL_PREFIX = 'https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#'
+RUNBOOK = os.path.normpath(os.path.join(MONITORING_DIR, '..', 'docs', 'runbook.md'))
 EXECUTION_COUNT = 'cloudfunctions.googleapis.com/function/execution_count'
 NOT_OK = 'NOT metric.labels.status = "ok"'
 REQUEST_COUNT = 'run.googleapis.com/request_count'
@@ -64,10 +65,19 @@ def test_policy_common(name, prefix):
     assert 'notificationChannels' not in policy
     assert policy['enabled'] is True
     assert policy['combiner'] == 'OR'
-    links = policy['documentation']['links']
-    assert links
-    for link in links:
-        assert link['url'].startswith(RUNBOOK_URL_PREFIX)
+    # runbook へは特定のリポジトリの絶対 URL でなく、リポジトリ相対の節の名前で案内する（誰でも clone して使う前提。#55）
+    doc = policy['documentation']
+    assert 'links' not in doc
+    m = re.search(r'リポジトリの `docs/runbook.md` の「([^」]+)」節の「([^」]+)」', doc['content'])
+    assert m, name
+    section, subsection = m.groups()
+    with open(RUNBOOK, encoding='utf-8') as f:
+        headings = [line.rstrip('\n') for line in f if line.startswith('#')]
+    # 節（##）と、その中の小節（###）が runbook にあること
+    start = headings.index(f'## {section}')
+    rest = headings[start + 1:]
+    end = next((i for i, h in enumerate(rest) if h.startswith('## ')), len(rest))
+    assert f'### {subsection}' in rest[:end], (name, section, subsection)
 
 
 def test_m1_liveness(m1):

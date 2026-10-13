@@ -1,6 +1,6 @@
 # runbook
 
-本番（`optionchan-222710`）の運用手順。節は設計（`docs/architecture/target.md` 4.1）の項目ごとに、各 Issue で追記する。
+本番（自分の GCP プロジェクト。コマンドでは下の「共通の変数」の `$P`）の運用手順。節は設計（`docs/architecture/target.md` 4.1）の項目ごとに、各 Issue で追記する。
 
 ## コスト
 
@@ -17,9 +17,12 @@
 
 請求先アカウント ID・プロジェクト番号・通知チャネル ID は、Issue・PR・ログに書かない。変数で扱い、出力を貼るときは件数・要約だけにする（請求先 ID は `sed -E 's/[0-9A-Z]{6}-[0-9A-Z]{6}-[0-9A-Z]{6}/<BA>/g'` でマスク）。
 
+プロジェクト ID は自分の値を入れる（`gcloud config get-value project` で今の構成のプロジェクトが分かる）。以下の節のバケット（`$P-tfstate`・`$P-raw` など）・SA のメールもここから組み立てる。
+
 ```sh
 export CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false   # 未有効 API の自動有効化を防ぐ
-P=optionchan-222710
+P=$(gcloud config get-value project 2>/dev/null)   # 自分の GCP プロジェクト ID。違うなら P=<自分の ID> で上書きする
+: "${P:?P（GCP プロジェクト ID）を設定する}"; echo "P=$P"   # 自分のプロジェクトであること
 BA=$(gcloud billing projects describe $P --format="value(billingAccountName)" | sed 's#billingAccounts/##')
 PN=$(gcloud projects describe $P --format="value(projectNumber)")
 CH=$(gcloud beta monitoring channels list --project=$P --format=json \
@@ -84,15 +87,15 @@ gcloud billing budgets list --billing-account=$BA --billing-project=$P --format=
 
 ### 予算アラートを受けたとき
 
-1. 課金エクスポート（`PaymentInfo`、US）で、今月のこのプロジェクトのサービス別内訳を見る（テーブル名は請求先 ID を含むのでワイルドカードで指定する）
+1. 課金エクスポート（`PaymentInfo`、US。課金エクスポートの出力先のデータセットに合わせる）で、今月のこのプロジェクトのサービス別内訳を見る（テーブル名は請求先 ID を含むのでワイルドカードで指定する。`$P` を埋め込むためにクエリの途中で引用符を閉じている）
 
    ```sh
    bq query --project_id=$P --use_legacy_sql=false '
    SELECT service.description AS service,
           ROUND(SUM(cost)) AS cost,
           ROUND(SUM(IFNULL((SELECT SUM(c.amount) FROM UNNEST(credits) c), 0))) AS credits
-   FROM `optionchan-222710.PaymentInfo.gcp_billing_export_v1_*`
-   WHERE project.id = "optionchan-222710"
+   FROM `'"$P"'.PaymentInfo.gcp_billing_export_v1_*`
+   WHERE project.id = "'"$P"'"
      AND invoice.month = FORMAT_DATE("%Y%m", CURRENT_DATE("America/Los_Angeles"))
    GROUP BY service ORDER BY cost DESC'
    ```
@@ -357,7 +360,8 @@ Activity Analyzer（Policy Analyzer API `policyanalyzer.googleapis.com`。#23 �
 
 ```sh
 export CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false
-P=optionchan-222710
+P=$(gcloud config get-value project 2>/dev/null)   # 自分の GCP プロジェクト ID。違うなら P=<自分の ID> で上書きする
+: "${P:?P（GCP プロジェクト ID）を設定する}"; echo "P=$P"   # 自分のプロジェクトであること
 SA=optionchan@$P.iam.gserviceaccount.com
 KEYS=$(gcloud iam service-accounts keys list --iam-account=$SA --managed-by=user --project=$P --format='value(name.basename())')
 
@@ -368,7 +372,7 @@ gcloud policy-intelligence query-activity --activity-type=serviceAccountKeyLastA
     | select($k | index($id))
     | [$id[0:8], (.activity.lastAuthenticatedTime // "記録なし"), .observationPeriod.startTime[0:10], .observationPeriod.endTime[0:10]] | @tsv'
 
-# SA 単位（前提確認: App Engine デフォルト SA（`optionchan-222710@...`）に最近の記録が出ること）
+# SA 単位（前提確認: App Engine デフォルト SA（`<PROJECT_ID>@...`）に最近の記録が出ること）
 gcloud policy-intelligence query-activity --activity-type=serviceAccountLastAuthentication --project=$P --format=json \
   | jq -r '.[] | [(.activity.serviceAccount.fullResourceName | split("/") | last | split("@")[0]), (.activity.lastAuthenticatedTime // "記録なし")] | @tsv' \
   | sed -E 's/[0-9]{6,}/<N>/g'   # SA の名前に含まれるプロジェクト番号をマスク
@@ -421,7 +425,7 @@ GROUP BY d ORDER BY d'
 
 ## GitHub 設定
 
-リポジトリ `terukusu/optionchan-gcp` の設定（#22。設計は `docs/architecture/target.md` 3.5 の CI 項目）。所有者 1 人で、PR は所有者が `gh pr merge --merge` でマージする前提。変更・確認は `gh api`（所有者の権限が必要）。
+このリポジトリ（自分の GitHub リポジトリ `<OWNER>/<REPO>`）の設定（#22。設計は `docs/architecture/target.md` 3.5 の CI 項目）。所有者 1 人で、PR は所有者が `gh pr merge --merge` でマージする前提。変更・確認は `gh api`（所有者の権限が必要）。
 
 | 項目 | 設定 |
 |---|---|
@@ -430,12 +434,19 @@ GROUP BY d ORDER BY d'
 | fork からの PR の workflow 実行 | 外部の貢献者はすべて承認必須 |
 | 使えるアクション | GitHub 製 + `patterns_allowed` に列挙したもの（`hashicorp/setup-terraform@*`、`google-github-actions/auth@*`。#10）、SHA ピン留め必須 |
 | Environment `prod` | `master` のみ、required reviewer は所有者（自己承認可）。deploy workflow の `apply` job が使う（#10） |
-| secret / variables | secret `GCP_WIF_PROVIDER`（WIF プロバイダの完全名。プロジェクト番号を含む）、variables `GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY`（SA のメール）、secret `TF_ALERT_POLICY_IDS`（アラート取り込み用の一時的な値。Actions のログに出さないため secret にする。取り込み後に削除）（#10） |
+| secret / variables | secret `GCP_WIF_PROVIDER`（WIF プロバイダの完全名。プロジェクト番号を含む）、variables `GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY`（SA のメール）、variables `GCP_PROJECT_ID`（GCP プロジェクト ID）/ `TF_STATE_BUCKET`（prod の state のバケット名 `<PROJECT_ID>-tfstate`）（#55。ci・deploy が Terraform の `project_id`・backend とイメージの参照に使う）、secret `TF_ALERT_POLICY_IDS`（アラート取り込み用の一時的な値。Actions のログに出さないため secret にする。取り込み後に削除）（#10） |
 | secret scanning | 有効（push protection も有効） |
 
 承認数を 1 以上にすると自分の PR をマージできなくなる。`require_last_push_approval`（最後の push を別の人が承認）も同じ理由で `false` にする。
 
-以下の節では、先に `R=repos/terukusu/optionchan-gcp` を設定しておく。
+以下の節では、先にリポジトリ直下で次を設定しておく。`gh repo view` は gh の既定リポジトリを返すので、fork を clone して upstream があると元リポジトリを返すことがある。初回に `gh repo set-default` で自分のリポジトリを選び、表示された `REPO` が自分のものであることを確かめる。
+
+```sh
+gh repo set-default   # 初回だけ。自分のリポジトリ（<OWNER>/<REPO>）を選ぶ（確認は gh repo set-default --view）
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+: "${REPO:?gh repo set-default で自分のリポジトリを選ぶ}"; echo "REPO=$REPO"   # 自分のリポジトリであること
+R=repos/$REPO
+```
 
 ### ブランチ保護の設定
 
@@ -467,6 +478,7 @@ gh api $R/actions/permissions/selected-actions --jq '(.patterns_allowed | sort) 
 gh api $R/environments/prod --jq '.deployment_branch_policy == {"protected_branches": false, "custom_branch_policies": true} and ([.protection_rules[] | select(.type == "required_reviewers")] | length) == 1'
 gh api $R/environments/prod/deployment-branch-policies --jq '[.branch_policies[] | {name, type}] == [{"name": "master", "type": "branch"}]'
 gh api $R --jq '.security_and_analysis.secret_scanning.status == "enabled" and .security_and_analysis.secret_scanning_push_protection.status == "enabled"'
+gh api $R/actions/variables --jq '[.variables[].name] | contains(["GCP_PROJECT_ID", "GCP_SA_TF_APPLY", "GCP_SA_TF_PLAN", "TF_STATE_BUCKET"])'   # 値は表示しない
 ```
 
 ### 許可アクションを足すとき
@@ -497,8 +509,10 @@ GCP のリソースを Terraform で管理する（#10。設計は `docs/archite
 
 | ルート | 中身 | apply する人 | state | state を読める主体 |
 |---|---|---|---|---|
-| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限。取り込み用の SA `sa-ingest` / `sa-scheduler`、生 HTML のバケット `optionchan-222710-raw`、それらへの付与（プロジェクト単位・バケット単位・SA 単位。#33）。定期クエリの SA `sa-sq-dts`・旧 `optionchan` の 3 テーブルの読み取り・DTS 用のカスタムロール（#40）。ビューアーの SA `sa-viewer`・`bigquery.jobUser`・IAP のアクセス許可（`viewer_iap_members`、#53） | 所有者がローカルから（CI は fmt / validate だけ） | `gs://optionchan-222710-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
-| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2、BigQuery `optionchan_tokyo` とテーブル 4 つ、Cloud Run `ingest`、Scheduler `ingest`、それらへの付与（データセット単位・サービス単位。#33）。定期クエリ（DTS）4 本・作業用データセット 2 つ・結果のテーブル 2 つ（#40）。Cloud Run `viewer`（IAP）・IAP のサービスエージェントの `run.invoker`・`sa-viewer` の `dataViewer`（#53） | CI（deploy workflow、Environment `prod` の承認後） | `gs://optionchan-222710-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
+| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限。取り込み用の SA `sa-ingest` / `sa-scheduler`、生 HTML のバケット `<PROJECT_ID>-raw`、それらへの付与（プロジェクト単位・バケット単位・SA 単位。#33）。定期クエリの SA `sa-sq-dts`・旧 `optionchan` の 3 テーブルの読み取り・DTS 用のカスタムロール（#40）。ビューアーの SA `sa-viewer`・`bigquery.jobUser`・IAP のアクセス許可（`viewer_iap_members`、#53） | 所有者がローカルから（CI は fmt / validate だけ） | `gs://<PROJECT_ID>-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
+| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2、BigQuery `optionchan_tokyo` とテーブル 4 つ、Cloud Run `ingest`、Scheduler `ingest`、それらへの付与（データセット単位・サービス単位。#33）。定期クエリ（DTS）4 本・作業用データセット 2 つ・結果のテーブル 2 つ（#40）。Cloud Run `viewer`（IAP）・IAP のサービスエージェントの `run.invoker`・`sa-viewer` の `dataViewer`（#53） | CI（deploy workflow、Environment `prod` の承認後） | `gs://<PROJECT_ID>-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
+
+プロジェクト ID・リポジトリ名はコードに既定値を持たない（誰でも clone して自分のプロジェクトで使う前提。#55）。`project_id` は `TF_VAR_project_id`、bootstrap の `github_repository` は `TF_VAR_github_repository` で渡し、backend のバケットは部分設定なので `terraform init -backend-config="bucket=..."` で渡す（prod は `$P-tfstate`、bootstrap は `$P-tfstate-bootstrap`。CI は repository variables `GCP_PROJECT_ID` / `TF_STATE_BUCKET`）。ローカルの値は tfvars に書いてもよい（`*.tfvars` は gitignore 済み。例は `infra/bootstrap/local.auto.tfvars.example`）。
 
 予算・クエリ量上限は Terraform 管理外（「コスト」）。state には通知チャネルのメールアドレスなどが入るので、state・plan の全文・ログをリポジトリ・Issue・PR に貼らない。CI も plan の全文は出さず、アドレスと操作だけを要約する。
 
@@ -527,9 +541,14 @@ Cloud Run のイメージ（取り込み `ingest` #33、ビューアー `viewer`
 
 ```sh
 export CLOUDSDK_CORE_SHOULD_PROMPT_TO_ENABLE_API=false
-P=optionchan-222710
-R=repos/terukusu/optionchan-gcp
+P=$(gcloud config get-value project 2>/dev/null)   # 自分の GCP プロジェクト ID。違うなら P=<自分の ID> で上書きする
+: "${P:?P（GCP プロジェクト ID）を設定する}"; echo "P=$P"   # 自分のプロジェクトであること
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)   # <OWNER>/<REPO>
+: "${REPO:?gh repo set-default で自分のリポジトリを選ぶ}"; echo "REPO=$REPO"   # 自分のリポジトリであること（fork なら元リポジトリでないこと）
+R=repos/$REPO
 TF="mise exec terraform@1.16.4 -- terraform"
+export TF_VAR_project_id=$P   # Terraform の project_id（既定値なし）
+export GCP_PROJECT_ID=$P      # .github/scripts/image.sh resolve が使う
 # ADC が無いときだけ（トークンは 1 時間で切れる）
 export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)
 ```
@@ -548,7 +567,8 @@ gcloud storage buckets create gs://$P-tfstate-bootstrap --project=$P --location=
   --default-storage-class=STANDARD --uniform-bucket-level-access --public-access-prevention
 gcloud storage buckets update gs://$P-tfstate-bootstrap --versioning
 
-# 2. GitHub の数値 ID（コード・tfvars に置かない）
+# 2. GitHub のリポジトリ名と数値 ID（数値 ID はコード・tfvars に置かない）
+export TF_VAR_github_repository=$REPO
 export TF_VAR_github_repository_id=$(gh api $R --jq .id)
 export TF_VAR_github_owner_id=$(gh api $R --jq .owner.id)
 #    ビューアーの IAP のアクセス許可（#53、必須の変数）は infra/bootstrap/local.auto.tfvars（gitignore 済み。コミットしない）に置く。
@@ -557,7 +577,7 @@ export TF_VAR_github_owner_id=$(gh api $R --jq .owner.id)
 ls infra/bootstrap/local.auto.tfvars   # 無ければ「No such file」。上の注意に従って作る
 
 # 3. plan → 要約を見てから apply
-$TF -chdir=infra/bootstrap init -input=false
+$TF -chdir=infra/bootstrap init -input=false -backend-config="bucket=$P-tfstate-bootstrap"
 $TF -chdir=infra/bootstrap plan -input=false -no-color -out=b.tfplan > <scratch>/b-plan.log
 $TF -chdir=infra/bootstrap show -json b.tfplan \
   | jq -r '.resource_changes[] | select(.change.actions != ["no-op"] or .change.importing) | "\(.address): \(.change.actions | join(","))\(if .change.importing then " (import)" else "" end)"'
@@ -591,7 +611,7 @@ gcloud storage buckets get-iam-policy gs://$P-tfstate-bootstrap --format=json \
 
 prod（Cloud Run・Scheduler・データセット）より先に apply する（`sa-tf-apply` の権限と `sa-ingest` / `sa-scheduler` が無いと prod の apply が失敗する）。PR のマージ後、deploy の `apply` job を承認する前に、master で上の手順 2〜4 を行う。
 
-手順 3 の要約の目安: create 15（API `run.googleapis.com` 1、SA 2（`sa-ingest`・`sa-scheduler`）、バケット `optionchan-222710-raw` 1、バケット IAM 2、プロジェクト IAM 7（Scheduler のサービスエージェント 1、`sa-tf-apply` 3、`sa-tf-plan` 3）、SA IAM 2（`sa-tf-apply` の `serviceAccountUser`））、update / delete / replace 0。
+手順 3 の要約の目安: create 15（API `run.googleapis.com` 1、SA 2（`sa-ingest`・`sa-scheduler`）、バケット `$P-raw` 1、バケット IAM 2、プロジェクト IAM 7（Scheduler のサービスエージェント 1、`sa-tf-apply` 3、`sa-tf-plan` 3）、SA IAM 2（`sa-tf-apply` の `serviceAccountUser`））、update / delete / replace 0。
 
 確認（すべて期待どおりであること）:
 
@@ -634,9 +654,13 @@ gh api -X PUT $R/actions/permissions/selected-actions --input - <<'JSON'
 JSON
 
 # secret・variables（値を表示しない）
-$TF -chdir=infra/bootstrap output -raw wif_provider_name | gh secret set GCP_WIF_PROVIDER -R terukusu/optionchan-gcp
-$TF -chdir=infra/bootstrap output -raw sa_tf_plan_email | gh variable set GCP_SA_TF_PLAN -R terukusu/optionchan-gcp
-$TF -chdir=infra/bootstrap output -raw sa_tf_apply_email | gh variable set GCP_SA_TF_APPLY -R terukusu/optionchan-gcp
+$TF -chdir=infra/bootstrap output -raw wif_provider_name | gh secret set GCP_WIF_PROVIDER -R "$REPO"
+$TF -chdir=infra/bootstrap output -raw sa_tf_plan_email | gh variable set GCP_SA_TF_PLAN -R "$REPO"
+$TF -chdir=infra/bootstrap output -raw sa_tf_apply_email | gh variable set GCP_SA_TF_APPLY -R "$REPO"
+# プロジェクト ID と prod の state のバケット（#55。ci・deploy の Terraform・イメージの参照が使う）
+printf '%s' "$P" | gh variable set GCP_PROJECT_ID -R "$REPO"
+printf '%s' "$P-tfstate" | gh variable set TF_STATE_BUCKET -R "$REPO"
+gh variable list -R "$REPO" --json name -q '.[].name' | grep -cxE 'GCP_(SA_TF_PLAN|SA_TF_APPLY|PROJECT_ID)|TF_STATE_BUCKET'   # 4
 
 # Environment prod（master のみ、所有者が承認）
 jq -n --argjson id "$(gh api user --jq .id)" \
@@ -654,7 +678,7 @@ gh api -X POST $R/environments/prod/deployment-branch-policies -f name=master -f
 
 ```sh
 export GOOGLE_OAUTH_ACCESS_TOKEN=$(gcloud auth print-access-token)   # ADC が無いとき
-$TF -chdir=infra/prod init -input=false
+$TF -chdir=infra/prod init -input=false -backend-config="bucket=$P-tfstate"
 gcloud storage ls gs://$P-tfstate/prod/   # default.tfstate があること
 ```
 
@@ -668,8 +692,8 @@ gcloud monitoring policies list --project=$P --format=json \
             | {key: (if (.displayName | startswith("optionchan: M1 ")) then "m1" else "m2" end), value: .name}]
            | from_entries' \
   | tee >(jq -r 'keys | join(",")' >&2) \
-  | gh secret set TF_ALERT_POLICY_IDS -R terukusu/optionchan-gcp   # 標準エラーに m1,m2 と出ること
-gh secret list -R terukusu/optionchan-gcp | grep -c '^TF_ALERT_POLICY_IDS'   # 1
+  | gh secret set TF_ALERT_POLICY_IDS -R "$REPO"   # 標準エラーに m1,m2 と出ること
+gh secret list -R "$REPO" | grep -c '^TF_ALERT_POLICY_IDS'   # 1
 ```
 
 PR の要約が `google_monitoring_alert_policy.this["m1"]` / `["m2"]` は `import` だけ（update が付かない）であることを見てマージする。update が付いていたら JSON → HCL の写し方（`infra/prod/monitoring.tf`）を直す。apply 後、ポリシーの `name` が作業前の記録と同じで、「監視アラート」の「確認」が `ok: true` であることを見る。
@@ -677,7 +701,7 @@ PR の要約が `google_monitoring_alert_policy.this["m1"]` / `["m2"]` は `impo
 取り込みが済んだら secret を消し、差分 0 を確認する（`for_each` が空になり import は何もしない。`import` ブロックと変数は #11 以降の PR で消してよい）。
 
 ```sh
-gh secret delete TF_ALERT_POLICY_IDS -R terukusu/optionchan-gcp
+gh secret delete TF_ALERT_POLICY_IDS -R "$REPO"
 gh workflow run deploy.yml --ref master   # plan が差分なし、apply は skip
 ```
 
@@ -688,10 +712,12 @@ WIF・GCP・GitHub Actions の障害で CI が動かないときは、所有者�
 イメージは `TF_VAR_ingest_image` / `TF_VAR_viewer_image` で渡す（必須）。Artifact Registry に無ければ（`exists=false`）、apply の前にローカルでビルド・検査・push して digest を得る。
 
 ```sh
-img() {  # $1 = ingest / viewer。IMG_tag / IMG_image / IMG_exists を設定する
-  eval "$(.github/scripts/image.sh "$1" resolve | sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p')"
+img() {  # $1 = ingest / viewer。IMG_tag / IMG_image / IMG_exists を設定する。resolve が失敗したら 1 を返す
+  local out
+  out=$(.github/scripts/image.sh "$1" resolve) || { echo "image.sh $1 resolve が失敗した。ここで止める"; return 1; }
+  eval "$(sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p' <<<"$out")"
 }
-img ingest
+img ingest || exit 1
 if [ "$IMG_exists" = false ]; then   # ビルド・検査は apply job と同じ。HEAD をコミット済みの状態で行う（タグは HEAD から決まる）
   test -z "$(git status --porcelain -- apps/ingest config schema/tokyo .dockerignore)" || { echo "未コミットの変更がある。タグと中身がずれるのでビルドしない"; exit 1; }
   docker build -f apps/ingest/Dockerfile -t ingest:build .
@@ -701,7 +727,7 @@ if [ "$IMG_exists" = false ]; then   # ビルド・検査は apply job と同じ
   img ingest
 fi
 export TF_VAR_ingest_image=$IMG_image   # @sha256: であること
-img viewer
+img viewer || exit 1
 if [ "$IMG_exists" = false ]; then
   test -z "$(git status --porcelain -- apps/viewer)" || { echo "未コミットの変更がある。タグと中身がずれるのでビルドしない"; exit 1; }
   docker build -t viewer:build apps/viewer
@@ -712,7 +738,7 @@ if [ "$IMG_exists" = false ]; then
 fi
 export TF_VAR_viewer_image=$IMG_image   # @sha256: であること
 
-$TF -chdir=infra/prod init -input=false
+$TF -chdir=infra/prod init -input=false -backend-config="bucket=$P-tfstate"
 $TF -chdir=infra/prod plan -input=false -no-color -out=p.tfplan > <scratch>/p-plan.log   # 要約は上の jq で見る
 $TF -chdir=infra/prod apply -input=false p.tfplan
 rm -f infra/prod/p.tfplan
@@ -755,7 +781,7 @@ $TF -chdir=infra/prod plan -input=false -detailed-exitcode > /dev/null; echo $? 
 | Cloud Run ジョブ `reprocess`（asia-northeast1） | 手動実行だけ（定期起動しない）。同じイメージで `python -m optionchan_ingest.reprocess`、CPU 1・512Mi、タスク 1、タイムアウト 3600 秒、リトライ 0、`sa-ingest` | `infra/prod/ingest.tf` |
 | BigQuery `optionchan_tokyo` | asia-northeast1、PHYSICAL、タイムトラベル 168 時間。テーブル `spot_price` / `future_price` / `option_price` / `ingest_runs` | `schema/tokyo/`（`infra/prod/data.tf` が読む） |
 | テーブル関数（最新版の選択） | `optionchan_tokyo.latest_runs` / `spot_price_latest` / `future_price_latest` / `option_price_latest`（引数 `start_at`, `end_at`） | `sql/latest/`（`infra/prod/data.tf` が読む） |
-| GCS `optionchan-222710-raw` | 生 HTML（`raw/YYYY/MM/DD/YYYYMMDDTHHMM.json.gz`）。ソフト削除 7 日、期限なし | `infra/bootstrap/ingest.tf` |
+| GCS `<PROJECT_ID>-raw` | 生 HTML（`raw/YYYY/MM/DD/YYYYMMDDTHHMM.json.gz`）。ソフト削除 7 日、期限なし | `infra/bootstrap/ingest.tf` |
 | 権限 | `sa-ingest`: `optionchan_tokyo` の `dataEditor`、プロジェクトの `bigquery.jobUser`（回収・照合・再処理のクエリ、#34）、バケットの `objectCreator`・`objectViewer`（削除・上書きなし）。`sa-scheduler`: サービス `ingest` の `run.invoker` だけ | `infra/bootstrap/ingest.tf`、`infra/prod/iam.tf` |
 
 時間外・休場日はアプリが 204 を返して何もしない（JPX にもアクセスしない）。取引時間中は 1 限月のページを毎分、2 限月のページは更新時だけ取得する。毎時 0 分（JST）は、通常の処理の後に取りこぼしを回収し、07:00 は前日分を照合する（「回収と照合」）。
@@ -1017,7 +1043,7 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 
 ### 変数
 
-「コスト」の「共通の変数」の `P` と `CH`、「新しい取り込み（ingest）」の `L`。
+「コスト」の「共通の変数」の `P` と `CH`、「新しい取り込み（ingest）」の `L`、「Terraform」の「共通の変数」の `REPO`。
 
 ### 確認（apply の後）
 
@@ -1025,7 +1051,7 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 gcloud monitoring policies list --project=$P --format=json \
   | jq --arg ch "$CH" '[.[] | select(.displayName | startswith("optionchan: M1 ingest ") or startswith("optionchan: M2 ingest "))]
       | {count: length, ok: (length == 2 and all(.[]; .enabled == true and .notificationChannels == [$ch]))}'   # count 2、ok true
-gh workflow run deploy.yml --ref master -R terukusu/optionchan-gcp   # plan が「差分なし」
+gh workflow run deploy.yml --ref master -R "$REPO"   # plan が「差分なし」
 ```
 
 plan に `ingest_m2` の `alert_strategy`（`notification_prompts` 等）の update が出たら、API が返す形に `monitoring/ingest-m2-errors.json` を合わせる PR を出す。

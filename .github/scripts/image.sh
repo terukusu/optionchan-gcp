@@ -9,13 +9,24 @@
 #
 # <name> は ingest か viewer。タグはコミット済みの内容（HEAD）から求める。作業ツリーの未コミットの変更は反映されない。
 # resolve は gcloud を使う（CI では google-github-actions/auth の資格情報、ローカルでは所有者の資格情報）。
+#
+# 環境変数（resolve だけが使う。paths / tag は未設定でも動く）:
+#   GCP_PROJECT_ID  GCP プロジェクト ID（必須。CI は vars.GCP_PROJECT_ID）
+#   GCP_REGION      Artifact Registry のリージョン（既定 asia-northeast1）
 set -euo pipefail
-
-REPO="asia-northeast1-docker.pkg.dev/optionchan-222710/optionchan"
 
 usage() {
   echo "usage: $0 {ingest|viewer} {paths|tag|resolve}" >&2
   exit 2
+}
+
+# Artifact Registry のリポジトリ（<region>-docker.pkg.dev/<project>/optionchan）。resolve の中でだけ求める
+registry_repo() {
+  if [ -z "${GCP_PROJECT_ID:-}" ]; then
+    echo "環境変数 GCP_PROJECT_ID（GCP プロジェクト ID）が未設定" >&2
+    exit 2
+  fi
+  printf '%s-docker.pkg.dev/%s/optionchan\n' "${GCP_REGION:-asia-northeast1}" "$GCP_PROJECT_ID"
 }
 
 IMAGE_NAME="${1:-}"
@@ -72,13 +83,14 @@ cmd_tag() {
 }
 
 cmd_resolve() {
-  local tag ref out rc=0
+  local repo tag ref out rc=0
+  repo=$(registry_repo)
   tag=$(cmd_tag)
-  ref="${REPO}/${IMAGE_NAME}:${tag}"
+  ref="${repo}/${IMAGE_NAME}:${tag}"
   out=$(CLOUDSDK_CORE_DISABLE_PROMPTS=1 gcloud artifacts docker images describe "$ref" \
     --format='value(image_summary.digest)' 2>&1) || rc=$?
   if [ "$rc" -eq 0 ] && [[ "$out" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    printf 'tag=%s\nimage=%s\nexists=true\n' "$tag" "${REPO}/${IMAGE_NAME}@${out}"
+    printf 'tag=%s\nimage=%s\nexists=true\n' "$tag" "${repo}/${IMAGE_NAME}@${out}"
   elif [ "$rc" -ne 0 ] && grep -q 'Image not found' <<<"$out"; then
     printf 'tag=%s\nimage=%s\nexists=false\n' "$tag" "$ref"
   else

@@ -9,7 +9,7 @@ allowed-tools: [Read, Edit, Write, Bash, Glob, Grep]
 
 あなたは optionchan-gcp プロジェクトの実装エージェントです。GitHub Issue `$ARGUMENTS` を **簡易フロー** で実装します。
 
-**事前準備**: `CLAUDE.md`（特に「リポジトリに置くもの / 置かないもの」）、`README.md`、`memo.txt` を読み、構成を把握すること。プロジェクト前提（関数・ディレクトリ・ランタイムの対応表、`auth.txt`、ドリフト、python37 の注意、gcloud 構成 `teru`、gh の扱い）は `.claude/skills/implement-issue/SKILL.md` の「プロジェクト前提」節を Read して従う。
+**事前準備**: `CLAUDE.md`（特に「リポジトリに置くもの / 置かないもの」）、`README.md`、`memo.txt` を読み、構成を把握すること。プロジェクト前提（関数・ディレクトリ・ランタイムの対応表、`auth.txt`、ドリフト、python37 の注意、GCP プロジェクト `$P` と gcloud 構成、gh の扱い）は `.claude/skills/implement-issue/SKILL.md` の「プロジェクト前提」節を Read して従う。
 
 簡易フローはフルフロー（`/implement-issue`）の **縮退版** であり上位互換ではない。**レビューをゼロにするのではなく、独立 context の subagent レビューを main インラインのセルフレビューへ縮退させる** もの。適用条件を 1 つでも満たさないなら、この skill を使わずフルフローへ回す。
 
@@ -64,12 +64,12 @@ allowed-tools: [Read, Edit, Write, Bash, Glob, Grep]
 
 ### 1. 初期化
 
-- `gh auth status` と `git status` を確認（未認証・未コミット変更があれば中断）。`gh repo view terukusu/optionchan-gcp --json name` が通ること
+- `gh auth status` と `git status` を確認（未認証・未コミット変更があれば中断）。`REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` が通ること（取った `REPO` が自分のリポジトリか確認する。fork を clone して upstream があると元リポジトリになることがあるので、そのときは `gh repo set-default` で選び直すようユーザーに依頼する）（以降の gh は `--repo "$REPO"`）
 - `$ARGUMENTS` から Issue 番号を抽出し数値検証:
   ```bash
   printf '%s' "$ISSUE_NUM" | grep -qE '^[0-9]+$' || { echo "[error] ISSUE_NUM is not numeric: $ISSUE_NUM"; exit 1; }
   ```
-- `gh issue view "$ISSUE_NUM" --repo terukusu/optionchan-gcp --json title,body,labels,comments,state`（無い / closed なら中断）
+- `gh issue view "$ISSUE_NUM" --repo "$REPO" --json title,body,labels,comments,state`（無い / closed なら中断）
 - `git checkout master && git pull --ff-only` → `git checkout -b feature/issue-<ISSUE_NUM>`（既存ならユーザーに確認）
 
 ### 2. 適用条件の判定
@@ -123,7 +123,7 @@ Issue の AC を 1 件ずつ実行可能な確認に対応づけ、`pass` / `fai
 
 - `git status --porcelain` に `CLAUDE.md`「置かないもの」（`auth.txt` / `.claude/settings.local.json` / 一時ファイル等）と `.venv` が出ないことを確認（出たら中断）。PR 本文も同じ基準で見直す
 - 変更ファイルを個別に `git add`（**`git add -A` / `git add .` は使わない**）
-- commit（HEREDOC。1 行目 `<種別>: <要約> (#<ISSUE_NUM>)`）→ `git push -u origin feature/issue-<ISSUE_NUM>` → `gh pr create --repo terukusu/optionchan-gcp --base master --body-file <tmp>`。commit メッセージ・PR 本文末尾の署名行は Claude Code の通常ルールに従う
+- commit（HEREDOC。1 行目 `<種別>: <要約> (#<ISSUE_NUM>)`）→ `git push -u origin feature/issue-<ISSUE_NUM>` → `gh pr create --repo "$REPO" --base master --body-file <tmp>`。commit メッセージ・PR 本文末尾の署名行は Claude Code の通常ルールに従う
 - PR 本文には「成果物」節の項目を必ず入れる
 - PR URL を提示し **「PR を master にマージしてよいですか？」とユーザーに確認**。承認後 `gh pr merge --merge` → `git checkout master && git pull --ff-only`
 
