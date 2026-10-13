@@ -1,0 +1,30 @@
+{
+  "displayName": "optionchan: M2 ingest エラー（ERROR ログ）",
+  "documentation": {
+    "subject": "[optionchan] M2 新しい取り込みで ERROR ログ",
+    "mimeType": "text/markdown",
+    "content": "Cloud Run `ingest` またはジョブ `reprocess` が severity ERROR 以上のログを出しました（`parse_failed`・`write_failed`・`stale`・`raw_unrecovered` など。リクエストログの 5xx・メモリ超過などのシステムログを含む。`recovery_failed` は除く）。通知は 1 時間に 1 回までなので、対応時は直近の ERROR をすべて見てください。\n\n一次対応は runbook の「新しい取り込みの監視」節の「M2 を受けたとき」を参照してください。",
+    "links": [
+      {
+        "displayName": "runbook: 新しい取り込みの監視",
+        "url": "https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#%E6%96%B0%E3%81%97%E3%81%84%E5%8F%96%E3%82%8A%E8%BE%BC%E3%81%BF%E3%81%AE%E7%9B%A3%E8%A6%9635"
+      }
+    ]
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "ingest / reprocess の severity>=ERROR（recovery_failed を除く）",
+      "conditionMatchedLog": {
+        "filter": "((resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\") OR (resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"reprocess\")) AND severity>=ERROR AND NOT jsonPayload.event=\"recovery_failed\""
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationRateLimit": {"period": "3600s"},
+    "autoClose": "1800s",
+    "notificationPrompts": ["OPENED"]
+  },
+  "severity": "ERROR",
+  "enabled": true
+}

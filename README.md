@@ -34,7 +34,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * BigQuery の SQL。`sql/latest/` はスナップショットごとに最新の完了版を選ぶテーブル関数の本文（Terraform が読む。使い方は docs/runbook.md の「最新版の読み方」）
 
 * monitoring
-  * Cloud Monitoring のアラートポリシー定義（JSON）とバックテスト。作成・試験発報の手順は docs/runbook.md の「監視アラート」
+  * Cloud Monitoring のアラートポリシー定義（JSON）とバックテスト。作成・試験発報の手順は docs/runbook.md の「監視アラート」（旧系）と「新しい取り込みの監視（#35）」（新系）
 
 * tests
   * functions・監視アラート定義・GitHub Actions の workflow・Terraform・`sql/` の静的検査のテスト (pytest)。fixture は必要な部分だけを手書きした HTML 断片

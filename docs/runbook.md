@@ -197,7 +197,7 @@ gcloud alpha services quota delete \
 
 ## 監視アラート
 
-現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。#10 で Terraform（`infra/prod/monitoring.tf`）に取り込んだ。定義の正は `monitoring/*.json`（`tests/test_monitoring.py` で検査）で、Terraform は JSON を読んで組み立てる。変更は JSON を直して PR を出し、マージ後に deploy workflow が承認つきで反映する（「Terraform」節）。gcloud で直接変えると次の plan で差分になる。旧系の削除（#14）で消す。
+現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。#10 で Terraform（`infra/prod/monitoring.tf`）に取り込んだ。定義の正は `monitoring/*.json`（`tests/test_monitoring.py` で検査）で、Terraform は JSON を読んで組み立てる。変更は JSON を直して PR を出し、マージ後に deploy workflow が承認つきで反映する（「Terraform」節）。gcloud で直接変えると次の plan で差分になる。旧系の削除（#14）で消す。新しい取り込みのアラート 2 本（#35）は「新しい取り込みの監視（#35）」節にまとめた（同じ `monitoring.tf` が作る）。
 
 | 表示名 | 条件 | 拾うもの | 定義 |
 |---|---|---|---|
@@ -206,7 +206,7 @@ gcloud alpha services quota delete \
 
 M2 を ERROR ログの一致にしないのは、既知のエラー（毎日 04:00 / 04:20 JST の `time data ''`、接続エラー、409 Conflict）が毎日 1〜6 件出て毎日鳴るのと、timeout・connection error では ERROR ログが出ないため。単発の失敗は次の分の実行で取り戻せるので、続いたときだけ通知する。
 
-料金: 2027-09-01 以降（公式の価格ページで 2026-10-12 に確認。"no sooner than"）、メトリクス参照 3 件（M1 1、M2 2）× $0.35 + ポイント料金（約 17 万点 / 月 → 約 $0.09）で月 約 $1.14（約 170 円、税抜き）。それまでに #14 で削除する見込み。
+料金: 2027-09-01 以降（公式の価格ページで 2026-10-12 に確認。"no sooner than"）、メトリクス参照 3 件（M1 1、M2 2）× $0.35 + ポイント料金（約 17 万点 / 月 → 約 $0.09）で月 約 $1.14（約 170 円、税抜き）。それまでに #14 で削除する見込み。新系の 2 本を足した並行稼働中の合計は「新しい取り込みの監視（#35）」の「料金」。
 
 ### 変数
 
@@ -230,13 +230,13 @@ done
 
 ### 確認
 
-`ok` が `true` であること（`describe` の生の出力は通知チャネル ID を含むので貼らない）。
+`ok` が `true` であること（`describe` の生の出力は通知チャネル ID を含むので貼らない）。#35 の後は新系の 2 本を含めて 4 本（`ingest_paused = true` の間は新系 M1 が `enabled: false` なので `ok` は `false` になる）。
 
 ```sh
 gcloud monitoring policies list --project=$P --format=json \
   | jq --arg ch "$CH" '[.[] | select(.displayName | startswith("optionchan: M"))]
-      | {count: length, ok: (length == 2 and all(.[]; .enabled == true and .notificationChannels == [$ch]))}'
-gcloud logging metrics list --project=$P --format='value(name)' | grep -c .   # 0（ログ指標は使わない）
+      | {count: length, ok: (length == 4 and all(.[]; .enabled == true and .notificationChannels == [$ch]))}'
+gcloud logging metrics list --project=$P --format='value(name)' | grep -c .   # 0（ログ指標は使わない。新系の M2 はログ一致の条件で、ログ指標ではない）
 ```
 
 ### バックテスト
@@ -316,7 +316,8 @@ gcloud logging read 'resource.type="cloud_function" AND resource.labels.function
 数時間の作業なら gcloud で止めてよい。止めている間は deploy workflow の plan に M1 の `enabled` の update が出るので、その間に apply を承認しない（承認すると M1 が有効に戻る）。作業後は必ず戻し、`gh workflow run deploy.yml --ref master` の plan が差分 0 になることを見る。何日も止めるときは `monitoring/m1-liveness.json` の `enabled` を `false` にする PR で行う（`tests/test_monitoring.py` の `enabled` の検査も合わせて直し、戻す PR で元に戻す）。
 
 ```sh
-ID=$(gcloud monitoring policies list --project=$P --filter='displayName:"optionchan: M1"' --format='value(name)')
+# 表示名の完全一致で選ぶ（部分一致の "optionchan: M1" は新系の M1 にも当たる）
+ID=$(gcloud monitoring policies list --project=$P --filter='displayName="optionchan: M1 生存（download_jpx の起動が 15 分無い）"' --format='value(name)')
 echo "$ID" | grep -c .   # 1 であること
 gcloud monitoring policies update "$ID" --no-enabled --project=$P
 # 戻すとき
@@ -327,7 +328,7 @@ gcloud monitoring policies update "$ID" --enabled --project=$P
 
 Terraform で管理しているので、`infra/prod/monitoring.tf` の `alert_policies` から消す（2 本とも消すなら `monitoring.tf` ごと消す）PR を出し、承認後の apply で削除する（`deletion_policy` は既定の `DELETE`）。gcloud で直接消すと、次の plan で create になる。
 
-Terraform が使えないときは「試験発報」の削除と同じループで、表示名を `optionchan: M1 生存（download_jpx の起動が 15 分無い）` と `optionchan: M2 エラー（取り込み関数の失敗）` にして消し、`terraform state rm 'google_monitoring_alert_policy.this["m1"]'`（m2 も）で state から外す。別サーバー用の既存ポリシーは表示名が `optionchan: ` で始まらないので対象にならない。
+Terraform が使えないときは「試験発報」の削除と同じループで、表示名を `optionchan: M1 生存（download_jpx の起動が 15 分無い）` と `optionchan: M2 エラー（取り込み関数の失敗）` にして消し、`terraform state rm 'google_monitoring_alert_policy.this["m1"]'`（m2 も）で state から外す。別サーバー用の既存ポリシーは表示名が `optionchan: ` で始まらないので対象にならない。新系の 2 本（`ingest_m1` / `ingest_m2`）は残す。
 
 ### 検知できないもの
 
@@ -335,7 +336,7 @@ Terraform が使えないときは「試験発報」の削除と同じループ�
 - load job の非同期の失敗（`load_jpx_into_bq` は投入だけして `ok` で終わる）
 - 行数の欠け・`price_time` の異常などのデータ品質
 
-新系（#11）の鮮度判定と日次の品質クエリで解消する。それまでは閲覧時に気づいたら Issue にする。
+新系（#11）の鮮度判定（新系の M2 で通知、#35）と日次の品質クエリ（#40）で解消する。それまでは閲覧時に気づいたら Issue にする。
 
 ## サービスアカウント鍵
 
@@ -659,7 +660,7 @@ gcloud storage ls gs://$P-tfstate/prod/   # default.tfstate があること
 
 ```sh
 gcloud monitoring policies list --project=$P --format=json \
-  | jq -c '[.[] | select(.displayName | startswith("optionchan: M1 ") or startswith("optionchan: M2 "))
+  | jq -c '[.[] | select((.displayName | startswith("optionchan: M1 ") or startswith("optionchan: M2 ")) and (.displayName | contains(" ingest ") | not))
             | {key: (if (.displayName | startswith("optionchan: M1 ")) then "m1" else "m2" end), value: .name}]
            | from_entries' \
   | tee >(jq -r 'keys | join(",")' >&2) \
@@ -935,7 +936,7 @@ gcloud logging read "resource.type=\"cloud_run_job\" AND resource.labels.job_nam
   | jq -c '.[].jsonPayload | {dry_run, listed, skipped_completed, targets, over_limit, processed, ok, parse_failed, write_failed, remaining}'
 ```
 
-`--args` は `,` 区切り（値に `,` を含めない）。`+09:00` はそのまま渡せる。ジョブのログは `resource.type="cloud_run_job"`（サービスとは別。#35 の M2 の条件に入れる）。
+`--args` は `,` 区切り（値に `,` を含めない）。`+09:00` はそのまま渡せる。ジョブのログは `resource.type="cloud_run_job"`（サービスとは別。新系の M2（#35）の条件に入っているので、ジョブの ERROR（`reprocess_failed` 等）も通知される。`--dry-run` でも失敗すれば通知される）。
 
 ### 最新版の読み方（#34）
 
@@ -962,11 +963,12 @@ SELECT
 
 ```sh
 # 緊急停止（所有者）。次の apply で再開されないよう、すぐ ingest_paused = true の PR を出す
+# 新系の M1 が 15 分ほどで鳴るので、先に「新しい取り込みの監視（#35）」の「一時停止・再開」で無効にしておく
 gcloud scheduler jobs pause ingest --location $L --project $P   # この PR がマージされるまで、他の PR の deploy で Scheduler の再開（paused の差分）が出たら apply を承認しない
 gcloud scheduler jobs describe ingest --location $L --project $P --format='value(state)'   # PAUSED
 ```
 
-通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系の値で補うかは #12 で扱う）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
+通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。`ingest_paused = true` の間は新系の M1 も Terraform が無効にする（`monitoring.tf` の `paused_with_ingest`。再開の PR で有効に戻る）。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系の値で補うかは #12 で扱う）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
 
 ### 切り戻し
 
@@ -979,6 +981,142 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 データは消さない（テーブルは `deletion_protection`、データセット・テーブル・バケットは `prevent_destroy` と `deletion_policy = "PREVENT"`）。並行稼働中に入った行は追記のみで、最新版の選択（テーブル関数、「最新版の読み方」）で選別する。
 
 #34（回収・再処理・テーブル関数）だけを戻すときは、そのコミットを revert する PR（plan はサービスのイメージの update 1、ジョブ・テーブル関数の delete 5）。回収・再処理で書かれた行は消さない（同じスナップショットの 1 件だけが最新版として選ばれるので害は無い）。bootstrap の `bigquery.jobUser` は使われなければ無害なので残してよい（外すなら bootstrap の revert と所有者の apply）。
+
+## 新しい取り込みの監視（#35）
+
+新しい取り込み（「新しい取り込み（ingest）」節）の停止・失敗を検知するアラートポリシー 2 本。旧系の 2 本（「監視アラート」節）と同じく、定義の正は `monitoring/*.json`（`tests/test_monitoring.py` で検査）、作成・変更は `infra/prod/monitoring.tf`（キー `ingest_m1` / `ingest_m2`）で、PR のマージ後に deploy workflow の承認つき apply で反映する。通知先は同じメール通知チャネル。旧系の 2 本は #14 まで並行して残す。
+
+| 表示名 | 条件 | 拾うもの | 定義 |
+|---|---|---|---|
+| `optionchan: M1 ingest 生存（2xx 応答が 15 分無い）` | Cloud Run `ingest` の `run.googleapis.com/request_count` のうち `response_code_class = "2xx"` の件数（リビジョン合算）が直近 15 分で 1 未満。データが無いときも発火（`EVALUATION_MISSING_DATA_ACTIVE`）。24 時間有効（時間外も Scheduler が毎分呼び 204 を返す）。`ingest_paused = true` の間は無効 | Scheduler `ingest`・サービスの停止、invoker の権限切れ（403）、5xx の連続 | `monitoring/ingest-m1-liveness.json` |
+| `optionchan: M2 ingest エラー（ERROR ログ）` | サービス `ingest`（`cloud_run_revision`）とジョブ `reprocess`（`cloud_run_job`）の `severity>=ERROR` のログ一致。`jsonPayload.event="recovery_failed"` だけ除く。通知は 1 時間に 1 回まで、インシデントは 30 分で自動で閉じる | アプリの ERROR（下の表）、リクエストログの 5xx、メモリ超過などのシステムログ | `monitoring/ingest-m2-errors.json` |
+
+- M1 を欠落条件（旧系の M1 の方式）にしないのは、`request_count` が最後のリクエストの後も値 0 の点を出し続けるため（2026-10-13 の実データで、403 の系列が 2 件の後 40 分以上 0 の点を出した）。欠落条件はそれを「データあり」とみなすので、2xx が無くなっても鳴らないことがある。しきい値（15 分で 1 未満）なら 0 の点でも鳴る。停止から通知まで 15〜20 分
+- M2 から `recovery_failed`（毎時の回収の一覧・クエリの失敗）を除くのは、一時的な失敗で毎時単発に出て次の 0 分で回復するため。回収だけが続けて失敗しても、取り込み自体が成功していれば取りこぼしが残らないので通知は来ない。取りこぼしが実際に残っているか、照合のクエリも失敗したときに、07:00 の照合が `raw_unrecovered` か `reconcile_failed`（どちらも ERROR）を出して通知される
+- gunicorn の起動・終了の行は stderr のテキストで severity が付かない（DEFAULT）ので M2 に当たらない（2026-10-13 のデプロイ 3 回で確認）。デプロイ直後の IAM 伝播待ちの 403 はリクエストログが WARNING、Scheduler 側のログ（`cloud_scheduler_job`）が ERROR だが、M2 の対象外（続けば M1 が鳴る）
+- 定期クエリ（#40）の失敗は #40 で M2 の条件に足す
+- 検知できないもの: `jpx_unavailable`（WARNING）が取引時間中に続く場合。JPX のページの形式が変わって更新時刻・行の要素が無くなっても「空ページ」と区別できず、ERROR が出ないまま保存されない（生 HTML も残らないので、照合・品質チェックにも出ない）。アプリ側の変更で別 Issue にする
+
+料金（2027-09-01 以降。公式の価格ページで 2026-10-13 に確認）: メトリクス参照 1 件 $0.35 / 月。ログ一致の条件も 1 件と数え、点の料金は無い。M1 の点の料金は系列 1 本分（月 $0.1 未満の見込み）。並行稼働中は旧系 3 件 + 新系 2 件の 5 件で月 約 $1.9（約 290 円、税抜き。旧系の点の料金を含む）、#14 で旧系を消すと 2 件で月 約 $0.75。アラートの本数は一時的に 4 本（target.md 3.4 の「1〜2 本」は #14 の後）。
+
+### 変数
+
+「コスト」の「共通の変数」の `P` と `CH`、「新しい取り込み（ingest）」の `L`。
+
+### 確認（apply の後）
+
+```sh
+gcloud monitoring policies list --project=$P --format=json \
+  | jq --arg ch "$CH" '[.[] | select(.displayName | startswith("optionchan: M1 ingest ") or startswith("optionchan: M2 ingest "))]
+      | {count: length, ok: (length == 2 and all(.[]; .enabled == true and .notificationChannels == [$ch]))}'   # count 2、ok true
+gh workflow run deploy.yml --ref master -R terukusu/optionchan-gcp   # plan が「差分なし」
+```
+
+plan に `ingest_m2` の `alert_strategy`（`notification_prompts` 等）の update が出たら、API が返す形に `monitoring/ingest-m2-errors.json` を合わせる PR を出す。
+
+### 誤報の評価
+
+M2 の条件を過去のログに当てて件数を見る（読み取りのみ。ログの保持は 30 日）。0 件でなければ event 別に分類し、既知の事象なら除外を足す PR（除外は最小限にする。テストも直す）を出す。
+
+```sh
+F=$(jq -r '.conditions[0].conditionMatchedLog.filter' monitoring/ingest-m2-errors.json)
+gcloud logging read "$F AND timestamp>=\"<開始の RFC3339>\"" --project $P --limit=1000 \
+  --format='value(resource.type,logName.basename(),severity,jsonPayload.event)' | sort | uniq -c
+```
+
+M1 はバックテスト（「監視アラート」の「バックテスト」と同じ `python3 -I monitoring/backtest.py`）の `M1 ingest` の行で、2xx のある分どうしの最大の空きを見る（15 分を超えると発火）。
+
+2026-10-13 の評価（新系のデプロイ 08:51 JST から 10:10 JST まで）: M2 の条件に当たるログ 0 件（ERROR 0 件。stdout の `ingested`、リクエストログの 200 と 403（WARNING）2 件、gunicorn の DEFAULT、監査ログ）、M1 の最大の空き 1 分。夜間・04 時台の空ページ・0 分の回収・07:00 の照合を含む 1 取引日分は、apply の翌営業日に同じコマンドで見直し、結果を #35 にコメントする（件数と event 名だけ）。
+
+### 試験発報
+
+本番の取り込みは止めない。同じ条件の一部だけを変えて「今発火する」試験用ポリシーを作り、メールが届いたら消す。いつでもよい（時間外も 204 のリクエストログが毎分ある）。
+
+```sh
+T=$(mktemp -d)
+# M2: severity>=ERROR を severity>=INFO にする（毎分のリクエストログで当たる）
+jq '.displayName = "optionchan: 試験 M2 ingest" | .documentation.subject = "[optionchan] 試験 M2 ingest（削除予定）"
+    | .alertStrategy.notificationRateLimit.period = "300s"
+    | .conditions[0].conditionMatchedLog.filter |= sub("severity>=ERROR"; "severity>=INFO")' \
+  monitoring/ingest-m2-errors.json > $T/t2.json
+# M1: 2xx を 5xx にする（5xx の系列が無い = データ無しで発火）
+jq '.displayName = "optionchan: 試験 M1 ingest" | .documentation.subject = "[optionchan] 試験 M1 ingest（削除予定）"
+    | .conditions[0].conditionThreshold.filter |= sub("\"2xx\""; "\"5xx\"")' \
+  monitoring/ingest-m1-liveness.json > $T/t1.json
+jq -r '.conditions[0].conditionMatchedLog.filter' $T/t2.json | grep -c 'severity>=INFO'   # 1
+jq -r '.conditions[0].conditionThreshold.filter' $T/t1.json | grep -c '"5xx"'   # 1
+gcloud monitoring policies create --project=$P --policy-from-file=$T/t2.json --notification-channels="$CH" --format='value(displayName)'
+gcloud monitoring policies create --project=$P --policy-from-file=$T/t1.json --notification-channels="$CH" --format='value(displayName)'
+rm -rf $T
+```
+
+- 試験 M2 は数分で、試験 M1 は 5〜10 分でメールが届く見込み。30 分待っても届かなければ、ポリシーのインシデント（コンソールの Alerting）と通知チャネルを見る
+- 受信した日時（分まで）を #35 にコメントする（メール本文は貼らない）
+- 削除（表示名が完全一致で 1 件のときだけ消す）:
+
+  ```sh
+  for n in "optionchan: 試験 M1 ingest" "optionchan: 試験 M2 ingest"; do
+    ids=$(gcloud monitoring policies list --project=$P --filter="displayName=\"$n\"" --format='value(name)')
+    [ "$(echo "$ids" | grep -c .)" = 1 ] && gcloud monitoring policies delete "$ids" --project=$P --quiet
+  done
+  gcloud monitoring policies list --project=$P --filter='displayName:"optionchan: 試験"' --format='value(displayName)' | grep -c .   # 0
+  ```
+
+### M1 を受けたとき
+
+新しい取り込みの 2xx 応答が 15 分無い。上から順に見る（出力は Issue に貼らず要約する）。
+
+1. Scheduler: `gcloud scheduler jobs describe ingest --location $L --project $P --format='value(state)'` が `ENABLED` か。`PAUSED` なら意図した停止か確かめる（意図した停止なら「一時停止・再開」で M1 を止める。意図しないなら `gcloud scheduler jobs resume ingest --location $L --project $P`。本番の変更なので所有者が実行する）
+2. Scheduler の実行結果: `gcloud logging read 'resource.type="cloud_scheduler_job" AND resource.labels.job_id="ingest"' --project $P --freshness=30m --limit=5 --format='value(timestamp,severity,jsonPayload.status)'`。`PERMISSION_DENIED` なら invoker（`infra/prod/iam.tf`）、`UNAVAILABLE` / `DEADLINE_EXCEEDED` ならサービス側
+3. サービスの応答: `gcloud logging read "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\" AND log_name=\"projects/$P/logs/run.googleapis.com%2Frequests\"" --project $P --freshness=30m --limit=10 --format='value(timestamp,httpRequest.status)'`。403 は権限、5xx は M2 と同じ調べ方（下）、リクエストが無ければ Scheduler 側
+4. サービスの状態: `gcloud run services describe ingest --region $L --project $P --format='value(status.conditions[0].status,status.latestReadyRevisionName)'`（`True` か）。直前のデプロイで壊れたなら「新しい取り込み（ingest）」の「切り戻し」の R2
+5. Google Cloud のステータスページ（Cloud Run / Cloud Scheduler、asia-northeast1）
+
+止まっていた間は生 HTML も保存されないので取り戻せない（JPX のページは今の値だけ）。欠けた時間帯を #11 に記録する。再開後、止まっていた前後の取りこぼしは「再処理ジョブ」の `--only-missing --dry-run` で確かめる。
+
+### M2 を受けたとき
+
+通知は 1 時間に 1 回までなので、通知の後に出た ERROR も含めて直近の ERROR をすべて見る:
+
+```sh
+F=$(jq -r '.conditions[0].conditionMatchedLog.filter' monitoring/ingest-m2-errors.json)
+gcloud logging read "$F" --project $P --freshness=2h --limit=200 \
+  --format='value(timestamp,resource.type,severity,jsonPayload.event,jsonPayload.stage,httpRequest.status)' | head -40
+```
+
+| event / ログ | 意味 | 対応 |
+|---|---|---|
+| `parse_failed` | ページの構造が想定と違う（生 HTML は保存済み） | 1 回だけなら次の分を見る。続くならパーサーを直す PR（`PARSER_VERSION` を上げる）→ デプロイ後に「再処理ジョブ」で期間を作り直す |
+| `stale` | 取引時間中にページの更新時刻が日中 30 分 / 夜間 40 分以上止まっている（毎分出る） | JPX 側の遅延。旧系の取り込み・JPX のページを見て、続くなら #11 に記録。新系の不具合ではないので何もしなくてよいことが多い |
+| `write_failed` / `storage_failed` | BigQuery / GCS への書き込み・読み出しの失敗 | 生 HTML があれば毎時 0 分の回収（「回収と照合」）が埋める。続くなら BigQuery / GCS のステータス・権限を見る |
+| `deadline_exceeded`（`stage`） | 45 秒の期限切れ | 単発なら回収が埋める。続くなら `stage` の外部呼び出し（JPX・GCS・BigQuery）の遅延を見る |
+| `recovery_item_failed` | 回収の 1 件の想定外の例外 | その件は次の 0 分に再試行される。続くなら `object` の生 HTML とコードを見る |
+| `raw_unrecovered` | 07:00 の照合で未回収あり | 「回収と照合」の「`raw_unrecovered` を受けたとき」 |
+| `reconcile_failed` | 照合の一覧・クエリの失敗 | 回収も失敗している（`recovery_failed` は通知しない）可能性が高い。`recovery_failed` のログの `stage` を見て、権限（`bigquery.jobUser`）・BigQuery のステータスを確認する。直ったら翌朝の照合か「再処理ジョブ」の `--only-missing --dry-run` で確かめる |
+| `calendar_outdated` | 取引カレンダーの期限切れ（09:00 に 1 回） | 「取引カレンダーの更新」 |
+| `unexpected` | 想定外の例外（500） | ログの `detail` を見て Issue にする |
+| `reprocess_failed` / `reprocess_item_failed`（`cloud_run_job`） | 再処理ジョブの失敗 | 「再処理ジョブ」の終了コードの説明 |
+| Cloud Run の監査ログの ERROR（`cloudaudit.googleapis.com`） | Terraform のデプロイ失敗など、サービス・ジョブの更新の失敗 | deploy workflow の apply のログを見る |
+| リクエストログの 5xx（`jsonPayload.event` 無し） | アプリの 500（上の event と同時に出る）、または 503 / 504（インスタンスの起動失敗・タイムアウト） | 同時刻のアプリのログが無ければ、`log_name` が `run.googleapis.com%2Fvarlog%2Fsystem` のログ（メモリ超過など）を見る |
+
+単発で収まっていれば、インシデントは 30 分で自動で閉じる。既知の事象で毎日鳴るようになったら、アプリの severity を下げるか条件に除外を足す PR を出す（「誤報の評価」）。
+
+### 一時停止・再開
+
+- `ingest_paused = true` の PR（「新しい取り込み（ingest）」の「停止・再開」）では、M1 も同じ apply で無効になり、戻す PR で有効に戻る。戻す apply では Scheduler の再開と M1 の有効化が同時に入るので、最初の 2xx が指標に届くまでの数分に M1 が 1 回鳴ることがある（再開直後の 1 回は無視してよい）。M2 はそのまま（止めている間は ERROR も出ない）
+- gcloud での緊急停止（Scheduler の `pause`）のときは Terraform の連動が効かないので、M1 を手で無効にする。止めている間の deploy workflow の plan には Scheduler の `paused` と M1 の `enabled` の update が出る（「新しい取り込み（ingest）」の「停止・再開」と同じく、`ingest_paused = true` の PR がマージされるまで apply を承認しない）
+
+```sh
+ID=$(gcloud monitoring policies list --project=$P --filter='displayName="optionchan: M1 ingest 生存（2xx 応答が 15 分無い）"' --format='value(name)')
+echo "$ID" | grep -c .   # 1 であること
+gcloud monitoring policies update "$ID" --no-enabled --project=$P
+# 戻すとき（Scheduler を再開し、数分待って 2xx が出始めてから。すぐ有効にするとデータ無しで 1 回鳴ることがある）
+gcloud monitoring policies update "$ID" --enabled --project=$P
+```
+
+### 削除・切り戻し
+
+`infra/prod/monitoring.tf` の `alert_policies` から `ingest_m1` / `ingest_m2` を消す PR（plan は delete 2）。急ぐときは上の `--no-enabled` で無効にする（次の plan で update が出るので、続けて PR を出す）。新しい取り込みの R3（計算資源を消す）を行うときは、同じ PR で消す（消さないと M1 が鳴り続ける）。
 
 ## 取引カレンダーの更新
 

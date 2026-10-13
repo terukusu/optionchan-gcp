@@ -1,4 +1,8 @@
-"""アラートポリシー (m1-liveness.json / m2-errors.json) の条件を過去の execution_count に当てて、発火回数を数える。
+"""アラートポリシーの条件を過去の指標に当てて、発火回数を数える。
+
+- 旧系 (m1-liveness.json / m2-errors.json): Cloud Functions の execution_count
+- 新系の M1 (ingest-m1-liveness.json、#35): Cloud Run ingest の request_count の 2xx。データは新系のデプロイ (2026-10-13) 以降
+- 新系の M2 (ingest-m2-errors.json) はログ一致なので、ここでは当てない (runbook のコマンドで件数を見る)
 
 読み取りのみ (Monitoring API の timeSeries.list)。標準ライブラリだけで動く。リポジトリ直下で実行する:
 
@@ -22,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 API = 'https://monitoring.googleapis.com/v3/projects/{project}/timeSeries'
 EXECUTION_COUNT = 'cloudfunctions.googleapis.com/function/execution_count'
+REQUEST_COUNT = 'run.googleapis.com/request_count'
 MAX_DAYS = 42  # Monitoring の保持期間 (6 週間)
 
 
@@ -85,6 +90,18 @@ def thresholds(m1, m2):
     return result
 
 
+def ingest_threshold(policy):
+    """新系 M1 (request_count のしきい値) から、サービス名・応答クラス・窓 (分) を取り出す。"""
+    cond = policy['conditions'][0]['conditionThreshold']
+    service = re.search(r'resource\.labels\.service_name = "([^"]+)"', cond['filter']).group(1)
+    code_class = re.search(r'metric\.labels\.response_code_class = "([^"]+)"', cond['filter']).group(1)
+    return {
+        'service': service,
+        'response_code_class': code_class,
+        'minutes': _seconds_to_minutes(cond['aggregations'][0]['alignmentPeriod']),
+    }
+
+
 # ---- API ----
 
 class ApiError(Exception):
@@ -103,20 +120,10 @@ def _rfc3339(dt):
     return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
 
 
-def fetch_counts(project, functions, start, end):
-    """(function_name, status) -> {分 (UTC, naive datetime): 件数}。0 の点は捨てる。"""
+def _list_points(project, params):
+    """timeSeries.list を全ページ読み、(系列, 点) を返す。"""
     token = access_token()
-    names = ', '.join(f'"{f}"' for f in functions)
-    params = {
-        'filter': f'resource.type = "cloud_function" AND metric.type = "{EXECUTION_COUNT}"'
-                  f' AND resource.labels.function_name = one_of({names})',
-        'interval.startTime': _rfc3339(start),
-        'interval.endTime': _rfc3339(end),
-        'aggregation.alignmentPeriod': '60s',
-        'aggregation.perSeriesAligner': 'ALIGN_DELTA',
-        'pageSize': '100000',
-    }
-    counts = defaultdict(dict)
+    params = dict(params, pageSize='100000')
     while True:
         url = API.format(project=project) + '?' + urllib.parse.urlencode(params)
         req = urllib.request.Request(url, headers={'Authorization': f'Bearer {token}'})
@@ -132,18 +139,57 @@ def fetch_counts(project, functions, start, end):
         except urllib.error.URLError as e:
             raise ApiError(f'request failed: {e.reason}') from None
         for series in body.get('timeSeries', []):
-            key = (series['resource']['labels']['function_name'], series['metric']['labels'].get('status', ''))
             for point in series.get('points', []):
-                n = int(point['value'].get('int64Value', 0))
-                if n == 0:
-                    continue
-                # 点は [endTime - 60s, endTime) の件数。開始の分で数える
-                minute = datetime.strptime(point['interval']['endTime'][:16], '%Y-%m-%dT%H:%M') - timedelta(minutes=1)
-                counts[key][minute] = counts[key].get(minute, 0) + n
+                yield series, point
         token_next = body.get('nextPageToken')
         if not token_next:
-            return counts
+            return
         params['pageToken'] = token_next
+
+
+def _point_minute(point):
+    # 点は [endTime - 60s, endTime) の件数。開始の分で数える
+    return datetime.strptime(point['interval']['endTime'][:16], '%Y-%m-%dT%H:%M') - timedelta(minutes=1)
+
+
+def _interval(start, end):
+    return {
+        'interval.startTime': _rfc3339(start),
+        'interval.endTime': _rfc3339(end),
+        'aggregation.alignmentPeriod': '60s',
+        'aggregation.perSeriesAligner': 'ALIGN_DELTA',
+    }
+
+
+def fetch_counts(project, functions, start, end):
+    """(function_name, status) -> {分 (UTC, naive datetime): 件数}。0 の点は捨てる。"""
+    names = ', '.join(f'"{f}"' for f in functions)
+    params = {
+        'filter': f'resource.type = "cloud_function" AND metric.type = "{EXECUTION_COUNT}"'
+                  f' AND resource.labels.function_name = one_of({names})',
+        **_interval(start, end),
+    }
+    counts = defaultdict(dict)
+    for series, point in _list_points(project, params):
+        key = (series['resource']['labels']['function_name'], series['metric']['labels'].get('status', ''))
+        n = int(point['value'].get('int64Value', 0))
+        if n == 0:
+            continue
+        minute = _point_minute(point)
+        counts[key][minute] = counts[key].get(minute, 0) + n
+    return counts
+
+
+def fetch_request_minutes(project, service, code_class, start, end):
+    """service の応答クラス code_class の件数がある分 (UTC, naive datetime) の集合。リビジョンは合算。"""
+    params = {
+        'filter': f'resource.type = "cloud_run_revision" AND metric.type = "{REQUEST_COUNT}"'
+                  f' AND resource.labels.service_name = "{service}"'
+                  f' AND metric.labels.response_code_class = "{code_class}"',
+        **_interval(start, end),
+    }
+    return {_point_minute(point) for _, point in _list_points(project, params)
+            if int(point['value'].get('int64Value', 0)) > 0}
 
 
 def merge(counts, function, include):
@@ -173,13 +219,17 @@ def main(argv=None):
         m1 = json.load(f)
     with open(os.path.join(HERE, 'm2-errors.json'), encoding='utf-8') as f:
         m2 = json.load(f)
+    with open(os.path.join(HERE, 'ingest-m1-liveness.json'), encoding='utf-8') as f:
+        ingest_m1 = json.load(f)
     t = thresholds(m1, m2)
+    ti = ingest_threshold(ingest_m1)
     functions = sorted({t['m1']['function']} | {f for c in t['m2'] for f in c['functions']})
 
     end = datetime.now(timezone.utc).replace(second=0, microsecond=0)
     start = end - timedelta(days=days)
     try:
         counts = fetch_counts(args.project, functions, start, end)
+        ingest_minutes = fetch_request_minutes(args.project, ti['service'], ti['response_code_class'], start, end)
     except ApiError as e:
         print(f'error: {e}', file=sys.stderr)
         return 2
@@ -206,6 +256,18 @@ def main(argv=None):
                   f'(fires if > {c["threshold"]}) -> {">= 1" if n else "0"} fires')
             if n:
                 print(f'  first window: {_fmt(first_window_over(failures, c["minutes"], c["threshold"]))}')
+
+    # 新系 M1: 15 分の窓で 2xx が 0 件 = 2xx のある分どうしの間隔が 15 分を超える (間に 15 分の空白)
+    s, minutes = ti['service'], ti['minutes']
+    runs = sorted(ingest_minutes)
+    gap = max_gap_minutes(runs)
+    long_gaps = [a for a, b in zip(runs, runs[1:]) if (b - a) // timedelta(minutes=1) > minutes]
+    fires += len(long_gaps)
+    since = f', since {_fmt(runs[0])}' if runs else ', no data'
+    print(f'M1 ingest (service {s}, {ti["response_code_class"]}): max gap {gap} min (fires if > {minutes}{since}) '
+          f'-> {len(long_gaps)} fires')
+    if long_gaps:
+        print(f'  first gap after: {_fmt(long_gaps[0])}')
     return 1 if fires else 0
 
 

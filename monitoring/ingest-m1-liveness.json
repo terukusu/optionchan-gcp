@@ -1,0 +1,38 @@
+{
+  "displayName": "optionchan: M1 ingest 生存（2xx 応答が 15 分無い）",
+  "documentation": {
+    "subject": "[optionchan] M1 新しい取り込みが止まっている（ingest の 2xx 応答が 15 分無い）",
+    "mimeType": "text/markdown",
+    "content": "Cloud Run `ingest`（asia-northeast1）の 2xx 応答（取引時間中の 200、時間外の 204）が 15 分間ありません。Cloud Scheduler `ingest` の停止、サービスの停止、invoker の権限切れ（403）、5xx の連続のどれかです。\n\n一次対応は runbook の「新しい取り込みの監視」節の「M1 を受けたとき」を参照してください。",
+    "links": [
+      {
+        "displayName": "runbook: 新しい取り込みの監視",
+        "url": "https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#%E6%96%B0%E3%81%97%E3%81%84%E5%8F%96%E3%82%8A%E8%BE%BC%E3%81%BF%E3%81%AE%E7%9B%A3%E8%A6%9635"
+      }
+    ]
+  },
+  "combiner": "OR",
+  "conditions": [
+    {
+      "displayName": "ingest の 2xx 応答数（リビジョン合算）が 15 分間で 1 未満、またはデータ無し",
+      "conditionThreshold": {
+        "filter": "resource.type = \"cloud_run_revision\" AND resource.labels.service_name = \"ingest\" AND metric.type = \"run.googleapis.com/request_count\" AND metric.labels.response_code_class = \"2xx\"",
+        "aggregations": [
+          {
+            "alignmentPeriod": "900s",
+            "perSeriesAligner": "ALIGN_SUM",
+            "crossSeriesReducer": "REDUCE_SUM",
+            "groupByFields": ["resource.label.service_name"]
+          }
+        ],
+        "comparison": "COMPARISON_LT",
+        "thresholdValue": 1,
+        "duration": "0s",
+        "evaluationMissingData": "EVALUATION_MISSING_DATA_ACTIVE",
+        "trigger": {"count": 1}
+      }
+    }
+  ],
+  "severity": "CRITICAL",
+  "enabled": true
+}

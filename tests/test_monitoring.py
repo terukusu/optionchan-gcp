@@ -9,6 +9,8 @@ MONITORING_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(_
 RUNBOOK_URL_PREFIX = 'https://github.com/terukusu/optionchan-gcp/blob/master/docs/runbook.md#'
 EXECUTION_COUNT = 'cloudfunctions.googleapis.com/function/execution_count'
 NOT_OK = 'NOT metric.labels.status = "ok"'
+REQUEST_COUNT = 'run.googleapis.com/request_count'
+INFRA_MONITORING_TF = os.path.normpath(os.path.join(MONITORING_DIR, '..', 'infra', 'prod', 'monitoring.tf'))
 
 
 def load_policy(name):
@@ -35,6 +37,16 @@ def m2():
 
 
 @pytest.fixture(scope='module')
+def ingest_m1():
+    return load_policy('ingest-m1-liveness.json')
+
+
+@pytest.fixture(scope='module')
+def ingest_m2():
+    return load_policy('ingest-m2-errors.json')
+
+
+@pytest.fixture(scope='module')
 def backtest():
     return load_backtest()
 
@@ -42,6 +54,8 @@ def backtest():
 @pytest.mark.parametrize('name, prefix', [
     ('m1-liveness.json', 'optionchan: M1 '),
     ('m2-errors.json', 'optionchan: M2 '),
+    ('ingest-m1-liveness.json', 'optionchan: M1 ingest '),
+    ('ingest-m2-errors.json', 'optionchan: M2 ingest '),
 ])
 def test_policy_common(name, prefix):
     policy = load_policy(name)
@@ -124,3 +138,66 @@ def test_thresholds_from_policies(backtest, m1, m2):
         {'functions': ['download_jpx', 'load_jpx_into_bq'], 'minutes': 15, 'threshold': 2},
         {'functions': ['insert_ohlc'], 'minutes': 15, 'threshold': 0},
     ]
+
+
+def test_display_names_unique():
+    # runbook の削除・一時停止は表示名の完全一致で 1 本を選ぶ
+    names = [load_policy(n)['displayName'] for n in sorted(os.listdir(MONITORING_DIR)) if n.endswith('.json')]
+    assert len(names) == 4
+    assert len(set(names)) == len(names)
+
+
+def test_terraform_reads_all_policies():
+    # monitoring/*.json はすべて monitoring.tf の alert_policies から読まれる (置いただけで作られない、を防ぐ)
+    with open(INFRA_MONITORING_TF, encoding='utf-8') as f:
+        tf = f.read()
+    for name in sorted(os.listdir(MONITORING_DIR)):
+        if name.endswith('.json'):
+            assert f'/monitoring/{name}"' in tf, name
+    assert 'paused_with_ingest = ["ingest_m1"]' in tf
+
+
+def test_ingest_m1_liveness(ingest_m1):
+    [c] = ingest_m1['conditions']
+    cond = c['conditionThreshold']
+    f = cond['filter']
+    assert REQUEST_COUNT in f
+    assert 'resource.type = "cloud_run_revision"' in f
+    assert 'resource.labels.service_name = "ingest"' in f
+    # 時間外の 204 も 2xx。403 (invoker の権限切れ)・5xx だけが続くときも発火させる
+    assert 'metric.labels.response_code_class = "2xx"' in f
+    # 欠落条件にしない: request_count は最後のリクエストの後も 0 の点を出し続け、欠落とみなされない
+    assert 'conditionAbsent' not in c
+    # データが無い (Scheduler・サービスの停止) ときも発火
+    assert cond['evaluationMissingData'] == 'EVALUATION_MISSING_DATA_ACTIVE'
+    assert cond['comparison'] == 'COMPARISON_LT'
+    assert cond['thresholdValue'] == 1
+    assert cond['duration'] == '0s'
+    [agg] = cond['aggregations']
+    assert agg['alignmentPeriod'] == '900s'
+    assert agg['perSeriesAligner'] == 'ALIGN_SUM'
+    # リビジョンごとの系列を合算する (デプロイで系列が変わっても途切れない)
+    assert agg['crossSeriesReducer'] == 'REDUCE_SUM'
+    assert agg['groupByFields'] == ['resource.label.service_name']
+
+
+def test_ingest_m2_errors(ingest_m2):
+    [c] = ingest_m2['conditions']
+    f = c['conditionMatchedLog']['filter']
+    assert 'resource.type="cloud_run_revision" AND resource.labels.service_name="ingest"' in f
+    assert 'resource.type="cloud_run_job" AND resource.labels.job_name="reprocess"' in f
+    assert 'severity>=ERROR' in f
+    # 除外は recovery_failed だけ (毎時単発で次の 0 分に回復。続けば 07:00 の reconcile_failed / raw_unrecovered)
+    assert f.count('NOT ') == 1
+    assert 'NOT jsonPayload.event="recovery_failed"' in f
+    # gunicorn の起動行 (stderr のテキスト、severity DEFAULT) やリクエストログの 5xx も含めるため、event の有無で絞らない
+    assert 'jsonPayload.event:*' not in f
+    strategy = ingest_m2['alertStrategy']
+    # ログ一致の条件は通知の頻度の上限が必須
+    assert strategy['notificationRateLimit']['period'] == '3600s'
+    assert strategy['autoClose'] == '1800s'
+    assert strategy['notificationPrompts'] == ['OPENED']
+
+
+def test_ingest_threshold(backtest, ingest_m1):
+    assert backtest.ingest_threshold(ingest_m1) == {'service': 'ingest', 'response_code_class': '2xx', 'minutes': 15}
