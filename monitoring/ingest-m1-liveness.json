@@ -22,14 +22,18 @@
             "alignmentPeriod": "900s",
             "perSeriesAligner": "ALIGN_SUM",
             "crossSeriesReducer": "REDUCE_SUM",
-            "groupByFields": ["resource.label.service_name"]
+            "groupByFields": [
+              "resource.label.service_name"
+            ]
           }
         ],
         "comparison": "COMPARISON_LT",
         "thresholdValue": 1,
-        "duration": "0s",
+        "duration": "60s",
         "evaluationMissingData": "EVALUATION_MISSING_DATA_ACTIVE",
-        "trigger": {"count": 1}
+        "trigger": {
+          "count": 1
+        }
       }
     }
   ],

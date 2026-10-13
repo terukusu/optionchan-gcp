@@ -70,6 +70,45 @@ resource "google_project_iam_member" "tf_plan" {
   member  = google_service_account.tf_plan.member
 }
 
+# ログ一致のアラート（#35 の M2）は Cloud Logging の notificationRules を作る。
+# logging.configWriter（シンク等も変えられる）は広いので、notificationRules だけのカスタムロールにする。
+resource "google_project_iam_custom_role" "log_notification_rules_editor" {
+  project     = var.project_id
+  role_id     = "logNotificationRulesEditor"
+  title       = "Log notification rules editor (optionchan)"
+  description = "ログ一致のアラートポリシーの作成・更新・削除に必要な notificationRules の権限だけ（#35）"
+  permissions = [
+    "logging.notificationRules.create",
+    "logging.notificationRules.delete",
+    "logging.notificationRules.get",
+    "logging.notificationRules.list",
+    "logging.notificationRules.update",
+  ]
+}
+
+resource "google_project_iam_custom_role" "log_notification_rules_viewer" {
+  project     = var.project_id
+  role_id     = "logNotificationRulesViewer"
+  title       = "Log notification rules viewer (optionchan)"
+  description = "plan 用に notificationRules を読むだけ（#35）"
+  permissions = [
+    "logging.notificationRules.get",
+    "logging.notificationRules.list",
+  ]
+}
+
+resource "google_project_iam_member" "tf_apply_log_notification_rules" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.log_notification_rules_editor.id
+  member  = google_service_account.tf_apply.member
+}
+
+resource "google_project_iam_member" "tf_plan_log_notification_rules" {
+  project = var.project_id
+  role    = google_project_iam_custom_role.log_notification_rules_viewer.id
+  member  = google_service_account.tf_plan.member
+}
+
 resource "google_project_iam_member" "tf_apply" {
   for_each = local.apply_project_roles
 

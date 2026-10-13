@@ -172,7 +172,7 @@ def test_ingest_m1_liveness(ingest_m1):
     assert cond['evaluationMissingData'] == 'EVALUATION_MISSING_DATA_ACTIVE'
     assert cond['comparison'] == 'COMPARISON_LT'
     assert cond['thresholdValue'] == 1
-    assert cond['duration'] == '0s'
+    assert cond['duration'] == '60s'  # EVALUATION_MISSING_DATA_ACTIVE は 0 より大きい duration が必要（#35 の初回 apply で 400）
     [agg] = cond['aggregations']
     assert agg['alignmentPeriod'] == '900s'
     assert agg['perSeriesAligner'] == 'ALIGN_SUM'
