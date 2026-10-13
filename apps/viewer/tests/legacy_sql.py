@@ -1,8 +1,7 @@
-"""現行（旧系）の HTTP 関数 3 つの SQL の写し（新旧のロジックの同値テスト test_sql_bq.py 用）。
+"""現行（旧系）の HTTP 関数 2 つの SQL の写し（新旧のロジックの同値テスト test_sql_bq.py 用）。
 
 写し元はデプロイ済みのソース（2026-10-13 に Cloud Functions API で取得し、git の master と同じことを確認済み）:
 - smile_data: functions/optionchan_dao.py find_option_price_by_created_at
-- atm_data: functions/optionchan_dao.py find_recent_iv_and_price_of_atm_options
 - atm_iv_data: functions_py/atm_iv/main.py query_atm_iv
 
 本文は一字一句そのまま。変えたのは次だけ:
@@ -11,7 +10,6 @@
 後処理（pandas）は legacy_* 関数が同じ意味で行う（列の削除、price_time の UNIX 秒化、ATM の行使価格、CSV の行）。
 """
 
-from datetime import timedelta
 from zoneinfo import ZoneInfo
 
 TZ_JST = ZoneInfo("Asia/Tokyo")
@@ -38,31 +36,6 @@ def smile_query(created_at, table="option_price"):
             MAX(CASE WHEN last_trading_day = (SELECT l_max FROM t) AND type = 2 THEN is_atm END) AS o2_put_is_atm
         FROM {table} WHERE created_at = "{created_at_str}" GROUP BY target_price ORDER BY target_price'''
     )
-    return query
-
-
-def atm_query(target_date, table="option_price"):
-    last_trading_day_from = target_date.astimezone(TZ_JST).strftime('%Y-%m-%d')
-    created_at_from = (target_date - timedelta(days=7)).isoformat()
-
-    query = (f'''
-    WITH t1 AS (
-        SELECT min(last_trading_day) AS l_min FROM `{table}`
-        WHERE last_trading_day >= "{last_trading_day_from}"
-    ),
-    t2 AS (
-        SELECT
-            target_price, iv, price, TIMESTAMP_SECONDS(CAST(TRUNC(UNIX_SECONDS(created_at)/300) AS INT64) * 300) AS time 
-        FROM
-            `{table}`
-        WHERE
-            created_at > "{created_at_from}" AND last_trading_day=(SELECT l_min FROM t1) AND is_atm = TRUE
-    )
-    SELECT
-        UNIX_SECONDS(time) AS time, ROUND(AVG(target_price), 1) AS target_price, 
-        ROUND(AVG(iv), 1) AS iv, ROUND(AVG(price), 1) AS price
-    FROM t2 GROUP BY time ORDER BY time
-    ''')
     return query
 
 
@@ -117,7 +90,7 @@ def atm_iv_query(num_days, n_th_contract_month, now, table_iv="atm_iv", table_op
             .replace("CURRENT_DATE('Asia/Tokyo')", f"DATE({now_literal}, 'Asia/Tokyo')"))
 
 
-# ---- 後処理（functions/main.py smile_data / atm_data、functions_py/atm_iv/main.py atm_iv_data と同じ意味） ----
+# ---- 後処理（functions/main.py smile_data、functions_py/atm_iv/main.py atm_iv_data と同じ意味） ----
 
 def legacy_smile_rows(rows):
     """(1 限月 put の ATM の行使価格, CSV の行) 。ATM は o1_put_is_atm == True の最初の行（無ければ IndexError = 現行は 500）"""

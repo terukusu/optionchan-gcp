@@ -1882,7 +1882,7 @@ done   # optionchan_tokyo は ["READER"]（か roles/bigquery.dataViewer）、op
 curl -s -o /dev/null -w '%{http_code}\n' "$U/smile_data"   # 200 でない（IAP のログインへの 302 等）
 ```
 
-ブラウザ（所有者のアカウント）: `$U/`・`$U/smile`・`$U/atm`・`$U/atm_iv` を開き、`/atm_iv` は日数と限月（`d`・`n`）を変えて 2 通り以上 Update する。チャートが描かれ、開発者ツールのコンソールに CSP の違反（`Refused to …`）が出ないこと。新しいビューアーは新系（`optionchan_tokyo`）の T0 以降のデータだけを表示する（過去分の移行 #12 の前は短い。不具合ではない）。
+ブラウザ（所有者のアカウント）: `$U/`・`$U/smile`・`$U/atm_iv` を開き（旧型の ATM 推移 `/atm` は #58 で削除した）、`/atm_iv` は日数と限月（`d`・`n`）を変えて 2 通り以上 Update する。チャートが描かれ、開発者ツールのコンソールに CSP の違反（`Refused to …`）が出ないこと。新しいビューアーは新系（`optionchan_tokyo`）の T0 以降のデータだけを表示する（過去分の移行 #12 の前は短い。不具合ではない）。
 
 ログ（デプロイ・ブラウザ確認の後 1 時間）:
 

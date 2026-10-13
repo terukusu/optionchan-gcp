@@ -75,12 +75,3 @@ def test_atm_iv_uses_hourly_bars_and_put():
     # N3: 1 時間足・補った足のどちらも d 日の下端で絞る
     cond = r"WHERE last_trading_day = \(SELECT last_trading_day FROM month\) AND started_at >= @days_start\n"
     assert len(re.findall(cond, text)) == 2
-
-
-def test_atm_keeps_both_types_and_5min():
-    text = body(SQL["atm"])
-    # 現行どおり type を絞らない（call と put の平均）
-    assert "WHERE is_atm\n" in text and "type" not in text
-    assert "UNIX_SECONDS(created_at) / 300" in text
-    for col in ("target_price", "iv", "price"):
-        assert f"ROUND(AVG({col}), 1) AS {col}" in text

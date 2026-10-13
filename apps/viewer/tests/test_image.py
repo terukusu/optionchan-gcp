@@ -21,7 +21,7 @@ def vendor_files():
 
 
 def test_templates_have_no_external_resources():
-    assert len(TEMPLATES) == 4
+    assert len(TEMPLATES) == 3
     for path in TEMPLATES:
         text = path.read_text(encoding="utf-8")
         refs = re.findall(r"<script[^>]*\bsrc=\"([^\"]+)\"", text) + re.findall(r"<link[^>]*\bhref=\"([^\"]+)\"", text)

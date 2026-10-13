@@ -26,7 +26,6 @@ def ok_results():
     return {
         "latest_snapshot": [{"snapshot_at": SNAP}],
         "smile": smile_rows(),
-        "atm": [{"time": 1760335200, "target_price": 25000.0, "iv": 18.3, "price": 210.5}],
         "atm_iv_meta": [{"last_started_at": datetime(2026, 10, 12, 21, tzinfo=UTC)}],
         "atm_iv": [{"open": 18.0, "high": 19.0, "low": 17.5, "close": 18.5,
                     "started_at": datetime(2026, 10, 12, 21, tzinfo=UTC)}],
@@ -43,7 +42,7 @@ def make():
     return _make
 
 
-@pytest.mark.parametrize("path", ["/", "/smile", "/atm", "/atm_iv"])
+@pytest.mark.parametrize("path", ["/", "/smile", "/atm_iv"])
 def test_pages(make, path):
     client, runner = make()
     res = client.get(path)
@@ -66,14 +65,12 @@ def test_smile_data(make):
     assert runner.calls[1][1] == {"start_at": SNAP, "end_at": SNAP + timedelta(seconds=1)}
 
 
-def test_atm_data(make):
+@pytest.mark.parametrize("path", ["/atm", "/atm_data", "/static/atm.js"])
+def test_removed_atm_is_404(make, path):
+    # 旧型の ATM 推移のページと API は削除した（#58）。BigQuery を呼ばない
     client, runner = make()
-    res = client.get("/atm_data")
-    assert res.status_code == 200
-    assert res.headers["Content-Type"] == "text/csv; charset=utf-8"
-    assert res.get_data(as_text=True) == "1760335200\n1760335200,25000.0,18.3,210.5\n"
-    # 期間は直近 7 日、限月は JST の今日以降（NOW = 2026-10-13 15:00 JST）
-    assert runner.calls == [("atm", {"start_at": NOW - timedelta(days=7), "end_at": NOW, "today": date(2026, 10, 13)})]
+    assert client.get(path).status_code == 404
+    assert runner.calls == []
 
 
 def test_atm_iv_data_defaults(make):
@@ -138,13 +135,6 @@ def test_no_atm_in_snapshot_is_503(make):
     assert client.get("/smile_data").status_code == 503
 
 
-def test_no_atm_rows_is_503(make):
-    results = ok_results()
-    results["atm"] = []
-    client, _ = make(results)
-    assert client.get("/atm_data").status_code == 503
-
-
 def test_atm_iv_no_rows_is_empty_200(make):
     # 限月が範囲外（n=1 で 2 限月目が無い等）は 0 行（現行は OFFSET のエラーで 500）
     results = ok_results()
@@ -154,8 +144,7 @@ def test_atm_iv_no_rows_is_empty_200(make):
     assert res.status_code == 200 and res.get_data(as_text=True) == ""
 
 
-@pytest.mark.parametrize("path,name", [("/smile_data", "latest_snapshot"), ("/atm_data", "atm"),
-                                       ("/atm_iv_data", "atm_iv_meta")])
+@pytest.mark.parametrize("path,name", [("/smile_data", "latest_snapshot"), ("/atm_iv_data", "atm_iv_meta")])
 def test_query_error_is_500_without_details(make, capsys, path, name):
     results = ok_results()
     results[name] = RuntimeError("secret detail: project 123456789012 user@example.com")

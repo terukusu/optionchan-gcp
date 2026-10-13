@@ -18,7 +18,6 @@ SMILE_COLUMNS = (
     "o2_put_iv",
     "o2_put_price_time",
 )
-ATM_COLUMNS = ("time", "target_price", "iv", "price")
 ATM_IV_COLUMNS = ("open", "high", "low", "close", "started_at")
 
 
@@ -47,12 +46,6 @@ def smile_csv(snapshot_at: datetime, atm_target_price: int, rows: list[dict]) ->
     """1 行目 `<スナップショットの UNIX 秒>,<1 限月 put の ATM の行使価格>`、以降 SMILE_COLUMNS（行使価格昇順）"""
     head = line([int(snapshot_at.timestamp()), atm_target_price])
     return head + "".join(line([r[c] for c in SMILE_COLUMNS]) for r in rows)
-
-
-def atm_csv(rows: list[dict]) -> str:
-    """1 行目 `<最終行の time>`、以降 ATM_COLUMNS（time 昇順。time は 5 分に切り捨てた UNIX 秒）"""
-    head = line([rows[-1]["time"]])
-    return head + "".join(line([r[c] for c in ATM_COLUMNS]) for r in rows)
 
 
 def atm_iv_csv(rows: list[dict]) -> str:
