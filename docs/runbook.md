@@ -827,6 +827,40 @@ gcloud logging read "$W AND (textPayload:\"gunicorn\" OR textPayload:\"Booting w
 
 Terraform の差分 0: `gh workflow run deploy.yml --ref master` の plan が「差分なし」、bootstrap の `plan -detailed-exitcode` が 0。差分が出たら（CPU の `0.5` の正規化など）、コードを実態に合わせる PR を出す。
 
+### 取得の秒（#38）
+
+JPX のページは分単位の更新時刻が変わった後、分の頭の数秒で中身が書き換わる（1〜2 秒目の取得は書き換え途中の版だった）。取引時間中は分の頭から 8 秒（`apps/ingest` の `settings.FETCH_AT_SECOND`）まで待ってから 1 限月のページを取得する。到着が 8 秒を過ぎていれば待たない。時間外（204）は待たない。待ちも全体の期限 45 秒に含まれる。
+
+- 変更: 環境変数 `INGEST_FETCH_AT_SECOND`（0〜20、0 で待たない。数値でない・範囲外だと最初のリクエストで設定を読むときに失敗し、全リクエストが ERROR `unexpected` の 500 になる）を `infra/prod/ingest.tf` に足す PR。既定では設定しない
+- 記録: 取引時間中のログに `wait_ms`（待った時間）と `page1_fetch_second`（1 限月ページの取得時刻の分内の秒）が出る。生 HTML の各ページの `fetched_at` にも取得時刻がある（封筒の形式は変えていない）
+- コスト: 待ちも課金対象のインスタンス時間になる。月の vCPU 秒の上限見積もりは 約 16.5 万（無料枠 18 万。target.md 7.2）。10 秒にすると上限 約 19.4 万で超えるので、秒を延ばすときは試算し直す。無料枠は請求先アカウントで他プロジェクトと共有している
+
+確認（「ログ」と同じ `$W`、取引時間中の窓）:
+
+```sh
+gcloud logging read "$W AND jsonPayload.event=\"ingested\"" --project $P --format=json \
+  | jq '[.[].jsonPayload | {s: .page1_fetch_second, w: .wait_ms}] | {n: length, min_second: (map(.s) | min), max_wait_ms: (map(.w) | max)}'   # min_second >= 8
+```
+
+時間外の 204 が待っていないこと（平日 07:00〜07:30 JST の窓。`latency` は "0.012s" の形）:
+
+```sh
+gcloud logging read "$W AND log_name=\"projects/$P/logs/run.googleapis.com%2Frequests\" AND httpRequest.status=204" --project $P --format=json \
+  | jq '[.[].httpRequest.latency | rtrimstr("s") | tonumber] | {n: length, max: max}'   # max < 1
+```
+
+月の vCPU 秒（1 取引日分を月換算する。値は秒）:
+
+```sh
+curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" -G \
+  "https://monitoring.googleapis.com/v3/projects/$P/timeSeries" \
+  --data-urlencode 'filter=metric.type="run.googleapis.com/container/billable_instance_time" AND resource.labels.service_name="ingest"' \
+  --data-urlencode "interval.startTime=<その日 00:00 JST の RFC3339>" --data-urlencode "interval.endTime=<翌日 00:00 JST の RFC3339>" \
+  --data-urlencode 'aggregation.alignmentPeriod=86400s' --data-urlencode 'aggregation.perSeriesAligner=ALIGN_SUM' \
+  --data-urlencode 'aggregation.crossSeriesReducer=REDUCE_SUM' \
+  | jq '[.timeSeries[].points[].value.doubleValue] | add'   # × 23（月の取引日）× 0.5 が 18 万未満
+```
+
 ### 停止・再開
 
 ```sh

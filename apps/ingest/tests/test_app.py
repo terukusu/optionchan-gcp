@@ -1,5 +1,6 @@
 """app.handle の経路ごとの検査（I/O は偽物）（AC 11）"""
 
+import gzip
 import json
 import time
 from datetime import UTC, datetime, timedelta
@@ -10,7 +11,7 @@ from htmlgen import empty_page_html, page_html
 
 from optionchan_ingest import app as app_module
 from optionchan_ingest import settings
-from optionchan_ingest.app import Deps, handle
+from optionchan_ingest.app import Deps, fetch_wait_seconds, handle
 from optionchan_ingest.calendar import load_calendar
 from optionchan_ingest.io_bq import WriteFailed
 from optionchan_ingest.io_gcs import AlreadyExists, StorageFailed
@@ -26,8 +27,21 @@ OUT_OF_HOURS = jst(2026, 10, 12, 7, 0)
 NAME = "raw/2026/10/12/20261012T1046.json.gz"
 
 
+# 偽の実時刻: 分の頭（IN_HOURS の 11:00:00 JST）+ 到着の秒 + 偽の monotonic の経過
+MINUTE_HEAD = datetime(2026, 10, 12, 2, 0, tzinfo=UTC)
+
+
 class Fake:
-    def __init__(self, pages=None, exists=False, create_error=None, append_error_on=None, exists_error=None):
+    def __init__(
+        self,
+        pages=None,
+        exists=False,
+        create_error=None,
+        append_error_on=None,
+        exists_error=None,
+        arrival=5.0,
+        fetch_at_second=0.0,
+    ):
         self.calls = []
         self.timeouts = []
         self.pages = pages or {1: PAGE1, 2: PAGE2}
@@ -39,6 +53,9 @@ class Fake:
         self.appended = {}
         self.clock_value = 0.0  # 偽の monotonic（秒）
         self.cost = {}  # 呼び出しの種類 → その呼び出しで進める秒数
+        self.arrival = arrival  # 分の頭から何秒目に届いたか
+        self.fetch_at_second = fetch_at_second  # 既定 0（待たない）。待ちの検査では明示する
+        self.sleeps = []
 
     def _tick(self, kind, timeout):
         self.timeouts.append((kind, timeout))
@@ -47,15 +64,21 @@ class Fake:
     def monotonic(self):
         return self.clock_value
 
+    def wall(self):
+        return MINUTE_HEAD + timedelta(seconds=self.arrival + self.clock_value)
+
+    def sleep(self, seconds):
+        self.calls.append(("sleep", seconds))
+        self.sleeps.append(seconds)
+        self.clock_value += seconds
+
     def fetch_page(self, page, timeout):
         self.calls.append(("fetch", page))
         self._tick(f"fetch{page}", timeout)
         html = self.pages[page]
         if isinstance(html, Exception):
             raise html
-        return FetchedPage(
-            page, f"https://example.invalid/{page}", datetime(2026, 10, 12, 2, 0, tzinfo=UTC), 200, html.encode("utf-8")
-        )
+        return FetchedPage(page, f"https://example.invalid/{page}", self.wall(), 200, html.encode("utf-8"))
 
     def raw_exists(self, name, timeout):
         self.calls.append(("exists", name))
@@ -87,9 +110,11 @@ class Fake:
             self.raw_exists,
             self.raw_create,
             self.append_rows,
-            clock=lambda: datetime(2026, 10, 12, 2, 0, 5, tzinfo=UTC),
+            clock=self.wall,
             new_run_id=lambda: "run-1",
             monotonic=self.monotonic,
+            fetch_at_second=self.fetch_at_second,
+            sleep=self.sleep,
         )
 
 
@@ -102,10 +127,10 @@ def events(capsys):
 
 
 def test_out_of_hours_calls_nothing(capsys):
-    fake = Fake()
+    fake = Fake(arrival=1.0, fetch_at_second=8.0)
     result = handle(OUT_OF_HOURS, fake.deps())
     assert result.status == 204
-    assert fake.calls == []
+    assert fake.calls == []  # 待たない（sleep も呼ばない）
     assert events(capsys) == [("INFO", "out_of_hours")]
 
 
@@ -435,3 +460,124 @@ def test_storage_failed_on_create(capsys):
     result = handle(IN_HOURS, fake.deps())
     assert (result.status, result.outcome) == (500, "storage_failed")
     assert not [c for c in fake.calls if c[0] == "append"]
+
+
+# --- 取得を分の頭から遅らせる（#38） ---
+
+
+@pytest.mark.parametrize(
+    "second, at, wait",
+    [
+        (1.2, 8.0, 6.8),
+        (0.0, 8.0, 8.0),
+        (7.999, 8.0, 0.001),
+        (8.0, 8.0, 0.0),
+        (30.0, 8.0, 0.0),
+        (59.5, 8.0, 0.0),
+        (1.2, 0.0, 0.0),
+    ],
+)
+def test_fetch_wait_seconds(second, at, wait):
+    now = MINUTE_HEAD + timedelta(seconds=second)
+    assert fetch_wait_seconds(now, at) == pytest.approx(wait)
+    # JST でも同じ（分内の秒はタイムゾーンによらない）
+    assert fetch_wait_seconds(now.astimezone(JST), at) == pytest.approx(wait)
+
+
+def test_waits_once_before_page1(capsys):
+    fake = Fake(arrival=1.2, fetch_at_second=8.0)
+    result = handle(IN_HOURS, fake.deps())
+    assert result.outcome == "ingested"
+    assert fake.sleeps == [pytest.approx(6.8)]
+    assert fake.calls[0][0] == "sleep" and fake.calls[1] == ("fetch", 1)
+    # 待った後も各呼び出しのタイムアウトは上限のまま（期限 45 秒に十分収まる）
+    kinds = dict(fake.timeouts)
+    assert kinds["fetch1"] == settings.JPX_TIMEOUT_SECONDS
+    assert kinds["create"] == settings.GCS_TIMEOUT_SECONDS
+    assert kinds["append_ingest_runs"] == settings.BQ_APPEND_TIMEOUT_SECONDS
+    last = logs(capsys)[-1]
+    assert last["wait_ms"] == 6800
+    assert last["page1_fetch_second"] == pytest.approx(8.0)
+
+
+def test_no_wait_when_arrived_late(capsys):
+    fake = Fake(arrival=9.5, fetch_at_second=8.0)
+    assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
+    assert fake.sleeps == []
+    last = logs(capsys)[-1]
+    assert last["wait_ms"] == 0
+    assert last["page1_fetch_second"] == pytest.approx(9.5)
+
+
+def test_default_fetch_at_second_is_used():
+    deps = Deps(CAL, "b", None, None, None, None)
+    assert deps.fetch_at_second == settings.FETCH_AT_SECOND == 8.0
+    assert deps.sleep is time.sleep
+
+
+def test_skipped_no_update_also_waits_and_logs_second(capsys):
+    fake = Fake(exists=True, arrival=1.0, fetch_at_second=8.0)
+    assert handle(IN_HOURS, fake.deps()).outcome == "skipped_no_update"
+    assert fake.sleeps == [pytest.approx(7.0)]
+    last = logs(capsys)[-1]
+    assert (last["event"], last["wait_ms"], last["page1_fetch_second"]) == ("skipped_no_update", 7000, 8.0)
+
+
+def test_wait_counts_toward_deadline(capsys):
+    """待ちも全体の期限に数える: 上限の待ち（20 秒）の後に JPX が 24 秒かかれば、残り 1 秒で次に入らない"""
+    fake = Fake(arrival=0.0, fetch_at_second=settings.MAX_FETCH_AT_SECOND)
+    fake.cost = {"fetch1": 24.0}
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (500, "deadline_exceeded")
+    assert dict(fake.timeouts)["fetch1"] == settings.JPX_TIMEOUT_SECONDS  # 待ち 20 秒の後も 15 秒取れる
+    last = logs(capsys)[-1]
+    assert (last["stage"], last["wait_ms"]) == ("raw_exists", 20000)
+
+
+def test_max_wait_plus_measured_processing_fits_deadline():
+    """既定の秒で最大の待ち（0 秒目に到着）+ 実測（p50 3.8 秒・最大 5.7 秒）より重い処理 12 秒
+    （JPX 3 秒×2、GCS 1 秒×2、BQ 1 秒×4）でも期限内"""
+    fake = Fake(arrival=0.0, fetch_at_second=settings.FETCH_AT_SECOND)
+    fake.cost = {"fetch1": 3.0, "fetch2": 3.0, "exists": 1.0, "create": 1.0}
+    fake.cost.update({f"append_{t}": 1.0 for t in (*settings.DATA_TABLES, settings.RUNS_TABLE)})
+    assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
+    assert fake.clock_value == pytest.approx(8.0 + 12.0)
+    assert fake.clock_value < settings.REQUEST_DEADLINE_SECONDS - settings.MIN_REMAINING_SECONDS
+
+
+def test_raw_envelope_format_unchanged():
+    """生 HTML の封筒は format 1 のまま（キーを変えていない）で、decode_raw で読める"""
+    fake = Fake(arrival=1.0, fetch_at_second=8.0)
+    handle(IN_HOURS, fake.deps())
+    data = fake.created[NAME]
+    doc = json.loads(gzip.decompress(data))
+    assert doc["format"] == 1
+    assert set(doc) == {"format", "pages"}
+    assert [set(p) for p in doc["pages"]] == [{"page", "url", "fetched_at", "http_status", "updated_at", "html"}] * 2
+    pages = decode_raw(data)
+    assert pages[0].fetched_at == MINUTE_HEAD + timedelta(seconds=8)
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, 8.0), ("", 8.0), ("0", 0.0), ("10", 10.0), ("7.5", 7.5), ("20", 20.0)],
+)
+def test_settings_fetch_at_second(value, expected):
+    env = {"RAW_BUCKET": "b"}
+    if value is not None:
+        env["INGEST_FETCH_AT_SECOND"] = value
+    assert settings.Settings.from_env(env).fetch_at_second == expected
+
+
+@pytest.mark.parametrize("value", ["-1", "20.5", "abc", "nan", "inf"])
+def test_settings_fetch_at_second_invalid(value):
+    with pytest.raises(RuntimeError, match="INGEST_FETCH_AT_SECOND"):
+        settings.Settings.from_env({"RAW_BUCKET": "b", "INGEST_FETCH_AT_SECOND": value})
+
+
+def test_real_deps_use_configured_second(monkeypatch):
+    monkeypatch.setenv("INGEST_DRY_RUN", "1")
+    monkeypatch.setenv("INGEST_FETCH_AT_SECOND", "9")
+    monkeypatch.setattr(app_module, "_cfg", None)
+    monkeypatch.setattr(app_module, "_deps", None)
+    assert app_module._real_deps().fetch_at_second == 9.0

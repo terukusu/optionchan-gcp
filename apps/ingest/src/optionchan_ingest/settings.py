@@ -58,6 +58,14 @@ JPX_CONNECT_TIMEOUT_SECONDS = 5
 GCS_CONNECT_TIMEOUT_SECONDS = 5
 GCS_TIMEOUT_SECONDS = 10
 GCS_EXISTS_ATTEMPT_TIMEOUT_SECONDS = 4
+# JPX の取得を分の頭からこの秒（分内の秒）まで遅らせる（#38）。JPX のページは分単位の更新時刻が変わった後、
+# 分の頭の数秒で中身が書き換わる（1〜2 秒目の取得は書き換え途中の版、4〜10 秒目は書き換え後の版だった）。
+# 取引時間中だけ 1 限月ページの取得の前に待ち、到着が既にこの秒を過ぎていれば待たない。待ちも全体の期限に数える。
+# 待ちも課金対象のインスタンス時間になる（10 秒だと月の vCPU 秒が無料枠を超えうる。target.md 7.2）。
+# 環境変数 INGEST_FETCH_AT_SECOND で上書きできる（0 で待たない。0〜MAX_FETCH_AT_SECOND）
+FETCH_AT_SECOND = 8.0
+# 上限: 待ち 20 秒 + JPX 15 秒でも期限 45 秒の内側に残りがある値
+MAX_FETCH_AT_SECOND = 20.0
 # BigQuery Storage Write API: テーブルごとに 1 回、開始から応答まで 15 秒（残り時間で頭打ち）。
 # リトライなし（失敗は write_failed、回収は 11c）
 BQ_APPEND_TIMEOUT_SECONDS = 15
@@ -83,6 +91,7 @@ class Settings:
     calendar_path: Path
     schema_dir: Path
     dry_run: bool
+    fetch_at_second: float = FETCH_AT_SECOND
 
     @classmethod
     def from_env(cls, env=None):
@@ -98,4 +107,17 @@ class Settings:
             calendar_path=Path(env.get("CALENDAR_PATH", DEFAULT_CALENDAR_PATH)),
             schema_dir=Path(env.get("SCHEMA_DIR", DEFAULT_SCHEMA_DIR)),
             dry_run=dry_run,
+            fetch_at_second=_fetch_at_second(env.get("INGEST_FETCH_AT_SECOND", "")),
         )
+
+
+def _fetch_at_second(text: str) -> float:
+    if text == "":
+        return FETCH_AT_SECOND
+    try:
+        value = float(text)
+    except ValueError:
+        raise RuntimeError(f"INGEST_FETCH_AT_SECOND が数値でない: {text!r}") from None
+    if not 0 <= value <= MAX_FETCH_AT_SECOND:  # NaN もここで弾く
+        raise RuntimeError(f"INGEST_FETCH_AT_SECOND が範囲外（0〜{MAX_FETCH_AT_SECOND:g}）: {text!r}")
+    return value
