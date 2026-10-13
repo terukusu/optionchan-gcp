@@ -4,7 +4,7 @@
 #   legacy-stage   07:02 JST  US    旧系の前日分 → optionchan_legacy_stage（旧系の夜間分は 06:20 頃までに入っている）
 #   legacy-copy    07:10 JST  東京  optionchan_legacy_stage → optionchan_legacy_copy（データセットコピー）
 #   quality-daily  07:15 JST  東京  品質チェック → quality_daily。違反があれば失敗（新系の M2 で通知）。ingest の 07:00 の照合・回収の後
-#   legacy-compare 07:30 JST  東京  コピーと最新版を比べる → legacy_compare_daily。コピーの欠けは失敗、説明できない差分は下の切り替えで
+#   legacy-compare 07:30 JST  東京  コピーと最新版を比べる → legacy_compare_daily。コピーの欠けは失敗、説明できない差分は下の切り替え（と日付の下限）で
 #   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price に MERGE（#49。旧系の insert_ohlc の置き換え）
 # 時刻を 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
 # legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ（#14 で消す）。品質チェックと 1 時間足は残す。
@@ -17,9 +17,11 @@ locals {
   # 作業用データセットのテーブルは毎日作り直す。止まったら 7 日で消える
   legacy_work_table_expiration_ms = 7 * 24 * 60 * 60 * 1000
 
-  # true で legacy-compare が説明できない差分（1 以上）を ERROR にする（M2 で通知）。
-  # 分類が実データに合っていることを数日の legacy_compare_daily で確かめてから true にする（runbook「日次の品質チェックと新旧の突き合わせ」）
-  legacy_compare_fail_on_unexplained = false
+  # true で legacy-compare が説明できない差分（1 以上）を ERROR にする（M2 で通知）。窓の日付（compare_date）が
+  # legacy_compare_fail_from 以降の日だけ。2026-10-13 は #38 の前（09:30 JST まで）の説明できない行を含むので、その翌日から（#61。
+  # runbook「日次の品質チェックと新旧の突き合わせ」の「ERROR の切り替え」）
+  legacy_compare_fail_on_unexplained = true
+  legacy_compare_fail_from           = "2026-10-14"
 }
 
 # ---- 作業用データセット（並行稼働の間だけ。データは毎日作り直すので削除の保護はしない） ----
@@ -167,6 +169,7 @@ resource "google_bigquery_data_transfer_config" "legacy_compare" {
       dataset             = google_bigquery_dataset.tokyo.dataset_id
       copy_dataset        = google_bigquery_dataset.legacy_copy.dataset_id
       fail_on_unexplained = local.legacy_compare_fail_on_unexplained
+      fail_from           = local.legacy_compare_fail_from
     })
   }
 

@@ -81,7 +81,7 @@
     "name": "spot_new_stale",
     "type": "INTEGER",
     "mode": "REQUIRED",
-    "description": "spot で新系の T が直前と同じ中身で、旧系だけ新しい版の行数（新系の版の遅れ。説明済み）"
+    "description": "spot で新系の T が直前と同じ中身で、旧系だけ新しい版の行数（新系の版の遅れ。説明済み）。新系の T が約定時刻だけ進み価格の列が直前のまま（書き換え途中の版）で、旧系が同じ約定時刻・基準価格・hv の別の価格の行も含む（#61）。新系の T が直前と同じ中身の行と、書き換え途中の版のうち旧系の版を新系が T の後 5 分の中で取っていない（裏付けの無い）行は、それぞれ 1 日 3 行までで、超えたらその形の行を全部 spot_unexplained に数える"
   },
   {
     "name": "spot_unexplained",
@@ -111,7 +111,7 @@
     "name": "future_new_stale",
     "type": "INTEGER",
     "mode": "REQUIRED",
-    "description": "future で新系の T が直前と同じ中身で、旧系だけ新しい版の行数（説明済み）"
+    "description": "future で新系の T が直前と同じ中身で、旧系だけ新しい版の行数（説明済み）。spot_new_stale と同じく書き換え途中の版を含み、同じ 1 日 3 行の上限がある（超えたら future_unexplained。#61）"
   },
   {
     "name": "future_unexplained",
@@ -203,12 +203,30 @@
     "name": "fail_on_unexplained",
     "type": "BOOLEAN",
     "mode": "REQUIRED",
-    "description": "この実行で説明できない差分を ERROR にする設定だったか（infra/prod/sq.tf の legacy_compare_fail_on_unexplained）"
+    "description": "この実行で説明できない差分を ERROR にする設定だったか（infra/prod/sq.tf の legacy_compare_fail_on_unexplained が true で、compare_date が legacy_compare_fail_from 以降）"
   },
   {
     "name": "computed_at",
     "type": "TIMESTAMP",
     "mode": "REQUIRED",
     "description": "比べた時刻"
+  },
+  {
+    "name": "spot_legacy_older",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "spot で旧系が新系の T より古い版（T の 10 分前〜T の前のスナップショットと全列一致）か、T までの連続する 2 スナップショットの途中の版（約定時刻が間）を読んだ行数。新系の T の値が旧系の次のスナップショット（または古い版と S2 < T の途中の版に限り新系の直後）で裏付けられ、旧系の次と矛盾しないものだけ（説明済み。#61。列を足す前の日は NULL）"
+  },
+  {
+    "name": "future_legacy_older",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "future で spot_legacy_older と同じ（限月の年の補完を許す。説明済み。#61。列を足す前の日は NULL）"
+  },
+  {
+    "name": "option_legacy_older",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "option で旧系が新系の T より古い版（T の 10 分前〜T の前のスナップショットと約定の列が一致）か、T までの連続する 2 スナップショットの途中の版（出来高・約定時刻が間）を読んだキーの数。新系の T の約定の列が旧系の次のスナップショット（または古い版と S2 < T の途中の版に限り新系の直後）で裏付けられ、旧系の次と矛盾しない（出来高・約定時刻が新系の T 以上）ものだけ（説明済み。#61。列を足す前の日は NULL）"
   }
 ]
