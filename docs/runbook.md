@@ -1609,7 +1609,7 @@ done
 - **品質チェック（`quality_daily`）**: E 以降の窓だけを見るので、移行行で違反は出ない。過去の日を「再実行・バックフィル」で手で流し直すと、旧系の重複（`dup_keys`）・欠け（`missing_table`）・旧系のページの形の違い（`atm_not_1`・`months_not_2`）・#4 の日付ずれ（`price_time_*`・`sunday`）で違反が出うる（`ingest_run_id` が `legacy-` の行で見分ける）。その結果は誤報として扱う
 - **新旧の突き合わせ（`legacy_compare_daily`）**: 新系側から `legacy-` の行を除く（`sql/legacy/compare.sql`）。取りこぼしを補った日を再実行しても `legacy_only` は 0 にならない（新系の取りこぼしの記録として残る）
 - **回収・再処理**: 完了記録の `source_object = 'legacy:optionchan'` は生 HTML の名前と一致しないので、回収・`--only-missing` の判定には影響しない（取りこぼしを補った T に生 HTML があれば、再処理すると新系の版が選ばれる）
-- **#4（過去データの補正）**: 移行の後に別ステップで行う。`price_time_raw` は移行行では NULL で、#4 が元の値を残す
+- **#4（過去データの補正）**: 移行の後に別ステップで行う（「過去データの補正（#4、3b）」）。`price_time_raw` は移行行では NULL で、#4 が元の値を残す。#4 は移行行の `price_time` を書き換えるので、この節の `verify.sql`・`fingerprint.sql` は #4 の後では `row_mismatches` が出る（5. の検証は #4 の前に済ませる）
 
 ### E 以降の取りこぼしを補う（#14 で旧系を止めるとき）
 
@@ -1621,6 +1621,208 @@ E から旧系を止めるまでの新系の取りこぼし（`legacy_compare_da
 4. 補った日の 1 時間足を「1 時間足（#49）」の「再実行・バックフィル」で作り直す
 
 新系の取り込みを止めていた期間（「停止・再開」）の分も同じ手順で補える。
+
+## 過去データの補正（#4、3b）
+
+移行した旧系の行（`ingest_run_id` が `legacy-` で始まる行、#12）の `price_time` の**日付**を推定で直す（target.md 6 章 3b・D6）。**日付が一意に決まる行だけを直し、一意に決まらない行は元のまま残す**。**#12 の 5.（移行の検証）が合格した後に、所有者が 1 回だけ行う**。SQL は `sql/price_time_fix/`（試験は `tests/test_price_time_fix.py`・`tests/test_price_time_fix_bq.py`）。クエリ量上限の一時変更・テーブルスナップショットは Terraform 外で、この節の手順で作って戻す。
+
+| SQL | 内容 |
+|---|---|
+| `accuracy.sql` | 推定の一致率。新系の最新版（正しい `price_time`）を旧系の補完で旧系の保存値に戻し、`fix.sql` と同じ推定で戻した値と比べる（読み取りだけ） |
+| `fix.sql` | 推定と書き込み。`@mode = 'dryrun'` は表 × 確かさ × 候補のずれの内訳を数えるだけ、`'apply'` は一意に決まる未補正の行を UPDATE する。流し直しても結果は同じ（2 回目は 0 行） |
+| `verify.sql` | 補正の検証（推定を使わない独立の検査。表ごとに 1 行） |
+| `rollback.sql` | 切り戻し。補正した行を `price_time_raw` の元の値に戻す |
+
+**ずれの仕組み**: 旧系（`functions/jpx_loader.py`、2019 年〜2026-10-12）はページの約定日時 `MM/DD HH:MM` の `MM/DD` を捨て、ページの更新時刻 C（JST）の日付に時刻を付け、C より未来なら 1 日戻していた。保存値 B は「C 以前で最も新しい、その時刻の日時」で、正しい値 A は B と同じ時刻・B 以前の日付（A = B − k 日）。k ≥ 1 になるのは、前日より前の約定（週末・休業日・夜間の前日分を跨いで表示が残った約定、値の付かない行使価格の古い約定）と、表示が C より数分先の約定（k = −1。セッションの終わりの約定値など）。#2 の修正（`FIX`）以降の旧系の行と、新系の行は正しい。
+
+**推定**（`fix.sql` の先頭のコメントに詳細）: 系列（option は限月・種別・行使価格、future は限月、spot は 1 つ）ごとに時刻順に並べ、表示（時刻・値段）が変わった行・表示が消えた後の行・取引高が増えた行を「約定の始まり」とし、始まりの行で「C + 10 分以下で立会中の、その時刻の最も新しい日時」を候補とする。前回の表示より後に同じ時刻の別の候補が無ければ日付は一意に決まり（`determined`）、同じ約定が続く行もその日付に直す（何日も表示が残った約定も始まりの日付で直る）。確かさ（`basis`）と扱い:
+
+| basis | 意味 | 扱い |
+|---|---|---|
+| `determined` | 前の行（前回の表示）より後に、同じ時刻の別の候補が無い | 直す（`price_time_raw` に元の値、`parser_version = 'legacy-fix4-1'`） |
+| `gap` | 前の行との間が空いていて（取り込みの停止、行使価格がページから外れていた間）、もう 1 日前の候補もありうる | 元のまま（印も付けない） |
+| `series_start` | 系列の最初（範囲の前 100 日の文脈の中で） | 元のまま |
+| `no_session` | 立会中の候補が無い（立会の外の時刻の表示） | 元のまま |
+| `off_session` | 立会の外のスナップショット（休業日の取得。2024-01-03〜04 朝・2025-01-03〜04 朝に、先物・オプションの値と時刻が動くページを取得していた。2019-01-01〜03 にも 1 日 1 件）で、表示が取得の直前の約定 | 元のまま（ページの表示が `01/03` だった可能性があり、根拠が無い） |
+
+元のままの行は、約定の始まりの行だけでなく、同じ約定が続く行も元のまま（始まりの日付に揃えない）。件数は `fix.sql` の内訳の `rows_kept` に basis ごとに出るので、#4 に記録する。
+
+**一致率（2026-10-14 の実測。AC は `determined` 99.9% 以上・全体 99% 以上）**: 旧系の #2 の修正後の行（2026-10-12 12:25〜10-14 09:00 JST、正しい値）を旧ロジックで B に戻し、修正前の旧系の行（2026-09-05〜）を文脈にして推定すると、option は `determined` 257,042 行がすべて正しく、全体 257,751 行のうち 257,263 行（99.8%。外れは元のままにした `series_start` 488 行）。future 1,349 行・spot 1,338 行はすべて `determined` で正しい（補正しない場合の一致は option 81.2%・spot 58.7%）。新系（`accuracy.sql`、2026-10-13 15:00〜）は `determined` 107,596 行がすべて正しく、全体は 111,419 行中 108,659 行（97.5%）。外れた 2,760 行はすべて新系の稼働開始の直後で前の表示が無い `series_start`（元のまま）で、事前確認 3. では最初の 1 日を文脈にして除く。過去の標本（旧系の保存値に推定を当てた内訳。正解は無い）: 2019-04-15〜05-20（10 連休を含む）は option 約 176 万行のうち `gap` 0.5%・`series_start` 0.1%（10 連休を跨いで直す行 約 7,900）、2024-12-20〜2025-01-15（年末年始）は約 174 万行のうち `gap` 0.3%・`series_start` 0.2%・`off_session` 7.0%（2025-01-03・04 の取得の 約 12 万行）。
+
+**いつ行うか**: **#12 の移行の次の週末**の**土曜 13:00 JST 以降〜日曜**（新旧とも書き込みが無い。UPDATE が新系の書き込み・定期クエリと重ならない）。**#67（取引カレンダーの過去年）を先に埋めておく**（事前確認 2.）。#12 の 5.（移行の検証）は #4 の前に済んでいること（2026-10-14 オーナー判断: 方式は in-place の UPDATE、元の値は `price_time_raw`、印は `parser_version`、一意に決まらない行と休業日の取得の行は元のまま、時期は #12 の次の週末・#67 の後、クエリ量上限 500GiB）。
+
+### 変数
+
+「Terraform」の「共通の変数」の `P`、「新しい取り込み（ingest）」の `L`、「過去データの移行（#12）」の `IMP`・`E`・`S0`・`C0`・`W`・`q` に加えて:
+
+```sh
+FIX='2026-10-12 03:25:00+00'   # #2 の修正後の旧系の最初のスナップショット（事前確認 1. で確かめる）
+render4() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" "sql/price_time_fix/$1.sql"; }
+# fix.sql: 範囲 [$1, $2)、モード $3（dryrun / apply）
+fx() { local s=$1 e=$2 m=$3; shift 3; render4 fix | q --location=$L --format=json \
+  --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" --parameter="fixed_at:TIMESTAMP:$FIX" \
+  --parameter="mode:STRING:$m" --parameter="require_calendar:BOOL:true" "$@"; }
+vf() { local s=$1 e=$2; shift 2; render4 verify | q --location=$L --format=json \
+  --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" --parameter="fixed_at:TIMESTAMP:$FIX" "$@"; }
+# fix.sql の結果（.[-1]）の列の合計
+sum4() { jq "[.[-1][] | .$1 | tonumber] | add // 0" "$2"; }
+```
+
+`S0`（#12 の範囲の始まり）は `2018-10-01 00:00:00+00` のまま使う（旧系の最初のパーティションは 2018-10-19）。
+
+### 事前確認
+
+1. `FIX`（旧系の spot の `price_time` が日曜 → 金曜の日付に変わる境目。03:24 UTC まで `2026-10-11 15:45`、03:25 から `2026-10-09 15:45`）:
+
+   ```sh
+   q --location=US --format=pretty '
+   SELECT created_at, price_time FROM optionchan.spot_price
+   WHERE created_at BETWEEN "2026-10-12 03:15:00" AND "2026-10-12 03:35:00" ORDER BY created_at'
+   ```
+
+2. 取引カレンダーが十分前の年からあること（#67）。`fix.sql` は範囲の始まりの 131 日前（文脈の 100 日 + 候補の 31 日）を含む年の 1/1 から、範囲の終わりの年まで、カレンダーの版が始まっていることと、各年に年始の休業日（1/1〜1/3 の平日。版の行は平日だけなので 1/1 が土日の年は 1/2・1/3 の行）があること（年が欠けた版でないこと）を確かめ、満たさなければ `trading calendar ...` で止まる。最初の範囲は `S0`（2018-10-01）から流すので、必要なのは 2018-01-01 から（#67 は 2018-01-01 から埋めるので足りる）:
+
+   ```sh
+   q --location=$L --format=csv '
+   SELECT MIN(calendar_date),
+     COUNT(DISTINCT IF(EXTRACT(MONTH FROM calendar_date) = 1 AND EXTRACT(DAY FROM calendar_date) <= 3, EXTRACT(YEAR FROM calendar_date), NULL)) AS years
+   FROM optionchan_tokyo.trading_calendar_latest'   # MIN が 2018-01-01 以前、years が 2018〜2027 年の 10 以上
+   ```
+
+   無ければ始めない（#67 を先に済ませる）。`require_calendar = false`（休業日を土日だけで判定）は使わない。
+
+3. 一致率（新系の並行稼働のデータ。最初の 1 日は文脈として除く）:
+
+   ```sh
+   # start_at は新系の稼働（C0）から 1 日余り後（それより前の行は前の表示が無く series_start になるので、文脈にだけ使う）
+   render4 accuracy | q --location=$L --format=json --maximum_bytes_billed=10737418240 \
+     --parameter="ctx_start:TIMESTAMP:$C0" --parameter="start_at:TIMESTAMP:2026-10-14 06:00:00+00" \
+     --parameter="end_at:TIMESTAMP:$E" > $W/fix4-accuracy.json
+   jq -c '.[-1][]' $W/fix4-accuracy.json
+   jq '[.[-1][] | select(.basis == "determined")] | {n: (map(.n | tonumber) | add), ok: (map(.ok | tonumber) | add)}' $W/fix4-accuracy.json
+   jq '[.[-1][]] | {n: (map(.n | tonumber) | add), ok: (map(.ok | tonumber) | add)}' $W/fix4-accuracy.json
+   ```
+
+   #4 の AC（`determined` の一致率 99.9% 以上、全体 99% 以上）を満たさなければ止める。
+
+4. 補正前の基準値と内訳（全期間。書き込まない）:
+
+   ```sh
+   vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 > $W/fix4-verify-before.json
+   jq -c '.[-1][] | {tbl, legacy_rows, unmarked_rows, out_of_scope_rows, new_rows}' $W/fix4-verify-before.json
+   # legacy_rows = unmarked_rows（未補正）、out_of_scope_rows = 0
+   fx "$S0" "$FIX" dryrun --maximum_bytes_billed=107374182400 > $W/fix4-dryrun.json
+   jq -c '.[-1][] | {tbl, basis, candidate_shift_days, rows_total, rows_pending, rows_kept}' $W/fix4-dryrun.json
+   ```
+
+   - `rows_pending`（直す行）+ `rows_kept`（元のままの行）の合計 = `verify` の `unmarked_rows` の合計
+   - `basis` ごとの `rows_kept`、`rows_pending_changed`（日付が変わる行）を #4 に記録する（件数だけ）。`gap`・`series_start`・`off_session`・`no_session` の割合が上の標本（合わせて数 %）から大きく外れたら止めて調べる
+
+5. 書き込む前に東京の 3 表のテーブルスナップショットを取る（期限 14 日。UPDATE で書き換えたパーティションの分だけ保存料がかかる。物理 約 5GB）。#12 の一時データセット `$IMP` が残っていればそこに、無ければ同じコマンドで作る:
+
+   ```sh
+   bq show $P:$IMP >/dev/null 2>&1 || bq mk --dataset --location=$L --storage_billing_model=PHYSICAL --max_time_travel_hours=48 \
+     --default_table_expiration=1209600 --description='#12・#4 の一時データセット（期限で消える）' $P:$IMP
+   for t in spot_price future_price option_price; do
+     bq cp --snapshot --no_clobber --expiration=1209600 $P:optionchan_tokyo.$t $P:$IMP.fix4_$t
+   done
+   ```
+
+### 1. クエリ量上限を一時的に上げる
+
+全期間で 約 400GiB（下の見積もり）。1 年分の `apply` でも `option_price` の書き換え（その年の全列）と推定の読み込みで 20〜35GiB になり、32GiB/日を超える年がある。「BigQuery のクエリ量上限」の設定コマンドで `--value=512000`（500GiB）にする。その日の使用量（「BigQuery のクエリ量上限」の「今日のスキャン量」のクエリ。`region-us` と `region-asia-northeast1` の両方）が上限の 9 割を超えたら、次のリセットまで新しい年を始めない。作業の後に 4. で戻す。
+
+### 2. 補正
+
+年ごとに「dryrun（書く予定の行数）→ apply（書いた行数）→ 突き合わせ」の順に流す。最初の年は `S0`（2018-10-01）から始める（2018-01-01 から始めると、文脈とカレンダーの検査が 2017 年に掛かって止まる）。2018 年を流したら、同じ範囲で `dryrun` と `verify` をもう一度流して確かめる:
+
+```sh
+y=2018; s=$S0; e='2019-01-01 00:00:00+00'
+fx "$s" "$e" dryrun --maximum_bytes_billed=21474836480 > $W/fix4-plan-$y.json
+fx "$s" "$e" apply --maximum_bytes_billed=53687091200 > $W/fix4-apply-$y.json
+echo "plan=$(sum4 rows_pending $W/fix4-plan-$y.json) applied=$(jq '.[-1][0] | [.updated_spot, .updated_future, .updated_option | tonumber] | add' $W/fix4-apply-$y.json)"   # 同じ
+fx "$s" "$e" dryrun --maximum_bytes_billed=21474836480 > $W/fix4-again-$y.json
+echo "pending=$(sum4 rows_pending $W/fix4-again-$y.json) mismatch=$(sum4 rows_mismatch $W/fix4-again-$y.json)"   # 0 0
+vf "$s" "$e" --maximum_bytes_billed=21474836480 | jq -c '.[-1][]'   # 下の 3. の 0 になる項目が 0
+```
+
+よければ残りの年を流す（1 本の DML で変えられるパーティションは 4,000 まで。1 年は 約 300）:
+
+```sh
+for y in $(seq 2019 2026); do
+  s="$y-01-01 00:00:00+00"; e="$((y + 1))-01-01 00:00:00+00"; [[ "$e" > "$FIX" ]] && e=$FIX
+  fx "$s" "$e" dryrun --maximum_bytes_billed=53687091200 > $W/fix4-plan-$y.json || { echo "failed plan: $y"; break; }
+  fx "$s" "$e" apply --maximum_bytes_billed=107374182400 > $W/fix4-apply-$y.json || { echo "failed apply: $y"; break; }
+  plan=$(sum4 rows_pending $W/fix4-plan-$y.json)
+  applied=$(jq '.[-1][0] | [.updated_spot, .updated_future, .updated_option | tonumber] | add' $W/fix4-apply-$y.json)
+  echo "$y plan=$plan applied=$applied"
+  [ "$plan" = "$applied" ] || { echo "mismatch: $y"; break; }
+done
+```
+
+- 1 年 数分〜十数分の見込み（未計測。推定はウィンドウ関数と一時関数で、スキャン量より計算が重い）
+- 失敗したら原因（クォータ・`price_time_fix: ...` の `ERROR()`）を直して**同じ年から**流し直す。3 表の UPDATE はそれぞれ 1 文で全部書くか何も書かないかなので、途中の表から再開しても重複・二重のずらしは起きない（推定は `price_time_raw` の元の値から計算し、一意に決まる未補正の行だけを書く）。流し直した年は `plan` が残りの行数になり、`applied` と同じになる
+- `price_time_fix: N rows corrected by another version`: 別の版（`legacy-fix4-*`）の補正が残っている。`rollback.sql` で戻してから流す
+- 年の境目を跨ぐ約定は、範囲の前 100 日を文脈として読むので、前の年と同じ値になる（`dryrun` の `rows_mismatch` で確かめられる）
+
+### 3. 補正の検証
+
+```sh
+vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 > $W/fix4-verify-after.json
+jq -c '.[-1][] | del(.legacy_rows)' $W/fix4-verify-after.json
+```
+
+- 0 になる項目: `out_of_scope_rows`・`bad_raw_rows`・`future_rows`・`sunday_changed_rows`・`off_calendar_rows`（動かした行の新しい日時がカレンダー上で立会中）・`spot_closed_rows`（補正した spot に東証の休業日・土日の日付が無い）・`shift_out_of_range_rows`（ずらした日数が −1〜31 日）
+- `unmarked_rows`（元のままの行）の合計 = 4. の内訳の `rows_kept` の合計
+- `new_rows` が補正前（`fix4-verify-before.json`）と同じ（新系の行に触れていない）
+- `shifted_rows` の合計 = 4. の `rows_pending_changed` の合計
+- `sunday_kept_rows` は元のままの行のうち日曜の分
+- 全期間の `dryrun` をもう一度流すなら `rows_pending`・`rows_mismatch` の合計が 0（約 50GiB。年ごとに済ませていれば省いてよい）
+
+結果は件数・要約だけを #4 にコメントする（`verify` の 0 の項目、`shifted_rows`、basis ごとの `rows_kept`、一致率、スキャン量）。JSON の全文は貼らない。
+
+### 4. 後片付け
+
+クエリ量上限を `--value=32768 --force` に戻す（「BigQuery のクエリ量上限」。その日のスキャン量が 32GiB を超えているときは太平洋時間の 0 時を過ぎてから）。テーブルスナップショット `fix4_*` は期限（14 日）で消える。様子を見て問題が無ければ、#12 の 6. と同じく `bq rm -r -f -d $P:$IMP` で早めに消してよい。
+
+### 切り戻し
+
+`price_time_raw` に元の値（`'%F %T'`）を残しているので、いつでも補正の前の値に正確に戻せる（年の範囲だけ戻すときは範囲をその年にする）。全期間を戻すと全列の書き換えで 約 120GiB のスキャンになり 32GiB/日を超えるので、先に「1. クエリ量上限を一時的に上げる」と同じく上限を上げ（年の範囲だけなら 1 年 20〜35GiB）、終わったら戻す。同じ土曜午後〜日曜に行う:
+
+```sh
+render4 rollback | q --location=$L --format=json --maximum_bytes_billed=214748364800 \
+  --parameter="start_at:TIMESTAMP:$S0" --parameter="end_at:TIMESTAMP:$FIX" | jq -c '.[-1][0]'
+vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 | jq -c '.[-1][] | {tbl, legacy_rows, unmarked_rows, shifted_rows}'
+# unmarked_rows = legacy_rows、shifted_rows = 0（移行の直後の状態）
+```
+
+- `rollback.sql` は補正の印（`parser_version = 'legacy-fix4-1'`）のある旧系の行だけを戻し、`price_time_raw`・`parser_version` を NULL に戻す
+- 最後の手段: 2. の前のテーブルスナップショット（14 日）・タイムトラベル（7 日）。スナップショットからの復元（`bq cp --restore`）は補正の後に新系が書いた行も消すので、#12 の「切り戻し」と同じく新系を止めて再処理で補う
+- 推定の規則を変えてやり直すときは、`rollback.sql` で戻してから `fix.sql` の版（`fix_version`、4 つの SQL で同じ値）を上げて流す（別の版の行が残っていると `fix.sql` は止まる）
+
+### 所要時間・コストの見積もり
+
+`option_price` の旧系の行は 約 6.5 億行・論理 約 73GiB（旧系の US と同じ）+ 東京で足した `ingest_run_id`（約 15GiB）。補正で `price_time_raw`・`parser_version` が 最大 約 1.6 億行（`price_time` のある行）に入り 約 5GiB 増える。
+
+| 項目 | 見込み |
+|---|---|
+| 事前確認 | 一致率 数 GiB 以下、`verify` 約 30GiB、`dryrun` 約 45GiB |
+| 補正（年ごと 9 回の合計） | `dryrun` 約 55GiB（7 列 + `ingest_run_id` + 範囲の前 100 日）+ `apply` 約 190GiB（推定の読み込み 約 55GiB + UPDATE 約 130GiB。DML はその年のパーティションの全列 約 88GiB + 参照する列 + 推定の一時テーブル） |
+| 2018 年の確かめ（`dryrun`・`verify`） | 数 GiB |
+| 補正の検証 | `verify` 約 30GiB（全期間の `dryrun` もするなら +約 50GiB） |
+| 合計 | 約 400GiB（月 1TiB の無料枠（他プロジェクトと共有）に収まれば 0 円、超えた分は on-demand の単価（US は $6.25/TiB。東京の単価は実行前に料金表で確かめる）で 約 2〜3 ドル） |
+| 保存 | UPDATE で書き換えたパーティションの古い版がタイムトラベル（7 日）+ フェイルセーフ（7 日）の間 物理 約 5GB、スナップショット（14 日）も同程度。数円。補正後の表は 約 5GiB（論理）増える |
+| 所要時間 | 未計測。事前確認 30 分、補正 1〜2 時間、検証 30 分程度の見込み。土曜の午後〜日曜で終わる |
+
+実行後に `INFORMATION_SCHEMA.JOBS_BY_PROJECT`（`region-asia-northeast1`）でスキャン量の実績を見て #4 に記録する。
+
+### 他の仕組みとの関係
+
+- **#12 の検証**: `sql/legacy_import/verify.sql`・`fingerprint.sql` は旧系の `price_time` も比べるので、#4 の後は `row_mismatches` が出る。#12 の 5. は #4 の前に済ませる
+- **品質チェック（`quality_daily`）**: 定期の窓は #2 の修正後なので影響なし。過去の日を手で再実行したときの `sunday`・`price_time_*` の違反は、#4 の後は元のままの行（`determined` 以外）だけになる
+- **新旧の突き合わせ・1 時間足**: `legacy_compare_daily` は `legacy-` の行を除き、1 時間足（#49）は `price_time` を使わないので影響なし
+- **#14 で補う E 以降の取りこぼし**: #2 の修正後の旧系の行なので補正しない（`fix.sql` は `FIX` より前だけ）
+- **ビューアー**: スマイルカーブの取引時刻（`price_time`）が直った日付で出る（元のままの行は従来どおり）
 
 ## 1 時間足（#49）
 
