@@ -44,6 +44,8 @@ PARAMS = {
     "smile": {"start_at": NOW, "end_at": NOW},
     "atm_iv_meta": {"start_at": NOW, "end_at": NOW},
     "atm_iv": atm_iv_params(NOW, None, 7, 0),
+    "atm_iv_minute": {"start_at": NOW, "end_at": NOW, "today": date(2026, 10, 13), "n": 0},
+    "trading_holidays": {"start_date": date(2026, 10, 1), "end_date": date(2026, 10, 28)},
 }
 
 

@@ -60,7 +60,8 @@ def test_vendor_files_used():
 
 def test_npm_versions_pinned_and_locked():
     deps = PACKAGE["dependencies"]
-    assert set(deps) == {"chart.js", "chartjs-chart-financial", "luxon", "chartjs-adapter-luxon"}
+    # chart.js は /smile、lightweight-charts は /atm_iv（#68）
+    assert set(deps) == {"chart.js", "lightweight-charts"}
     assert "devDependencies" not in PACKAGE
     for name, version in deps.items():
         assert re.fullmatch(r"\d+\.\d+\.\d+", version), (name, version)

@@ -1,6 +1,7 @@
-"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 2 つ（/smile_data /atm_iv_data）。
+"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 3 つ（/smile_data /atm_iv_data /atm_iv_bars）。
 
-URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
+/smile_data・/atm_iv_data の URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。/atm_iv_bars は /atm_iv の足の
+切り替え用（#68。CSV は /atm_iv_data と同じ列）。認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
 """
 
 from datetime import UTC, datetime
@@ -85,6 +86,17 @@ def create_app(runner=None, clock=None) -> Flask:
             return api.atm_iv_data(runner, clock(), d, n)
 
         return csv_response("atm_iv_data", produce)
+
+    @app.get("/atm_iv_bars")
+    def atm_iv_bars():
+        def produce():
+            # 検証を先に（tf → d → n。不正なら BigQuery を呼ばない）
+            tf = api.parse_tf(request.args.get("tf"))
+            d = api.parse_bars_d(request.args.get("d"), tf)
+            n = api.parse_n(request.args.get("n"))
+            return api.atm_iv_bars(runner, clock(), tf, d, n)
+
+        return csv_response("atm_iv_bars", produce)
 
     return app
 

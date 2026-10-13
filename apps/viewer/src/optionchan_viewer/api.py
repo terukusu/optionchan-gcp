@@ -2,14 +2,14 @@
 
 runner(name, params) は sql/<name>.sql をパラメータ付きで実行して行（dict）のリストを返す
 （bq.BigQueryRunner。テストでは偽物）。期間はすべて now（サーバーの現在時刻、UTC）から固定の上限で決める
-（リクエストの値で広がるのは /atm_iv_data の d だけで、上限 100 日）。
+（リクエストの値で広がるのは /atm_iv_data・/atm_iv_bars の d だけで、上限は足ごとに settings.BARS_D）。
 """
 
 import re
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import csvfmt
+from . import bars, csvfmt
 from . import settings as st
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -32,6 +32,27 @@ def parse_d(raw: str | None) -> int:
         raise BadRequest("d")
     d = int(raw)
     if not st.D_MIN <= d <= st.D_MAX:
+        raise BadRequest("d")
+    return d
+
+
+def parse_tf(raw: str | None) -> str:
+    if raw is None:
+        return st.TF_DEFAULT
+    # 固定の集合との完全一致（大文字・前後の空白・改行も受け付けない）
+    if raw not in st.TIMEFRAMES:
+        raise BadRequest("tf")
+    return raw
+
+
+def parse_bars_d(raw: str | None, tf: str) -> int:
+    default, low, high = st.BARS_D[tf]
+    if raw is None:
+        return default
+    if not _D_RE.fullmatch(raw):
+        raise BadRequest("d")
+    d = int(raw)
+    if not low <= d <= high:
         raise BadRequest("d")
     return d
 
@@ -100,3 +121,48 @@ def atm_iv_data(runner, now: datetime, d: int, n: int) -> str:
     [meta] = runner("atm_iv_meta", {"start_at": now - timedelta(days=st.SEARCH_DAYS), "end_at": now})
     rows = runner("atm_iv", atm_iv_params(now, meta["last_started_at"], d, n))
     return csvfmt.atm_iv_csv(rows)
+
+
+def atm_iv_bars(runner, now: datetime, tf: str, d: int, n: int) -> str:
+    """/atm_iv_bars（#68）: 足 tf の ATM IV の OHLC（/atm_iv_data と同じ CSV。値の無い足は除く）"""
+    now = _utc(now)
+    if st.TIMEFRAMES[tf] < 3600:
+        rows = _minute_bars(runner, now, d, n)
+        if tf != "1m":
+            rows = bars.resample(rows, st.TIMEFRAMES[tf])
+    elif tf == "1h":
+        rows = bars.drop_empty(_hourly(runner, now, d, n)[0])
+    else:
+        rows = _daily_bars(runner, now, d, n)
+    return csvfmt.atm_iv_csv(rows)
+
+
+def _minute_bars(runner, now: datetime, d: int, n: int) -> list[dict]:
+    # 窓は最新のスナップショットの d 日前の UTC の 0 時から（now 基準だと週末・朝に開いたとき行が無い）
+    [row] = runner("latest_snapshot", {"start_at": now - timedelta(days=st.SEARCH_DAYS), "end_at": now})
+    snapshot_at = row["snapshot_at"]
+    if snapshot_at is None:
+        return []
+    params = {"start_at": utc_day(snapshot_at - timedelta(days=d)), "end_at": now, "today": jst_date(now), "n": n}
+    return bars.drop_empty(runner("atm_iv_minute", params))
+
+
+def _hourly(runner, now: datetime, d: int, n: int) -> tuple[list[dict], dict]:
+    """/atm_iv_data と同じクエリ・パラメータの 1 時間足（値の無い足を含む）と、クエリ 2 のパラメータ"""
+    [meta] = runner("atm_iv_meta", {"start_at": now - timedelta(days=st.SEARCH_DAYS), "end_at": now})
+    params = atm_iv_params(now, meta["last_started_at"], d, n)
+    return runner("atm_iv", params), params
+
+
+def _daily_bars(runner, now: datetime, d: int, n: int) -> list[dict]:
+    # d + 1 日分の 1 時間足を読み、先頭（days_start より前の夜間）が欠けた取引日を捨てる
+    # （trading_day は時刻について単調なので、それより後の取引日は全部読んだ範囲に入る）
+    rows, params = _hourly(runner, now, d + 1, n)
+    days_start = params["days_start"]
+    holidays = runner("trading_holidays", {
+        "start_date": jst_date(days_start) - timedelta(days=1),
+        "end_date": jst_date(now) + timedelta(days=st.HOLIDAYS_AHEAD_DAYS),
+    })
+    holidays = frozenset(r["calendar_date"] for r in holidays)
+    after = bars.trading_day(days_start - timedelta(microseconds=1), holidays)
+    return bars.daily(rows, holidays, after)

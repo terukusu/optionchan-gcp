@@ -18,7 +18,7 @@ test "$found" -eq 0
 cdn=$(docker run --rm --entrypoint sh "$img" -c \
   "grep -rlE '<script[^>]*src=\"(https?:)?//' $pkg/templates || true" | wc -l)
 test "$cdn" -eq 0
-# 同梱したブラウザ用ライブラリ（package-lock.json から作ったもの）が 4 つあること
+# 同梱したブラウザ用ライブラリ（package-lock.json から作ったもの。chart.js・lightweight-charts）が 2 つあること
 n=$(docker run --rm --entrypoint sh "$img" -c "ls $pkg/static/vendor/*.js" | wc -l)
-test "$n" -eq 4
+test "$n" -eq 2
 echo "viewer のイメージの検査: OK"
