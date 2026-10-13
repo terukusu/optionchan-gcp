@@ -8,8 +8,9 @@ variable "alert_policy_ids" {
   default     = {}
 }
 
+# 作らないポリシー（旧系を止めた後の m1・m2。monitoring.tf の legacy_stopped）は取り込まない（import 先が無いと plan がエラーになる）
 import {
-  for_each = var.alert_policy_ids
+  for_each = { for k, v in var.alert_policy_ids : k => v if contains(keys(local.alert_policies), k) }
   to       = google_monitoring_alert_policy.this[each.key]
   id       = each.value
 }

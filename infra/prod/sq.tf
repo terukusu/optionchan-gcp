@@ -7,7 +7,8 @@
 #   legacy-compare 07:30 JST  東京  コピーと最新版を比べる → legacy_compare_daily。コピーの欠けは失敗、説明できない差分は下の切り替え（と日付の下限）で
 #   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price に MERGE（#49。旧系の insert_ohlc の置き換え）
 # 時刻を 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
-# legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ（#14 で消す）。品質チェックと 1 時間足は残す。
+# legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ。旧系の停止（#14）で legacy-* を無効にし（var.legacy_stopped）、
+# 旧系の削除（#24）で消す。品質チェックと 1 時間足は残す。
 locals {
   sa_sq = "sa-sq-dts@${var.project_id}.iam.gserviceaccount.com"
 
@@ -128,6 +129,7 @@ resource "google_bigquery_data_transfer_config" "legacy_stage" {
   data_source_id       = "scheduled_query"
   schedule             = "every day 22:02"
   service_account_name = local.sa_sq
+  disabled             = var.legacy_stopped
   params = {
     query = templatefile("${path.module}/../../sql/legacy/stage.sql", {
       project        = var.project_id
@@ -147,6 +149,7 @@ resource "google_bigquery_data_transfer_config" "legacy_copy" {
   destination_dataset_id = google_bigquery_dataset.legacy_copy.dataset_id
   schedule               = "every day 22:10"
   service_account_name   = local.sa_sq
+  disabled               = var.legacy_stopped
   params = {
     source_project_id           = var.project_id
     source_dataset_id           = google_bigquery_dataset.legacy_stage.dataset_id
@@ -163,6 +166,7 @@ resource "google_bigquery_data_transfer_config" "legacy_compare" {
   data_source_id       = "scheduled_query"
   schedule             = "every day 22:30"
   service_account_name = local.sa_sq
+  disabled             = var.legacy_stopped
   params = {
     query = templatefile("${path.module}/../../sql/legacy/compare.sql", {
       project             = var.project_id
