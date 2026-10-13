@@ -220,3 +220,26 @@ def test_stage_writes_only_stage_dataset():
     # 書くのは作業用データセットの 4 表だけ。旧データセット（legacy_dataset）は FROM で読むだけ
     assert writes == ['${project}.${stage_dataset}.' + t for t in ('spot_price', 'future_price', 'option_price', 'staged_window')]
     assert len(re.findall(r'FROM `\$\{project\}\.\$\{legacy_dataset\}\.(\w+)`', text)) == 3
+
+
+# ---- 取引カレンダーの最新版のビュー（#63） ----
+
+CALENDAR_SQL = os.path.join(ROOT, 'sql', 'calendar', 'trading_calendar_latest.sql')
+CALENDAR_TF = os.path.join(ROOT, 'infra', 'prod', 'calendar.tf')
+
+
+def test_calendar_view_read_by_terraform():
+    tf = read(CALENDAR_TF)
+    assert 'sql/calendar/trading_calendar_latest.sql' in tf
+    assert re.search(r'table_id\s*=\s*"trading_calendar_latest"', tf)
+    assert 'use_legacy_sql = false' in tf
+
+
+def test_calendar_view_picks_max_version_with_hash():
+    sql = body(read(CALENDAR_SQL))
+    assert 'optionchan_tokyo' not in sql and not re.search(r'optionchan-\d', sql)
+    for ref in re.findall(r'`([^`]+)`', sql):
+        assert ref == '${project}.${dataset}.trading_calendar', ref
+    # content_hash も返す（ingest が再計算して照合する）
+    assert re.search(r'^SELECT \*$', sql, re.M)
+    assert re.search(r'WHERE version_at = \(SELECT MAX\(version_at\) FROM `[^`]+`\)', sql)

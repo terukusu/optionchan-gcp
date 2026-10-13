@@ -112,6 +112,27 @@ STALE_NIGHT_MINUTES = 40
 CALENDAR_NOTICE_AT = (9, 0)
 CALENDAR_WARN_DAYS = 14
 
+# --- 取引カレンダーの自動取り込み（#63。calendar_sync.py、runbook「取引カレンダー（#63）」） ---
+# 出典: JPX「祝日取引」のページ（祝日取引実施日の表）と、検証用の内閣府「国民の祝日」CSV
+HOLIDAY_TRADING_URL = "https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html"
+HOLIDAYS_CSV_URL = "https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv"
+# 版を追記するテーブルと、最新版を返すビュー（optionchan_tokyo。列は schema/tokyo/trading_calendar.json）
+CALENDAR_TABLE = "trading_calendar"
+CALENDAR_VIEW = "trading_calendar_latest"
+# 毎日この JST の時:分のリクエスト（時間外。夜間の余裕 06:30 の後、DTS の 07:02 の前）で、通常の処理の後に
+# 同じ期限の残りで取り込む（Scheduler を足さない）。失敗しても応答は変えない
+CALENDAR_SYNC_AT = (6, 40)
+# JPX のページ・祝日 CSV の取得 1 回の上限（リトライなし。翌日か手動のジョブに任せる）
+CALENDAR_HTTP_TIMEOUT_SECONDS = 10
+# 最新版の読み込み（起動時と毎時 0 分）の上限。起動時はこの分だけ取り込みの期限を短くする
+CALENDAR_LOAD_TIMEOUT_SECONDS = 5
+# 起動時の読み込みに失敗した（一度も読めていない）とき、次のリクエストで読み直すまでの秒数（毎時 0 分を待たない）
+CALENDAR_RETRY_SECONDS = 300
+# 版の追記の上限
+CALENDAR_WRITE_TIMEOUT_SECONDS = 10
+# 手動のジョブ（calendar-sync）の期限
+CALENDAR_JOB_DEADLINE_SECONDS = 300
+
 
 @dataclass(frozen=True)
 class Settings:

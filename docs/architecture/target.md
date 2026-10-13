@@ -107,7 +107,7 @@ flowchart LR
 - **Cloud Run サービス 1 つ**（Python 3.13、最小インスタンス 0、**CPU 0.5**、メモリ 512MiB 程度）。1 vCPU 未満は第1世代実行環境・同時実行 1・リクエスト課金が条件で、0.5 vCPU ではメモリ上限が 1GiB 未満になる（[公式](https://docs.cloud.google.com/run/docs/configuring/services/cpu)）。0.5 未満にはしない。ジョブにしないのは、ジョブはインスタンスごとに最低 1 分課金で、毎分起動には向かないため
 - ingress は `INGRESS_TRAFFIC_INTERNAL_ONLY`（同一プロジェクトの Scheduler から `run.app` URL を呼ぶ場合は内部扱い）+ IAM 認証 + OIDC の audience 固定
 - **Cloud Scheduler は `* * * * *` の 1 ジョブだけ**（Scheduler の無料枠は請求先アカウントあたり 3 ジョブで、既に他で使い切っている）。リトライ 0、`attemptDeadline` と Cloud Run のリクエストタイムアウトを 50 秒前後に揃える。`X-CloudScheduler-ScheduleTime` はリトライ間で一定なので、リトライ 0 でも念のため重複排除のキーに使える
-- **取引時間・休場日の判定はコード側 1 か所**（JPX の公表をもとにした設定ファイル。年 2 回更新、runbook に手順）。時間外は 204 で即返す。祝日取引から除外される日がある（例: 2026-11-23、12/31、1/1、1/2）。実測ではページ時刻のデータ範囲は 08:45〜15:46 / 17:00〜06:01 で、実時刻はその約 15 分後
+- **取引時間・休場日の判定はコード側 1 か所**（取引時間は設定ファイル。休業日は JPX「祝日取引」の表から毎日自動で取り込んだ BigQuery の版で、読めなければ設定ファイルの値。#63、3.2「取引カレンダー（#63）」）。時間外は 204 で即返す。祝日取引から除外される日がある（例: 2026-11-23、12/31、1/1、1/2）。実測ではページ時刻のデータ範囲は 08:45〜15:46 / 17:00〜06:01 で、実時刻はその約 15 分後
 - JPX への HTTP は接続・読み取りとも**タイムアウト 10 秒程度**（現行の `requests.get` はタイムアウト無し）
 
 **スナップショットの識別子と保存条件**
@@ -162,6 +162,14 @@ flowchart LR
 - **最新版の選択（#34）**: テーブル関数 `latest_runs(start_at, end_at)` と `spot_price_latest` / `future_price_latest` / `option_price_latest`（同じ引数、`[start_at, end_at)`）。`ingest_runs` にある実行だけを対象に、`snapshot_at` ごとに `finished_at` が最も新しい 1 件（同時刻なら `ingest_run_id` の大きい方）を選び、その `ingest_run_id` の行だけを返す（完了記録の無い残骸は内部結合で落ちる）。ビューでなくテーブル関数にするのは、期間引数を必須にして `option_price` の `require_partition_filter` と `ingest_runs` の全件スキャンを避けるため。本文は `sql/latest/`（Terraform の `google_bigquery_routine` が読み、プロジェクト・データセット名を入れる）。生テーブルを直接数えない（runbook「最新版の読み方」）
 - **1 時間足**（現 `insert_ohlc`）は定期クエリにする。現行は ATM かつ type=2、UTC 基準で前日 1 日分、`CURRENT_TIMESTAMP` 基準、単純 INSERT で、実測でキー重複（`atm_iv` 84 行、`atm_option_price` 42 行）がある。新方式は `@run_time` 基準、`(last_trading_day, time_frame, started_at)` で MERGE、`SAFE_OFFSET` を使い、再処理した日は再計算する。**過去 30 日分で現行と同値**を確認してから切り替える
   - 実装（#49）: スケジュールされたクエリ `atm-hourly`（asia-northeast1、毎日 07:40 JST、実行 SA `sa-sq-dts`。#40 の 4 本の後）。窓は品質チェックと同じ `[D-1 07:00, D 07:00) JST`、`option_price_latest` の ATM の put から限月 × 1 時間（UTC の正時 = JST の正時）の OHLC を作り、`optionchan_tokyo.atm_iv` / `atm_option_price` / `atm_target_price`（列は旧系と同じ、パーティションは月、クラスタは `last_trading_day`）へ MERGE する（窓の中を置き換える。ATM の行が無い窓は何もしない。3 表は 1 トランザクション）。意味は旧系と同じで、`created_at` が同じ行の順だけ `target_price` で決める。再処理・回収・移行で最新版が変わった日は DTS の手動実行で作り直す。2026-09-12〜10-12 で旧 `option_price` に同じ計算を当てると旧 3 表と一致し、違いは UTC 23 時台（旧系の集計の時点で未着だった 08:45〜08:59 JST の行）だけ。過去分は #12 の一時データセットから、新系の最初の窓より前の旧 3 表の行を移す（同じ中身の重複は 1 行、中身の違う重複のキーは移さずに再計算）。本文は `sql/ohlc/`、手順は runbook「1 時間足（#49）」
+- **取引カレンダー（#63）**: 休業日の一覧を JPX「祝日取引」の祝日取引実施日の表から取り込み、検証した版をテーブル `trading_calendar` に追記する（追記のみ、パーティション無し、削除保護）。最新版はビュー `trading_calendar_latest`。ingest のほか、別リポジトリのシミュレーター等が読む**契約**:
+  - 列（正は `schema/tokyo/trading_calendar.json`。変えるときは読み手と合意し、追加は NULLABLE で末尾に。改名・削除・型の変更はしない）: `version_at` TIMESTAMP（版の識別子）、`calendar_date` DATE、`is_trading_day` BOOLEAN、`status` STRING（`confirmed` / `planned`）、`day_type` STRING（`national_holiday` / `year_end`）、`name` STRING、`note` STRING（NULLABLE）、`source` STRING（`jpx_table` / `rule`）、`covered_until` DATE・`listed_until` DATE・`accepted` STRING（`auto` / `override`）（版の値で全行同じ）、`content_hash` STRING（版の値。版の内容の SHA-256。読み手は行の欠け・重複の検知に使える。ingest は再計算して一致しなければ使わない）
+  - 1 行は「業務規程上の休業日に当たる平日 1 日」（国民の祝日・休日と年末年始の 12/31・1/1・1/2・1/3）。土日の行は無い。1 版の中で日付は一意。表に載らない平日の 1/1 は規則で足す（`source = rule`）。表から消えた過去年の行は前の版から引き継ぐ
+  - 最新版の選び方: `version_at` が最大の版（`SELECT * FROM optionchan_tokyo.trading_calendar_latest`）。生テーブルを読むときも `version_at` で 1 版に絞る
+  - **掲載範囲**は版の `MIN(calendar_date)` の年の 1/1 〜 `listed_until`。その外の平日は未知（休業日が載っていない）。開始は取り込み開始時の表の最初の年（2026 年）で、過去年の埋め戻しは別 Issue
+  - **取引日** = 土日と `is_trading_day = false` の日を除いた日（掲載範囲の外の平日は未知。ingest は取引日として扱う）。`covered_until` より後は予定（変わりうる）
+  - **SQ 日・取引最終日の繰り上げ**には、`is_trading_day` に関係なく**全行**を休業日として使う（祝日取引の実施日も業務規程上は休業日。例: 2023-08 限は SQ 日 8/11（山の日）が 8/10 に繰り上がり、取引最終日は 8/9）。ingest は限月・取引最終日をページから読むので使わない
+  - 権限: `optionchan_tokyo` の `bigquery.dataViewer` とプロジェクトの `bigquery.jobUser`。公開 URL は作らない
 - 表示用の集計（スマイルカーブ・ATM 推移）は **ビュー / テーブル関数**（上記の最新版選択のテーブル関数の上に作る）
 - 古いパーティションは長期保存料金に任せ、削除しない。タイムトラベルは既定の 7 日
 
@@ -258,7 +266,7 @@ infra/
 
 ### 4.1 runbook（`docs/runbook.md`、実装時に作成）
 
-アラート（M1・M2）ごとの一次対応、Scheduler の停止 / 再開、取引カレンダーの更新（年 2 回）、期間指定の再処理、JPX の形式変更時・BigQuery 障害時の対応、tfstate のロック解除・復旧、IAP OAuth クライアントの設定。
+アラート（M1・M2）ごとの一次対応、Scheduler の停止 / 再開、取引カレンダーの取り込みの失敗・拒否の対応（#63）、期間指定の再処理、JPX の形式変更時・BigQuery 障害時の対応、tfstate のロック解除・復旧、IAP OAuth クライアントの設定。
 
 「コスト」（予算・クエリ量上限の確認と変更、超過時の一次対応）は #21 で作成済み。「監視アラート」（現行構成の M1・M2 の作成・試験発報・一次対応）は #9 で作成済み。新系の M1・M2 は #11 以降で書き換える。
 
@@ -273,7 +281,7 @@ optionchan-gcp/
 ├── apps/
 │   ├── ingest/       # 取り込み (Cloud Run サービス + 再処理ジョブ)。jpx_loader の後継
 │   └── viewer/       # UI + API (Cloud Run サービス)
-├── config/           # 取引カレンダー（取引時間・休場日・祝日取引の除外日）
+├── config/           # 取引カレンダー（取引時間と、休業日の予備。休業日は BigQuery の版、#63）
 ├── sql/              # ビュー・定期クエリ・品質チェック・移行 SQL
 ├── infra/            # Terraform（bootstrap / prod）
 ├── tests/

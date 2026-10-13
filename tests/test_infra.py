@@ -38,6 +38,7 @@ def test_cloud_run_exists():
     names = [name for name, _ in RUN_BLOCKS]
     assert any('google_cloud_run_v2_service.ingest' in name for name in names)
     assert any('google_cloud_run_v2_job.reprocess' in name for name in names)
+    assert any('google_cloud_run_v2_job.calendar_sync' in name for name in names)  # #63
     assert any('google_cloud_run_v2_service.viewer' in name for name in names)
 
 
@@ -194,3 +195,23 @@ def test_legacy_stopped_removes_only_legacy_alerts():
     # 取り込みの import は作るポリシーだけに絞る（消したポリシーの ID が secret に残っていても plan が通る）
     imports = dict(all_tf())['prod/imports.tf']
     assert 'if contains(keys(local.alert_policies), k)' in imports
+
+
+# ---- 取引カレンダー（#63） ----
+
+
+def test_trading_calendar_resources():
+    tf = dict(all_tf())['prod/calendar.tf']
+    table = re.search(r'resource "google_bigquery_table" "trading_calendar" \{(.*?)\n\}', tf, re.S).group(1)
+    # 版の履歴なので削除は二重に止める。列の正は schema/tokyo/trading_calendar.json
+    assert 'deletion_protection = true' in table
+    assert 'prevent_destroy = true' in table
+    assert 'schema/tokyo/trading_calendar.json' in table
+    assert 'time_partitioning' not in table
+    job = re.search(r'resource "google_cloud_run_v2_job" "calendar_sync" \{(.*?)\n\}', tf, re.S).group(1)
+    assert 'name                = "calendar-sync"' in job
+    assert 'command = ["python", "-m", "optionchan_ingest.calendar_sync"]' in job
+    assert 'service_account = local.sa_ingest' in job
+    assert 'max_retries     = 0' in job
+    # 定期起動は ingest サービスの 06:40 のリクエスト（Scheduler を足さない）
+    assert 'google_cloud_scheduler_job' not in tf

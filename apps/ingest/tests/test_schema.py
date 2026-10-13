@@ -57,3 +57,30 @@ def test_tables_settings():
         for c in spec["clustering"]:
             assert c in names, (table, c)
     assert settings["tables"]["option_price"]["require_partition_filter"] is True
+
+
+# 取引カレンダー（#63）。列・型・モードはオーナー承認済みの契約（simulator の契約テストもこのファイルを照合する）。
+# 変えるときは読み手と合意してから（列の追加は NULLABLE で末尾に。改名・削除・型の変更はしない）
+TRADING_CALENDAR = [
+    ("version_at", "TIMESTAMP", "REQUIRED"),
+    ("calendar_date", "DATE", "REQUIRED"),
+    ("is_trading_day", "BOOLEAN", "REQUIRED"),
+    ("status", "STRING", "REQUIRED"),
+    ("day_type", "STRING", "REQUIRED"),
+    ("name", "STRING", "REQUIRED"),
+    ("note", "STRING", "NULLABLE"),
+    ("source", "STRING", "REQUIRED"),
+    ("covered_until", "DATE", "REQUIRED"),
+    ("listed_until", "DATE", "REQUIRED"),
+    ("content_hash", "STRING", "REQUIRED"),
+    ("accepted", "STRING", "REQUIRED"),
+]
+
+
+def test_trading_calendar_contract():
+    schema = load(NEW / "trading_calendar.json")
+    assert [(c["name"], c["type"], c["mode"]) for c in schema] == TRADING_CALENDAR
+    for c in schema:
+        assert c["description"], c["name"]
+    # 取り込みのテーブルではない（Terraform は infra/prod/calendar.tf で作る）
+    assert "trading_calendar" not in load(NEW / "tables.json")["tables"]

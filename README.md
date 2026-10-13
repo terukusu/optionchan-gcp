@@ -30,7 +30,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * Chart.js 等のブラウザ用ライブラリは `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
 
 * config
-  * 取引カレンダー（`trading_calendar.toml`）。更新手順は docs/runbook.md の「取引カレンダーの更新」
+  * 取引カレンダー（`trading_calendar.toml`。取引時間と、休業日の予備）。休業日は JPX から自動で取り込む（docs/runbook.md の「取引カレンダー（#63）」）
 
 * schema
   * BigQueryのスキーマ。`schema/tokyo/` は新しい取り込みのテーブル（東京）の定義と設定（`tables.json`）と、日次チェックの結果のテーブル（`quality_daily`・`legacy_compare_daily`、#40）。`schema/ohlc/atm_ohlc.json` は東京の 1 時間足の 3 表（#49）の列（旧系の `atm_*.json` と同じ。取り込みのイメージに入る `schema/tokyo/` には置かない）

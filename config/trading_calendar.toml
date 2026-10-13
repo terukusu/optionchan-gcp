@@ -1,4 +1,8 @@
-# 日経225オプションの取引カレンダー（apps/ingest が読む。更新手順は docs/runbook.md の「取引カレンダーの更新」）
+# 日経225オプションの取引カレンダー（apps/ingest が読む。docs/runbook.md の「取引カレンダー（#63）」）
+#
+# 休業日（closed_dates・covered_until）は JPX から自動で取り込んだ BigQuery の版（optionchan_tokyo.trading_calendar_latest）を
+# ingest が使う。ここの値は BigQuery を読めないときの予備と、別リポジトリのシミュレーターの同期用（廃止の条件は runbook）。
+# 最新版から生成: python -m optionchan_ingest.calendar_sync --print-toml
 #
 # 出典: 大阪取引所「祝日取引」の祝日取引実施日の表
 #   https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html （2026-10-12 に確認）
