@@ -21,6 +21,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 * apps/ingest
   * 新しい取り込み（Cloud Run サービス、Python 3.13・uv。#11 で旧系と並行稼働させる）。JPX のページを毎分取得し、生 HTML（2 ページを gzip した JSON）を GCS に、行を BigQuery（`optionchan_tokyo`、東京、Storage Write API）に書く。Cloud Run `ingest`（asia-northeast1）を Scheduler `ingest` が毎分起動する。デプロイは deploy workflow（イメージのビルド・push も含む、#33）。確認・停止・切り戻しは docs/runbook.md の「新しい取り込み（ingest）」
   * ローカルの動作確認は `INGEST_DRY_RUN=1`（GCS・BigQuery に書かず、件数と proto のサイズだけをログに出す）
+  * 取引時間中は分の頭から 8 秒まで待ってから JPX を取得する（#38。ローカルでも実時刻で待つ。`INGEST_FETCH_AT_SECOND=0` で待たない）
 
 * config
   * 取引カレンダー（`trading_calendar.toml`）。更新手順は docs/runbook.md の「取引カレンダーの更新」

@@ -71,9 +71,7 @@ resource "google_cloud_scheduler_job" "ingest" {
   attempt_deadline = "50s"
   paused           = var.ingest_paused
 
-  retry_config {
-    retry_count = 0
-  }
+  # リトライ 0 は API の既定値。retry_config を書くと API が空で返して毎回差分になるので書かない（#38）
 
   http_target {
     http_method = "POST"

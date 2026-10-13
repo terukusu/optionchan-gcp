@@ -1,8 +1,9 @@
 """Cloud Run サービスのエントリポイント（Cloud Scheduler から毎分 POST /）。
 
 処理（docs/architecture/target.md 3.1）:
-1. 取引カレンダーで時間外なら 204（JPX・GCS・BigQuery に触らない。クライアントも作らない）
-2. 1 限月ページを取得して更新時刻を得る。鮮度切れなら ERROR stale。生 HTML が既にあれば skipped_no_update
+1. 取引カレンダーで時間外なら 204（JPX・GCS・BigQuery に触らない。クライアントも作らない。待たない）
+2. 分の頭から settings.FETCH_AT_SECOND 秒まで待ってから（#38）、1 限月ページを取得して更新時刻を得る。
+   鮮度切れなら ERROR stale。生 HTML が既にあれば skipped_no_update
 3. 2 限月ページを取得し、2 ページを封筒にして ifGenerationMatch=0 で作成（412 なら skipped_locked）
 4. 行を組み立てて構造を検査（違反は parse_failed。生 HTML は残し ingest_runs は書かない）
 5. spot_price → future_price → option_price → ingest_runs の順に Storage Write API で追記（失敗は write_failed）
@@ -56,6 +57,8 @@ class Deps:
     monotonic: Callable[[], float] = time.monotonic
     new_run_id: Callable[[], str] = field(default=lambda: str(uuid.uuid4()))
     trigger: str = "scheduler"
+    fetch_at_second: float = settings.FETCH_AT_SECOND  # 分の頭からこの秒まで待って JPX を取得する（0 で待たない）
+    sleep: Callable[[float], None] = time.sleep
 
 
 @dataclass
@@ -106,6 +109,16 @@ def _bounded(deadline: Deadline, stage: str, cap: float, fn: Callable, *args):
         return future.result(timeout=timeout + settings.CALL_GRACE_SECONDS)
     except FutureTimeout:
         raise DeadlineExceeded(stage) from None
+
+
+def second_of_minute(t: datetime) -> float:
+    """分内の秒（0 以上 60 未満。JST と UTC で同じ）"""
+    return t.second + t.microsecond / 1_000_000
+
+
+def fetch_wait_seconds(now: datetime, at_second: float) -> float:
+    """分の頭から at_second 秒になるまでの待ち（秒）。既に過ぎていれば 0"""
+    return max(0.0, at_second - second_of_minute(now))
 
 
 def _calendar_notice(now: datetime, calendar: Calendar, common: dict) -> None:
@@ -166,6 +179,14 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         return done("INFO", "out_of_hours", 204)
     common["session"] = session.kind
 
+    # 分の頭の数秒は JPX のページが書き換え途中なので、FETCH_AT_SECOND まで待つ（#38）。
+    # now（受付時刻）ではなく今の時刻で計算する（コールドスタートで依存の作成にかかった分は待たない）。
+    # 待ちは全体の期限に含まれる（Deadline は handle の開始から）
+    wait = fetch_wait_seconds(deps.clock(), deps.fetch_at_second)
+    if wait > 0:
+        deps.sleep(wait)
+    common["wait_ms"] = int(wait * 1000)
+
     # 1 限月ページ（JPX はリトライしない）
     t_jpx = deps.monotonic()
     try:
@@ -177,6 +198,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         return done("ERROR", "parse_failed", 500, failure="parse_failed", detail=str(e))
     page1 = with_updated_at(page1, updated_at)
     common["snapshot_at"] = updated_at
+    common["page1_fetch_second"] = round(second_of_minute(page1.fetched_at), 3)
 
     # 鮮度。カレンダーの期限切れ後は休業日を判定できないので見ない（calendar_outdated で通知する）
     if not deps.calendar.is_outdated(now) and is_stale(now, updated_at, session):
@@ -299,7 +321,13 @@ def _real_deps() -> Deps:
             return 0
 
         _deps = Deps(
-            calendar, cfg.raw_bucket, io_jpx.fetch_page, lambda name, timeout=None: False, raw_create, append_rows
+            calendar,
+            cfg.raw_bucket,
+            io_jpx.fetch_page,
+            lambda name, timeout=None: False,
+            raw_create,
+            append_rows,
+            fetch_at_second=cfg.fetch_at_second,
         )
         return _deps
 
@@ -318,6 +346,7 @@ def _real_deps() -> Deps:
         store.exists,
         store.create,
         bq.append,
+        fetch_at_second=cfg.fetch_at_second,
     )
     return _deps
 
