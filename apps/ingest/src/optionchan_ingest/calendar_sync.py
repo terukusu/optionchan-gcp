@@ -3,9 +3,12 @@ ingest は最新版（ビュー trading_calendar_latest）を読み、読めな�
 
 - 毎日 settings.CALENDAR_SYNC_AT（06:40 JST）のリクエストで、通常の処理の後に同じ期限の残りで run_sync（app.py）
 - 手動: Cloud Run ジョブ calendar-sync
-      python -m optionchan_ingest.calendar_sync [--dry-run] [--accept 理由] [--print-toml]
+      python -m optionchan_ingest.calendar_sync [--dry-run] [--accept 理由] [--backfill-from YYYY-01-01] [--print-toml]
   --dry-run: 取得・検証して結果をログに出すだけ（書かない）
   --accept: 前の版との差分の検証（上書き可の問題）を越えて受け入れる（ページの形・祝日・年末年始の問題は越えない）
+  --backfill-from: 過去年の埋め戻し（#67）。指定の 1/1 から版の掲載範囲の開始の前日までの行を、祝日 CSV と
+      JPX「祝日取引実施日（確定）一覧」（xlsx。ページのリンクから取る）から作って足した版を書く（足すのは掲載範囲より
+      前の行だけ。既存の行は変えない）。既に埋まっていれば何も足さない
   --print-toml: 最新版から config/trading_calendar.toml を作って標準出力に出す（JPX にはアクセスしない）
   --update-toml: 最新版と TOML の今日以降の休業日・covered_until が違えば TOML を書き換え、標準出力に JSON
       {"status": "changed" | "unchanged" | "toml_newer", "title", "body"}（PR のタイトル・本文）を出す。
@@ -15,6 +18,7 @@ ingest は最新版（ビュー trading_calendar_latest）を読み、読めな�
 処理（run_sync）:
 1. 最新版を読む（無ければ初回。差分の検証の基準はイメージの TOML）
 2. ページを取得・解析し、版を組み立てる（前の版の過去年の行を引き継ぐ）。取引時間が TOML と違えば ERROR
+   --backfill-from なら祝日 CSV と xlsx を取得して過去年の行を足す
 3. 内容が最新版と同じなら INFO calendar_checked で終わる（祝日 CSV は取らない）
 4. 祝日 CSV を取得して検証（jpx_calendar.validate）。問題があれば書かずに ERROR calendar_sync_rejected
 5. 1 回の追記（Storage Write API。1 版 = 1 リクエストで原子的）→ NOTICE calendar_updated
@@ -28,7 +32,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 import requests
@@ -244,6 +248,7 @@ class SyncDeps:
     fetch_holidays: Callable[..., bytes]  # (timeout=) 内閣府の祝日 CSV
     append_rows: Callable[..., None]  # (table, rows, timeout=)
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
+    fetch_url: Callable[..., bytes] | None = None  # (url, timeout=) 過去年の埋め戻しの xlsx（--backfill-from だけ）
 
 
 @dataclass
@@ -260,6 +265,7 @@ def run_sync(
     *,
     accept_reason: str | None = None,
     dry_run: bool = False,
+    backfill_from: date | None = None,
 ) -> SyncResult:
     """想定した失敗（取得・解析・読み書き・期限）はログに出して SyncResult で返す。想定外の例外は呼び出し側で捕まえる"""
     today = now.astimezone(JST).date()
@@ -290,6 +296,53 @@ def run_sync(
         except jc.CalendarParseError as e:
             return failed("parse", e)
 
+        holidays = None
+        history = None
+        if backfill_from is not None and version.listed_from is not None and backfill_from < version.listed_from:
+            try:
+                csv = bounded(
+                    deadline, "calendar_fetch_holidays", settings.CALENDAR_HTTP_TIMEOUT_SECONDS, deps.fetch_holidays
+                )
+            except CalendarFetchFailed as e:
+                return failed("fetch_holidays", e)
+            try:
+                holidays = jc.parse_holidays_csv(csv)
+                url = jc.xlsx_url(html, settings.HOLIDAY_TRADING_URL)
+            except jc.CalendarParseError as e:
+                return failed("parse_holidays" if holidays is None else "parse", e)
+            if deps.fetch_url is None:
+                return failed("fetch_history", "fetch_url が無い")
+            try:
+                xlsx = bounded(
+                    deadline, "calendar_fetch_history", settings.CALENDAR_HTTP_TIMEOUT_SECONDS, deps.fetch_url, url
+                )
+            except CalendarFetchFailed as e:
+                return failed("fetch_history", e)
+            try:
+                held_days = jc.parse_holiday_trading_xlsx(xlsx)
+                rows = jc.history_rows(holidays, held_days, backfill_from, version.listed_from)
+            except jc.CalendarParseError as e:
+                return failed("parse_history", e)
+            mismatch_held = jc.held_days_mismatch(version, held_days)
+            if mismatch_held:
+                return failed("parse_history", f"xlsx と版の実施有無が違う: {mismatch_held[:5]}")
+            history = {
+                "history_from": backfill_from,
+                "history_until": version.listed_from - timedelta(days=1),
+                "history_rows": len(rows),
+                "history_closed": sum(1 for r in rows if not r.is_trading_day),
+                "history_xlsx": url,
+            }
+            version = jc.with_history(version, rows)
+        elif backfill_from is not None:
+            log(
+                "INFO",
+                "calendar_backfill_skipped",
+                backfill_from=backfill_from,
+                listed_from=version.listed_from,
+                **common,
+            )
+
         mismatch = jc.sessions_mismatch(page.sessions, sessions_of(deps.base))
         if mismatch:
             log("ERROR", "calendar_sessions_changed", failure="calendar_sessions_changed", detail=mismatch, **common)
@@ -304,21 +357,23 @@ def run_sync(
             "listed_until": version.listed_until,
             "previous_version_at": loaded.version_at if loaded else None,
             **jc.closed_diff(version, ref, today),
+            **(history or {}),
         }
         if loaded is not None and version.content_hash == loaded.version.content_hash:
             log("INFO", "calendar_checked", version_at=loaded.version_at, covered_until=version.covered_until, **common)
             return SyncResult("unchanged", loaded)
 
-        try:
-            csv = bounded(
-                deadline, "calendar_fetch_holidays", settings.CALENDAR_HTTP_TIMEOUT_SECONDS, deps.fetch_holidays
-            )
-        except CalendarFetchFailed as e:
-            return failed("fetch_holidays", e)
-        try:
-            holidays = jc.parse_holidays_csv(csv)
-        except jc.CalendarParseError as e:
-            return failed("parse_holidays", e)
+        if holidays is None:
+            try:
+                csv = bounded(
+                    deadline, "calendar_fetch_holidays", settings.CALENDAR_HTTP_TIMEOUT_SECONDS, deps.fetch_holidays
+                )
+            except CalendarFetchFailed as e:
+                return failed("fetch_holidays", e)
+            try:
+                holidays = jc.parse_holidays_csv(csv)
+            except jc.CalendarParseError as e:
+                return failed("parse_holidays", e)
 
         problems = jc.validate(version, page, holidays, ref, today)
         blocking = [p for p in problems if not (p.overridable and accept_reason)]
@@ -340,7 +395,23 @@ def run_sync(
         accepted = jc.ACCEPTED_OVERRIDE if problems else jc.ACCEPTED_AUTO
         overridden = [f"{p.rule}: {p.detail}" for p in problems] or None
         if dry_run:
-            log("INFO", "calendar_sync_dry_run", accepted=accepted, overridden=overridden, **info, **common)
+            days = None
+            if history:
+                # 確かめる用に過去年の行の一覧（休業 / 祝日取引）を出す（dry-run だけ）
+                days = [
+                    f"{r.calendar_date} {'祝日取引' if r.is_trading_day else '休業'} {r.name}"
+                    for r in version.rows
+                    if r.source == jc.SOURCE_HISTORY and r.calendar_date >= backfill_from
+                ]
+            log(
+                "INFO",
+                "calendar_sync_dry_run",
+                accepted=accepted,
+                overridden=overridden,
+                history_days=days,
+                **info,
+                **common,
+            )
             return SyncResult("dry_run", loaded)
 
         version_at = deps.clock()
@@ -387,6 +458,7 @@ def make_real_deps(cfg: settings.Settings, base: Calendar, writer=None) -> SyncD
         lambda timeout: fetch_url(settings.HOLIDAY_TRADING_URL, timeout, http),
         lambda timeout: fetch_url(settings.HOLIDAYS_CSV_URL, timeout, http),
         writer.append,
+        fetch_url=lambda url, timeout: fetch_url(url, timeout, http),
     )
 
 
@@ -395,6 +467,16 @@ def _reason(text: str) -> str:
     if not text or len(text) > 200:
         raise argparse.ArgumentTypeError("理由は 1〜200 文字")
     return text
+
+
+def _backfill_from(text: str) -> date:
+    try:
+        d = date.fromisoformat(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError("YYYY-01-01 の形で指定する") from None
+    if (d.month, d.day) != (1, 1):
+        raise argparse.ArgumentTypeError("年の初め（YYYY-01-01）を指定する（掲載範囲は年単位）")
+    return d
 
 
 def _update_toml(path: Path, text: str, loaded: jc.LoadedVersion, today: date) -> int:
@@ -426,13 +508,19 @@ def main(argv: list[str] | None = None, deps: SyncDeps | None = None, base_path:
         help="最新版と違えば trading_calendar.toml を書き換え、PR の文面を JSON で出す",
     )
     parser.add_argument("--accept", type=_reason, metavar="理由", help="前の版との差分の検証を越えて受け入れる")
+    parser.add_argument(
+        "--backfill-from",
+        type=_backfill_from,
+        metavar="YYYY-01-01",
+        help="この日から版の掲載範囲の前までの過去年の行を足す（#67）",
+    )
     try:
         args = parser.parse_args(argv)
     except SystemExit as e:
         return EXIT_USAGE if e.code else EXIT_OK
     toml_mode = args.print_toml or args.update_toml
-    if args.accept and toml_mode:
-        print("--accept と --print-toml / --update-toml は一緒に使えない", file=sys.stderr)
+    if (args.accept or args.backfill_from) and toml_mode:
+        print("--accept / --backfill-from と --print-toml / --update-toml は一緒に使えない", file=sys.stderr)
         return EXIT_USAGE
 
     # 生 HTML のバケットは使わない（Settings の必須を満たすだけ）
@@ -464,7 +552,15 @@ def main(argv: list[str] | None = None, deps: SyncDeps | None = None, base_path:
 
     common = {"trigger": "job"}
     try:
-        result = run_sync(now, deps, deadline, common, accept_reason=args.accept, dry_run=args.dry_run)
+        result = run_sync(
+            now,
+            deps,
+            deadline,
+            common,
+            accept_reason=args.accept,
+            dry_run=args.dry_run,
+            backfill_from=args.backfill_from,
+        )
     except Exception as e:  # 想定外
         log(
             "ERROR",

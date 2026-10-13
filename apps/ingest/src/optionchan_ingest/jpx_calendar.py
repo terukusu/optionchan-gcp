@@ -4,18 +4,24 @@
 - 版（Version）の組み立て: ページの行 + 規則（平日の 1/1 は常に休業。表に載らない）+ 前の版の過去年の行の引き継ぎ
 - 検証（Problem の一覧）: 形・祝日との照合・年末年始（上書き不可）と、前の版との差分（--accept で上書き可）
 - BigQuery の行（schema/tokyo/trading_calendar.json）との変換、TOML（config/trading_calendar.toml）の生成
+- 過去年の埋め戻し（#67）: 祝日 CSV と JPX「祝日取引実施日（確定）一覧」（xlsx）から、版の掲載範囲より前の行を作る
 
 版の 1 行は「業務規程上の休業日に当たる平日 1 日」（国民の祝日・休日と年末年始 12/31・1/1・1/2・1/3）。
 is_trading_day は祝日取引を実施するか。取引日 = 土日と is_trading_day = false の日を除いた日。
 """
 
 import hashlib
+import io
 import json
+import posixpath
 import re
 import tomllib
+import zipfile
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
+from urllib.parse import urljoin
+from xml.etree import ElementTree
 
 from lxml import html as lxml_html
 
@@ -27,7 +33,8 @@ YEAR_END = "year_end"
 DAY_TYPES = (NATIONAL_HOLIDAY, YEAR_END)
 SOURCE_JPX = "jpx_table"
 SOURCE_RULE = "rule"
-SOURCES = (SOURCE_JPX, SOURCE_RULE)
+SOURCE_HISTORY = "history"  # 過去年の埋め戻し（#67。祝日 CSV と JPX の祝日取引実施日（確定）一覧の xlsx）
+SOURCES = (SOURCE_JPX, SOURCE_RULE, SOURCE_HISTORY)
 ACCEPTED_AUTO = "auto"
 ACCEPTED_OVERRIDE = "override"
 ACCEPTED = (ACCEPTED_AUTO, ACCEPTED_OVERRIDE)
@@ -44,7 +51,15 @@ SESSION_KEYS = ("day_open", "day_close", "night_open", "night_close")
 MAX_FUTURE_CHANGES = 3  # 前の版の掲載範囲の中で、今日以降の休業日の追加・削除の上限（1 版あたり）
 CLOSE_GUARD_DAYS = 14  # 今日からこの日数以内の日を新しく休業日にしない（ingest 側の検査と同じ日数）
 ROWS_PER_YEAR = (10, 25)  # 表の 1 年あたりの行数（2026 年・2027 年は 18 行）
-MAX_CLOSED_PER_YEAR = 25  # ingest 側の検査: 1 年あたりの休業平日の上限（実際は 2〜4 日）
+MAX_CLOSED_PER_YEAR = 25  # ingest 側の検査: 1 年あたりの休業平日の上限（実際は 2〜4 日。祝日取引の開始前は 20 前後）
+
+# 祝日取引の開始日（JPX の祝日取引実施日（確定）一覧の最初の行）。これより前の平日の祝日・休日はすべて休業
+HOLIDAY_TRADING_START = date(2022, 9, 23)
+NOTE_BEFORE_HOLIDAY_TRADING = "祝日取引の開始前"
+XLSX_LINK_TEXT = "祝日取引実施日（確定）一覧"
+XLSX_HEADERS = ("祝日取引の対象日", "名称", "実施有無")
+HELD_TEXT = {"実施する": True, "実施しない": False}
+XLSX_MAX_BYTES = 5_000_000  # xlsx の各部品（展開後）の上限
 
 
 class CalendarParseError(Exception):
@@ -98,6 +113,11 @@ class Version:
         return {r.calendar_date: r for r in self.rows}
 
     @property
+    def listed_from(self) -> date | None:
+        """掲載範囲の開始（最初の行の年の 1/1）。行が無ければ None"""
+        return date(self.rows[0].calendar_date.year, 1, 1) if self.rows else None
+
+    @property
     def content_hash(self) -> str:
         """内容（版の作成時刻・受け入れ方を除く）の SHA-256。変化の検知に使う"""
         doc = {
@@ -130,6 +150,8 @@ class Reference:
     listed_until: date
     rows: dict[date, DayRow] | None  # 確定/予定を比べられる行（TOML には無い）
     check_past: bool  # 過去日の変化を見る（TOML は過去日を書かないので見ない）
+    # 掲載範囲の開始。これより前への過去年の行（source = history）の追加は変化に数えない
+    listed_from: date | None = None
 
 
 @dataclass(frozen=True)
@@ -299,6 +321,210 @@ def parse_holidays_csv(data: bytes) -> dict[date, str]:
     return holidays
 
 
+# ---- 過去年の埋め戻し（#67） ----
+
+
+@dataclass(frozen=True)
+class HeldDay:
+    """JPX「祝日取引実施日（確定）一覧」の 1 行"""
+
+    day: date
+    name: str
+    held: bool
+
+
+def xlsx_url(page: bytes, base_url: str) -> str:
+    """「祝日取引」のページから「祝日取引実施日（確定）一覧」の xlsx の URL を得る（リンクの場所は変わりうる）"""
+    try:
+        doc = lxml_html.fromstring(page.decode("utf-8"))
+    except Exception as e:  # 解析エラー・UTF-8 でない
+        raise CalendarParseError(f"ページを解析できない: {type(e).__name__}") from None
+    hrefs = {
+        a.get("href")
+        for a in doc.xpath("//a[@href]")
+        if _text(a) == XLSX_LINK_TEXT and a.get("href", "").lower().endswith(".xlsx")
+    }
+    if len(hrefs) != 1:
+        raise CalendarParseError(f"「{XLSX_LINK_TEXT}」の xlsx のリンクが {len(hrefs)} 個（1 個のはず）")
+    return urljoin(base_url, hrefs.pop())
+
+
+_XLSX_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
+_DOC_REL = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id"
+_EXCEL_EPOCH = date(1899, 12, 30)
+
+
+def _xml(z: zipfile.ZipFile, name: str):
+    try:
+        info = z.getinfo(name)
+    except KeyError:
+        raise CalendarParseError(f"xlsx に {name} が無い") from None
+    if info.file_size > XLSX_MAX_BYTES:
+        raise CalendarParseError(f"xlsx の {name} が大きすぎる（{info.file_size} バイト）")
+    try:
+        return ElementTree.fromstring(z.read(info))
+    except ElementTree.ParseError as e:
+        raise CalendarParseError(f"xlsx の {name} を解析できない: {e}") from None
+
+
+def _first_sheet_path(z: zipfile.ZipFile) -> str:
+    sheets = _xml(z, "xl/workbook.xml").findall(f"{_XLSX_NS}sheets/{_XLSX_NS}sheet")
+    if len(sheets) != 1:
+        raise CalendarParseError(f"xlsx のシートが {len(sheets)} 枚（1 枚のはず）")
+    rid = sheets[0].get(_DOC_REL)
+    for rel in _xml(z, "xl/_rels/workbook.xml.rels").findall(f"{_REL_NS}Relationship"):
+        if rel.get("Id") == rid:
+            target = rel.get("Target", "")
+            return target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
+    raise CalendarParseError("xlsx のシートの参照が見つからない")
+
+
+def _cell_value(c, strings: list[str]) -> str | None:
+    kind = c.get("t")
+    if kind == "inlineStr":
+        return "".join(t.text or "" for t in c.iter(f"{_XLSX_NS}t"))
+    v = c.find(f"{_XLSX_NS}v")
+    if v is None or v.text is None:
+        return None
+    if kind == "s":
+        try:
+            return strings[int(v.text)]
+        except (ValueError, IndexError):
+            raise CalendarParseError(f"xlsx の共有文字列の参照が不正: {c.get('r')}") from None
+    return v.text
+
+
+def parse_holiday_trading_xlsx(data: bytes) -> list[HeldDay]:
+    """JPX「祝日取引実施日（確定）一覧」（xlsx。1 枚のシートに 祝日取引の対象日（日付）・名称・実施有無 の 3 列）。
+    形が想定と違えば CalendarParseError。行は日付の順"""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+    except zipfile.BadZipFile:
+        raise CalendarParseError("xlsx（zip）でない") from None
+    with z:
+        strings = []
+        if "xl/sharedStrings.xml" in z.namelist():
+            # ふりがな（rPh の t）は除き、si 直下の t と書式付きの r/t をつなぐ
+            for si in _xml(z, "xl/sharedStrings.xml").findall(f"{_XLSX_NS}si"):
+                parts = [t.text or "" for t in si.findall(f"{_XLSX_NS}t")]
+                parts += [t.text or "" for t in si.findall(f"{_XLSX_NS}r/{_XLSX_NS}t")]
+                strings.append("".join(parts))
+        sheet = _xml(z, _first_sheet_path(z))
+    table = []
+    for row in sheet.iter(f"{_XLSX_NS}row"):
+        cells = {}
+        for c in row.findall(f"{_XLSX_NS}c"):
+            col = re.match(r"[A-Z]+", c.get("r", ""))
+            if col and col.group(0) in ("A", "B", "C"):
+                cells[col.group(0)] = _cell_value(c, strings)
+        values = [(cells.get(k) or "").strip() for k in "ABC"]
+        if any(values):
+            table.append(values)
+    if not table or tuple(table[0]) != XLSX_HEADERS:
+        raise CalendarParseError(f"xlsx の見出しが想定と違う: {table[0] if table else []}")
+    days: list[HeldDay] = []
+    for serial, name, held in table[1:]:
+        if not re.fullmatch(r"\d+(\.0+)?", serial):
+            raise CalendarParseError(f"xlsx の日付が読めない: {serial!r}")
+        day = _EXCEL_EPOCH + timedelta(days=int(float(serial)))
+        if held not in HELD_TEXT:
+            raise CalendarParseError(f"xlsx の {day} の実施有無が読めない: {held!r}")
+        if not name:
+            raise CalendarParseError(f"xlsx の {day} の名称が空")
+        days.append(HeldDay(day, name, HELD_TEXT[held]))
+    if not days:
+        raise CalendarParseError("xlsx に行が無い")
+    dates = [d.day for d in days]
+    if dates != sorted(set(dates)):
+        raise CalendarParseError("xlsx の日付が昇順でない・重複がある")
+    return days
+
+
+def _year_end_name(d: date) -> str:
+    return "年末休業日" if d.month == 12 else "年始休業日"
+
+
+def history_rows(holidays: dict[date, str], held_days: list[HeldDay], start: date, end: date) -> list[DayRow]:
+    """[start, end) の過去年の行（source = history、status = confirmed）。
+
+    - 行: 平日の国民の祝日・休日（祝日 CSV）と年末年始の 12/31・1/1・1/2・1/3
+    - 祝日取引の開始（HOLIDAY_TRADING_START）より前: すべて休業（note = 祝日取引の開始前）
+    - 開始以後: 実施有無と名称は xlsx（1/1 は載らないので休業）。CSV・年末年始と xlsx の日付が一致しなければ
+      CalendarParseError（どちらかの形・内容が想定と違う）
+    - day_type: 12/31・1/2・1/3 は year_end、それ以外（1/1 を含む）は national_holiday
+    - name: xlsx にあれば xlsx の名称、無ければ CSV の名称（年末年始は 年末休業日 / 年始休業日）
+    """
+    if start.month != 1 or start.day != 1 or end.month != 1 or end.day != 1 or start >= end:
+        raise ValueError(f"過去年の範囲が不正: {start}〜{end}")
+    missing_years = sorted(set(range(start.year, end.year)) - {d.year for d in holidays})
+    if missing_years:
+        raise CalendarParseError(f"祝日 CSV に無い年: {missing_years}")
+    held = {h.day: h for h in held_days}
+    if held_days and held_days[0].day != HOLIDAY_TRADING_START:
+        raise CalendarParseError(f"xlsx の最初の日が {held_days[0].day}（{HOLIDAY_TRADING_START} のはず）")
+    # xlsx が範囲の終わりまで無い（古い一覧など）ときは、開始以後の平日の休業日が xlsx に無いことで止まる
+    rows: list[DayRow] = []
+    d = start
+    while d < end:
+        md = (d.month, d.day)
+        if d.weekday() < 5 and (d in holidays or md in YEAR_END_DAYS or md == (1, 1)):
+            year_end = md in YEAR_END_DAYS
+            name = _year_end_name(d) if year_end else holidays.get(d, "元日")
+            held_flag, note = False, None
+            if d < HOLIDAY_TRADING_START:
+                note = NOTE_BEFORE_HOLIDAY_TRADING
+            elif md == (1, 1):
+                if d in held:
+                    raise CalendarParseError(f"xlsx に 1/1 がある: {d}（{held[d].name}）")
+            else:
+                h = held.get(d)
+                if h is None:
+                    raise CalendarParseError(f"平日の休業日 {d}（{name}）が xlsx に無い")
+                if md in YEAR_END_CLOSED_DAYS and h.held:
+                    raise CalendarParseError(f"xlsx の {d} が「実施する」（12/31・1/2 は実施しないはず）")
+                held_flag, name = h.held, h.name
+            day_type = YEAR_END if year_end else NATIONAL_HOLIDAY
+            rows.append(DayRow(d, held_flag, CONFIRMED, day_type, name, note, SOURCE_HISTORY))
+        d += timedelta(days=1)
+    listed = {r.calendar_date for r in rows}
+    extra = sorted(h.day for h in held_days if start <= h.day < end and h.day not in listed)
+    if extra:
+        raise CalendarParseError(f"xlsx に祝日 CSV・年末年始に無い日（または土日）がある: {extra[:5]}")
+    return rows
+
+
+def held_days_mismatch(version: Version, held_days: list[HeldDay]) -> list[str]:
+    """xlsx と版（JPX の表の行）の照合: 版の掲載範囲で xlsx の最後の日までの確定の行（1/1 を除く）と、
+    xlsx の行の日付・実施有無が同じであること。違う日の一覧（同じなら空）"""
+    start = version.listed_from
+    if start is None or not held_days:
+        return []
+    last = held_days[-1].day
+    xlsx = {h.day: h.held for h in held_days if start <= h.day}
+    table = {
+        r.calendar_date: r.is_trading_day
+        for r in version.rows
+        if start <= r.calendar_date <= last
+        and r.status == CONFIRMED
+        and (r.calendar_date.month, r.calendar_date.day) != (1, 1)
+    }
+    out = []
+    for d in sorted(set(xlsx) | set(table)):
+        if xlsx.get(d) != table.get(d):
+            out.append(f"{d}: xlsx {xlsx.get(d)} / 版 {table.get(d)}")
+    return out
+
+
+def with_history(version: Version, rows: list[DayRow]) -> Version:
+    """版に過去年の行を足す。足せるのは版の掲載範囲（listed_from）より前の行だけ（既存の行は変えない）"""
+    start = version.listed_from
+    if start is not None and any(r.calendar_date >= start for r in rows):
+        raise ValueError(f"過去年の行が掲載範囲（{start}〜）に入る")
+    merged = sorted([*rows, *version.rows], key=lambda r: r.calendar_date)
+    return Version(tuple(merged), version.covered_until, version.listed_until)
+
+
 # ---- 版の組み立て ----
 
 
@@ -338,7 +564,9 @@ def build_version(page: JpxPage, previous: Version | None = None) -> Version:
 
 
 def reference_from_version(version: Version) -> Reference:
-    return Reference(version.closed_dates, version.covered_until, version.listed_until, version.by_date, True)
+    return Reference(
+        version.closed_dates, version.covered_until, version.listed_until, version.by_date, True, version.listed_from
+    )
 
 
 def reference_from_calendar(closed_dates, covered_until: date) -> Reference:
@@ -435,6 +663,12 @@ def _diff_problems(version: Version, ref: Reference, today: date) -> list[Proble
     new_closed = version.closed_dates
     old_closed = ref.closed_dates
     changed = new_closed ^ old_closed
+    if ref.listed_from is not None:
+        # 前の版の掲載範囲より前に足した過去年の行（#67）は変化に数えない（前の版に行が無いので追加だけ）
+        by_date = version.by_date
+        changed = frozenset(
+            d for d in changed if not (d < ref.listed_from and by_date.get(d) and by_date[d].source == SOURCE_HISTORY)
+        )
     if ref.check_past:
         past = sorted(d for d in changed if d < today)
         if past:

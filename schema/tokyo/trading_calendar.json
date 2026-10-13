@@ -33,19 +33,19 @@
     "name": "name",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "JPX の表の名称（例: 勤労感謝の日、年末休業日。注記の参照は除く）。1/1 は「元日」"
+    "description": "JPX の表の名称（例: 勤労感謝の日、年末休業日。注記の参照は除く）。1/1 は「元日」。過去年（source = history）は xlsx の名称、xlsx に無い日は祝日 CSV の名称（例: 休日）"
   },
   {
     "name": "note",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "実施有無の欄が参照する JPX の注記の本文（例: BCP テストのため祝日取引を実施しない）。無ければ NULL"
+    "description": "実施有無の欄が参照する JPX の注記の本文（例: BCP テストのため祝日取引を実施しない）。過去年（source = history）の祝日取引の開始（2022-09-23）より前の行は「祝日取引の開始前」。無ければ NULL"
   },
   {
     "name": "source",
     "type": "STRING",
     "mode": "REQUIRED",
-    "description": "jpx_table（JPX「祝日取引」の祝日取引実施日の表）/ rule（平日の 1/1。表に載らないので規則で足す）"
+    "description": "jpx_table（JPX「祝日取引」の祝日取引実施日の表）/ rule（平日の 1/1。表に載らないので規則で足す）/ history（過去年の埋め戻し。内閣府の祝日 CSV と JPX「祝日取引実施日（確定）一覧」の xlsx）"
   },
   {
     "name": "covered_until",

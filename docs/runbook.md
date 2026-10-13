@@ -2178,7 +2178,7 @@ GitHub secret `TF_ALERT_POLICY_IDS` に消したポリシー（`m1`・`m2`）の
 | `year_end_missing` / `year_end_held` / `jan1_held` | 平日の 12/31・1/2・1/3 が表に無い、12/31・1/2 が「実施する」、1/1 が「実施する」 | 不可 |
 | `not_holiday` / `holiday_missing` / `not_year_end` | 祝日 CSV に無い日が祝日として載っている、CSV の平日の祝日（1/1 を除く）が表に無い | 不可 |
 | `unverified_confirmed` | 祝日 CSV にまだ無い年に「確定」の行がある（予定だけなら照合を飛ばして受け入れ、WARNING `calendar_unverified_year`） | 可 |
-| `past_changed` | 過去日の休業/取引日が変わる | 可 |
+| `past_changed` | 過去日の休業/取引日が変わる（前の版の掲載範囲より前に足した過去年の行（`source = history`、#67）は数えない） | 可 |
 | `covered_until_regressed` / `listed_until_regressed` | 確定の最終日・掲載範囲が後退する | 可 |
 | `confirmed_changed` | 今日以降の確定の日が消える・予定に戻る・実施有無が変わる | 可 |
 | `too_many_changes` | 前の版の掲載範囲の中で、今日以降の休業日の追加・削除が 4 件以上（翌年分の追加は数えない） | 可 |
@@ -2187,6 +2187,7 @@ GitHub secret `TF_ALERT_POLICY_IDS` に消したポリシー（`m1`・`m2`）の
 - 版が無いとき（初回）は、イメージの TOML を前の版として差分を見る（過去日は TOML に書かないので見ない）
 - 取引時間の表が TOML の `[sessions]` と違えば ERROR `calendar_sessions_changed`（休業日の更新は止めない。取引時間は自動で変えない）
 - 1/1 は表に載らない（注1）ので、平日なら規則で休業の行を足す（`source = rule`）。表から消えた過去年の行は前の版から引き継ぐ
+- 過去年の行（`--backfill-from`、#67）は、xlsx と祝日 CSV の照合（下の「過去年の追加」）に通らなければ書かない（`calendar_sync_failed`、`stage=parse_history`。`--accept` でも越えない）
 
 ### デプロイ後（初回）
 
@@ -2203,11 +2204,43 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
   --project $P --freshness=2h --limit 5 --format='value(timestamp,jsonPayload.event,jsonPayload.version_at,jsonPayload.detail)'
 ```
 
+### 過去年の追加（#67）
+
+取り込み開始時の版は JPX の表の 2 年分（2026〜2027 年）だけ。過去データの `price_time` の補正（#4、`sql/price_time_fix/`）とシミュレーターの過去の SQ 日・取引最終日の繰り上げのために、旧データの最初の年（2018 年）からの行を**一度だけ**足す。
+
+- **出典**: 内閣府の祝日 CSV（1955 年〜）と、「祝日取引」のページからリンクされた「祝日取引実施日（確定）一覧」（xlsx。1 枚のシートに 祝日取引の対象日・名称・実施有無。祝日取引の開始日 2022-09-23 から確定の日まで。1/1 は載らない）。xlsx の URL はページのリンクから取る
+- **行**: 平日の国民の祝日・休日と年末年始の 12/31・1/1・1/2・1/3（`source = history`、`status = confirmed`）。祝日取引の開始より前はすべて休業（`note` = 祝日取引の開始前）、開始以後は xlsx の実施有無と名称（1/1 は休業）。大阪取引所のデリバティブの終日の臨時休場は 2018 年以降に無い（2020-10-01 の東証の売買停止は現物だけ。旧系の先物の約定時刻もこの日の日中にある）ので、臨時休場の行は無い
+- **照合（どれかに当たれば書かない）**: xlsx の最初の日が 2022-09-23、開始以後の CSV の平日の祝日・年末年始がすべて xlsx にある、xlsx に CSV・年末年始に無い日（土日を含む）が無い、12/31・1/2 が「実施しない」、xlsx に 1/1 が無い、範囲の年がすべて CSV にある、xlsx と今の版（掲載範囲の確定の行）の実施有無が同じ
+- **検証との関係**: 足せるのは前の版の掲載範囲（`MIN(calendar_date)` の年の 1/1）より前の行だけで、既存の行は変えない。その追加は `past_changed` に数えないので `--accept` は要らない（他の検証は通常どおり）。以後の毎日の取り込みは前の版の過去年の行を引き継ぐ（内容は変わらず `calendar_checked`）
+- **ingest への影響**: ingest は今日以降の判定にしか使わないので変わらない。過去年の 1 年の休業平日は最大 20（2019 年）で、ingest 側の検査（25 超）に当たらない。14 日以内の増加にも当たらない（過去日だけ）
+- **前提**: `source = history` を読めるイメージがデプロイ済みであること（古いイメージは未知の `source` の版を不正として使わず `calendar_load_rejected` になり、06:40 の取り込みも `calendar_sync_failed`（`stage=load`）になる）
+
+```sh
+# 1) 結果を見る（書かない）。history_rows（2018〜2025 年は 136 行）・history_closed（98）・history_days（日付 休業/祝日取引 名称）・problems が無いこと
+gcloud run jobs execute calendar-sync --region $L --project $P --wait --args=--dry-run,--backfill-from=2018-01-01
+gcloud logging read 'resource.labels.job_name="calendar-sync" AND jsonPayload.event:"calendar_"' \
+  --project $P --freshness=1h --limit 5 --format=json \
+  | jq -c '.[] | {t: .timestamp, e: .jsonPayload.event, stage: .jsonPayload.stage, detail: .jsonPayload.detail, problems: .jsonPayload.problems, rows: .jsonPayload.history_rows, closed: .jsonPayload.history_closed, from: .jsonPayload.history_from, until: .jsonPayload.history_until}'
+# 2) 書く（1 版を追記。NOTICE calendar_updated の history_rows）
+gcloud run jobs execute calendar-sync --region $L --project $P --wait --args=--backfill-from=2018-01-01
+# 3) 確認: 掲載範囲の開始が 2018-01-01、年ごとの行数、2023-08 限の SQ 日の繰り上げ（8/11 が行にある）
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT EXTRACT(YEAR FROM calendar_date) y, COUNT(*) n, COUNTIF(NOT is_trading_day) closed, STRING_AGG(DISTINCT source) sources
+FROM `optionchan_tokyo.trading_calendar_latest` GROUP BY y ORDER BY y'
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT calendar_date, is_trading_day, name, source FROM `optionchan_tokyo.trading_calendar_latest`
+WHERE calendar_date BETWEEN "2023-08-01" AND "2023-08-31"'
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ingest" AND jsonPayload.event=("calendar_loaded" OR "calendar_load_rejected")' \
+  --project $P --freshness=2h --limit 3 --format='value(timestamp,jsonPayload.event,jsonPayload.version_at,jsonPayload.detail)'
+```
+
+期待値（2018〜2025 年）: 休業 2018 年 16・2019 年 20・2020 年 19・2021 年 16・2022 年 12・2023 年 3・2024 年 7・2025 年 5、2023-08-11 は `is_trading_day = true`（山の日の祝日取引）。2026 年以降の行・`covered_until`・`listed_until` は前の版と同じ。間違えて書いたときは、壊れた版と同じ手順で消すか（「版・ビューが壊れたとき」の DELETE。書いてから 30 分ほどは DML で消せない）、正しい内容の版を `--accept` で書き直す（過去年の行の削除・変更は `past_changed`）。
+
 ### ERROR を受けたとき
 
 | event | 対応 |
 |---|---|
-| `calendar_sync_failed`（`stage`） | `load`: ビューを読めない（権限・BigQuery の障害）。`fetch_page` / `fetch_holidays`: JPX・内閣府のサイトの障害（翌日に再試行される。続くなら URL の変更を疑う）。`parse` / `parse_holidays`: 形の変更。ページを開いて `jpx_calendar.py` の解析を直す PR（fixture `apps/ingest/tests/fixtures/holiday_trading.html` も必要部分だけ差し替える）。`write`: 書き込みの失敗（翌日に再試行）。`deadline`: 期限切れ（翌日に再試行。急ぐなら手動のジョブ）。`unexpected`: `detail` を見て Issue にする |
+| `calendar_sync_failed`（`stage`） | `load`: ビューを読めない（権限・BigQuery の障害）。`fetch_page` / `fetch_holidays`: JPX・内閣府のサイトの障害（翌日に再試行される。続くなら URL の変更を疑う）。`parse` / `parse_holidays`: 形の変更。ページを開いて `jpx_calendar.py` の解析を直す PR（fixture `apps/ingest/tests/fixtures/holiday_trading.html` も必要部分だけ差し替える）。`fetch_history` / `parse_history`: `--backfill-from` の xlsx の取得・照合の失敗（`detail` を見て xlsx を開いて確かめる）。`write`: 書き込みの失敗（翌日に再試行）。`deadline`: 期限切れ（翌日に再試行。急ぐなら手動のジョブ）。`unexpected`: `detail` を見て Issue にする |
 | `calendar_sync_rejected` | `problems` を読み、JPX のページと見比べる。ページが正しく（例: BCP テストで近い祝日を休みにする公表）、`overridable` が true なら、`--dry-run` で `added_closed` / `removed_closed` を確かめてから `--accept` で受け入れる。false ならページかパーサーの問題（パーサーを直すか、ページが直るのを待つ）。受け入れるまで ingest は前のカレンダーのまま（新しい休業日にも JPX を取りに行くだけで、取りこぼしは無い） |
 | `calendar_sessions_changed` | 取引時間の変更。JPX の公表を確かめ、`config/trading_calendar.toml` の `[sessions]` と鮮度のしきい値・Scheduler 前提（target.md 3.1）を見直す PR |
 | `calendar_fallback`（09:00） | ingest が BigQuery の版を使えていない。直前の `calendar_load_failed` / `calendar_load_rejected` の `detail` を見る（権限・ビューの有無・版の不正）。版が無いなら上の「デプロイ後（初回）」 |
