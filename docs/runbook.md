@@ -1172,14 +1172,16 @@ BigQuery Data Transfer Service（DTS）の 4 本。実行 SA は `sa-sq-dts`（t
 | `optionchan legacy-stage` | US | 07:02 | 旧 `optionchan` の 3 テーブルの窓の分を `optionchan_legacy_stage` に作り直す（+ 窓と件数の 1 行 `staged_window`）。旧系の夜間分は 06:20 頃までに入っている | — |
 | `optionchan legacy-copy` | asia-northeast1 | 07:10 | `optionchan_legacy_stage` → `optionchan_legacy_copy`（データセットコピー、上書き。1 日 約 100MB） | — |
 | `optionchan quality-daily` | asia-northeast1 | 07:15 | 品質チェック（target.md 3.4）。窓の `ingest_runs` と最新版（`*_latest`）を検査。ingest の 07:00 の照合・回収の後 | `optionchan_tokyo.quality_daily`（1 日 1 行）。違反が 1 件以上なら記録の後に失敗 |
-| `optionchan legacy-compare` | asia-northeast1 | 07:30 | コピーと最新版を行単位で比べる（#11 の AC 5〜7） | `optionchan_tokyo.legacy_compare_daily`（1 日 1 行）。コピーが今回の窓でなければ記録せずに失敗、コピーの行数が stage の件数と違えば記録の後に失敗。説明できない差分は記録だけ（「ERROR の切り替え」で有効にすると記録の後に失敗） |
+| `optionchan legacy-compare` | asia-northeast1 | 07:30 | コピーと最新版を行単位で比べる（#11 の AC 5〜7） | `optionchan_tokyo.legacy_compare_daily`（1 日 1 行）。コピーが今回の窓でなければ記録せずに失敗、コピーの行数が stage の件数と違えば記録の後に失敗。説明できない差分が 1 以上なら記録の後に失敗（窓の日付が 2026-10-14 以降。「ERROR の切り替え」） |
 
 - 失敗は Cloud Logging の `resource.type="bigquery_dts_config"`・severity ERROR で、新系の M2（「新しい取り込みの監視（#35）」）が通知する。DTS の失敗メール（実行 SA 宛て）は使わない
 - 時刻を 07 時台に寄せているのは、M2 の通知が 1 時間に 1 回までのため。07:15 / 07:30 の失敗で始まる抑制は 08:15 / 08:30 に終わり、08:45 の寄り付き以降の ingest の ERROR は通知される。それでも DTS の失敗の通知の後の 1 時間は、ingest の ERROR が通知されないことがある（「M2 を受けたとき」のとおり直近の ERROR をすべて見る）
 - 休場日・週末も毎日動く（データが無い窓は件数 0・違反 0 の行になる）
 - 品質チェックの項目（`quality_daily` の列。説明は `schema/tokyo/quality_daily.json`）: `rowcount_mismatch`（`ingest_runs` の行数とテーブルの実件数）、`missing_table`（3 テーブルに同じスナップショット）、`dup_keys`（最新版のキーの重複）、`months_not_2`、`atm_not_1`（限月 × 種別で ATM が 1 行）、`price_time_future`（ページの更新時刻より後）、`price_time_too_old`（30 日以上前）、`sunday`。`orphan_rows`（書き込み途中の残骸）は情報で違反にしない
-- 突き合わせの分類（`legacy_compare_daily` の列。説明は `schema/tokyo/legacy_compare_daily.json`、方法は `sql/legacy/compare.sql` の先頭）: 行単位（spot・future は `created_at` = T、option は T と `(last_trading_day, type, target_price)`）。JPX のページは各行が 1 分の中でばらばらに書き換わり、旧系は更新時刻の表示が変わった直後に取得するので、旧系の T の行を新系の T → 直前・直後のスナップショットの同じ行と比べる。説明済み: 直前か直後と全列一致（`*_version`、版の差）、option で約定の列（price・price_time・diff・diff_rate・volume・positions・quotation・quotation_date と、約定価格から求める iv・ギリシャ指標）が T・直前・直後のどれかと一致し気配と表示の列（bid・ask とその数量・IV、is_atm）だけ違う（`option_quote_only`、1 分の中の版の差）、spot・future で新系の T が直前と同じ中身で旧系だけ新しい（`*_new_stale`、新系の版の遅れ）、年の補完の修正（`future_contract_year`・`option_quotation_year`）、2 限月ページの版（`option_page2`）、新系のみ（`new_only_snapshots`、保存条件の差）。`unexplained` = 旧系のみ（新系の取りこぼし）+ 各表の説明できない行（約定の列がどの候補とも合わないなど）。例は `unexplained_samples`（先頭 20 件）
+- 突き合わせの分類（`legacy_compare_daily` の列。説明は `schema/tokyo/legacy_compare_daily.json`、方法は `sql/legacy/compare.sql` の先頭）: 行単位（spot・future は `created_at` = T、option は T と `(last_trading_day, type, target_price)`）。JPX のページは各行が 1 分の中でばらばらに書き換わり、旧系は更新時刻の表示が変わった直後に取得するので、旧系の T の行を新系の T → 直前・直後のスナップショットの同じ行と比べる。説明済み: 直前か直後と全列一致（`*_version`、版の差）、option で約定の列（price・price_time・diff・diff_rate・volume・positions・quotation・quotation_date と、約定価格から求める iv・ギリシャ指標）が T・直前・直後のどれかと一致し気配と表示の列（bid・ask とその数量・IV、is_atm）だけ違う（`option_quote_only`、1 分の中の版の差）。option の `version`・`quote_only` は旧系の行が新系の T にもあるときだけ（新系の T の行の欠けは説明しない）、spot・future で新系の T が直前と同じ中身で旧系だけ新しい、または新系の T が約定時刻だけ進み価格の列（price・diff・diff_rate）が直前のままで、旧系が同じ約定時刻・同じ基準価格（price − diff）・同じ hv の別の価格のもの（`*_new_stale`、新系の版の遅れ・書き換え途中の版）。新系の版の遅れ（新系の T が直前と同じ中身）は 1 日に表ごと 3 行までなら説明済み、超えたらその形の行を全部 `unexplained` に数える（新系が系統的に古い版を返す不具合を捕まえる。2026-10-13 08:52 JST〜10-14 01:08 JST は spot 2 行・future 2 行で、上限 3 はそれに余裕を持たせた値）。書き換え途中の版は、旧系の版を新系も T の後 5 分の中で取っていれば裏付けあり。裏付けが無いもの（新系の価格の持ち越しの誤りと区別できない）は 1 日に表ごと 3 行までなら説明済み、超えたらその表の裏付けの無い行を全部 `unexplained` に数える（系統的な持ち越しの不具合は 1 日に多数出るので捕まえる。2026-10-13 は future 1 行で、上限 3 はそれに余裕を持たせた値）、旧系が新系の T より古い版・途中の版を読んだ（`*_legacy_older`、#61。下）、年の補完の修正（`future_contract_year`・`option_quotation_year`）、2 限月ページの版（`option_page2`。新系の T にも行があるときだけ）、新系のみ（`new_only_snapshots`、保存条件の差）。`unexplained` = 旧系のみ（新系の取りこぼし）+ 各表の説明できない行（約定の列がどの候補とも合わないなど）。例は `unexplained_samples`（先頭 20 件）
+- `*_legacy_older`（#61）: 上のどれにも当たらない行のうち、次をすべて満たすもの。(1) 新系の T が旧系の行から進んでいる（spot・future は約定時刻が後、option は出来高が多く約定時刻が同じか後）。(2) 旧系の行が新系の T より前の版と合う: (a) T の 10 分前〜T の前のスナップショットの同じ行と一致（spot・future は全列、option は約定の列。気配と表示の列は問わない）= 旧系が古い版を読んだ、または (b) 新系の連続する 2 スナップショット S1 < S2（S1 は T の 10 分前以降、S2 ≤ T）の版の間 = 途中に出た版を旧系だけが読んだ。(b) は option なら出来高が S1 < 旧 < S2（狭い不等号）・約定時刻が S1 ≤ 旧 ≤ S2・基準価格（price − diff）と清算値・清算日が S1 か S2 と同じ・建玉が S1 と S2 の間。spot・future は出来高が無いので約定時刻が S1 < 旧 < S2・基準価格と hv が S1 か S2 と同じ（future は限月も）。(3) 新系の T の値の裏付け: 旧系の次のスナップショットの同じ行が新系の T と同じ値（spot・future は全列、option は約定の列）。または (a) と S2 < T の (b) に限り、新系の直後のスナップショットの同じ行が同じ値。新系の直後は新系自身の読み取りで独立ではない（同じ誤りが直後まで続けば満たす）ので、S2 = T の (b) には使わない。比べる相手が無ければ説明しない。(4) 旧系の次に同じ行があれば新系の T と矛盾しない（option は出来高・約定時刻が新系の T 以上、spot・future は約定時刻が新系の T 以後）。10 分は 2026-10-13 の実データで見た最も古い版（2 分前）に余裕を持たせた上限。限界: 新系の T の誤りが直後のスナップショットにも続き、旧系の次がそれと矛盾しない形は (a) と S2 < T の (b) で説明済みになりうる。また旧系の行が新系の直後と一致すると `version` になるので、新系の T だけが 1 回誤り旧系が正しい値を読んだ形は検出できない（#61 の前からの `version` の性質）。`tests/test_sql_bq.py` で検出できる形・できない形を確かめている
 - 2026-10-13 09:32〜11:58 JST の実データ（旧系 103 スナップショット）で手元で再現した分類: spot 一致 35・版の差 66・新系の版の遅れ 2、future 一致 34・版の差 67・新系の版の遅れ 2、option 一致 97,107・版の差 227・気配と表示だけの差 13,596、説明できない差分 0
+- 2026-10-13 08:52 JST〜10-14 01:08 JST（日中と夜間）を #61 の分類で手元で再現（旧系の 638 スナップショットをすべて比較、`legacy_only` 0）。説明できない行（`unexplained`）は #38（09:30 JST）より前の 21 行（option 19・spot 1・future 1）だけで、#38 より後は 0。#38 より後の説明済みの行のうち #61 の分類によるもの: `option_legacy_older` 2（古い版 1・途中の版 1、新系の直後で裏付け）、`future_legacy_older` 1（13:07 JST、直前と T の間の版、旧系の次で裏付け）、`future_new_stale` 3（新系の T が直前と同じ中身 2・裏付けの無い書き換え途中の版 1（13:44 JST））、`spot_new_stale` 2（新系の T が直前と同じ中身）。21:30 JST 以降（夜間）は説明できない行も #61 の分類による行も無い
 - 料金: クエリは 1 日 約 0.5 GiB（US の作業用テーブル 約 150MB、東京の品質チェック・突き合わせ 各 数百 MB の見込み）。データセットコピーの転送 1 日 約 100MB。作業用データセットの表は 7 日で消える（止めたとき用）
 
 ### 変数
@@ -1235,7 +1237,8 @@ FROM optionchan_tokyo.quality_daily ORDER BY window_date DESC LIMIT 7'
 bq query --location=$L --use_legacy_sql=false --format=pretty '
 SELECT compare_date, copy_complete, legacy_snapshots, new_snapshots, new_only_snapshots, legacy_only_snapshots,
   spot_version + future_version + option_version AS version_rows, spot_new_stale + future_new_stale AS new_stale_rows,
-  option_quote_only, spot_unexplained, future_unexplained, option_unexplained, unexplained, fail_on_unexplained,
+  option_quote_only, spot_legacy_older + future_legacy_older + option_legacy_older AS legacy_older_rows,
+  spot_unexplained, future_unexplained, option_unexplained, unexplained, fail_on_unexplained,
   legacy_condition_candidates, legacy_condition_missed
 FROM optionchan_tokyo.legacy_compare_daily ORDER BY compare_date DESC LIMIT 7'
 # 実行の状態（最新 3 回）
@@ -1244,6 +1247,8 @@ for n in quality-daily legacy-compare legacy-copy; do
 done
 bq ls --transfer_run --run_attempt=LATEST --max_results=3 --format=json "$(tc legacy-stage us)" | jq -c '.[] | {runTime, state}'
 ```
+
+`new_stale_rows`（`*_new_stale`）と `legacy_older_rows`（`*_legacy_older`）は説明済みだが、新系の解析の誤りを吸いうる分類なので件数も見る（2026-10-13 08:52 JST〜10-14 01:08 JST は 5 行・3 行）。前の日より急増したら、その日の該当行を新旧で並べて見る（「ERROR の切り替え」）。
 
 前日の行が無い（実行自体が無い）ことは M2 では通知されない。上の確認で前日の行があることを見る。
 
@@ -1259,7 +1264,7 @@ bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json \
 | メッセージ | 意味 | 対応 |
 |---|---|---|
 | `quality: {...}` | 品質チェックの違反（JSON は `quality_daily` の行と同じ） | 下の「品質チェックの違反」 |
-| `legacy_compare: unexplained N on <日付> {...}` | 説明できない差分（記録は済み。「ERROR の切り替え」を有効にしているときだけ出る） | 下の「説明できない差分」 |
+| `legacy_compare: unexplained N on <日付> {...}` | 説明できない差分（記録は済み。「ERROR の切り替え」が有効で、窓の日付が下限以降のときだけ出る） | 下の「説明できない差分」 |
 | `legacy_compare: copy incomplete on <日付> ...` | コピーの 3 テーブルの行数が stage の件数と違う（記録は済み、`copy_complete = false`。その日の比較は当てにならない） | `legacy-copy` の実行の状態とログを見る。直ったら「再実行」で copy → compare |
 | `legacy_compare: copy is not for the window ...` | `legacy-stage` か `legacy-copy` が失敗・遅延して、コピーが前日分でない（記録していない） | `legacy-stage`（US）と `legacy-copy` の実行の状態とログを見る。直ったら「再実行」で stage → copy → compare |
 | `... is in the future (run_time ...)` | 手動実行の `run_time` が未来の窓を指している | `run_time` を直して再実行 |
@@ -1302,13 +1307,18 @@ bq ls --transfer_run --run_attempt=LATEST --max_results=1 --format=json "$(tc le
 
 ### ERROR の切り替え（説明できない差分）
 
-`legacy-compare` は当面、説明できない差分を記録するだけで失敗させない（`infra/prod/sq.tf` の `legacy_compare_fail_on_unexplained = false`。記録の `fail_on_unexplained` 列に残る）。分類が実データに合っていることを確かめてから有効にする:
+`legacy-compare` は説明できない差分（`unexplained`）が 1 以上なら、記録の後に失敗する（M2 で通知。07:30 の失敗なので、通知の抑制は 08:30 に終わる）。切り替えは `infra/prod/sq.tf` の 2 つの local:
 
-1. デプロイ後、営業日の記録を数日（3 営業日以上、夜間・寄り付き前を含む）ためる
-2. 「日次の確認」の `legacy_compare_daily` で、`unexplained` と `unexplained_samples` を見る。0 でない日は「説明できない差分」の手順で原因を調べ、新系の不具合か、分類の漏れ（説明の付く新しい種類）かを決める。分類の漏れなら `sql/legacy/compare.sql` と `tests/test_sql_bq.py` を直す PR を出し、その日を「再実行」して 0 になることを確かめる（直した分類は #11 にコメントする）
-   - `option_quote_only` の比率（`option_quote_only / option_compared`）も見る。2026-10-13 の日中は約 12%。気配の列だけを誤る新系のパーサーの不具合はこの分類に吸収されて検出できないので、比率が大きく上がったら気配の列を新旧で並べて見る
-3. 説明できない差分が新系の不具合でだけ出る状態になったら、`legacy_compare_fail_on_unexplained = true` にする PR を出す（plan は DTS `legacy_compare` の `params` の update 1）。以後は 1 以上で M2 が鳴る（07:30 の失敗なので、通知の抑制は 08:30 に終わる）
-4. 戻すときは `false` にする PR
+- `legacy_compare_fail_on_unexplained`（true で有効）
+- `legacy_compare_fail_from`（窓の日付の下限。これより前の日は、再実行しても記録だけで失敗させない）。`2026-10-14` にしているのは、2026-10-13 の分が #38 の前（09:30 JST まで）の説明できない行（option 19 行）を含むため
+
+記録の `fail_on_unexplained` 列は、この 2 つを合わせた「その実行で ERROR にする設定だったか」（下限より前の日は false）。経緯: 2026-10-13 の記録で分類を確かめ、#61 で旧系の古い版・途中の版（`*_legacy_older`）と新系の書き換え途中の版（`*_new_stale`）を足した（2026-10-13 の結果は「突き合わせの分類」の再現の項）。
+
+失敗を受けたら「説明できない差分」の手順で原因を調べ、新系の不具合か、分類の漏れ（説明の付く新しい種類）かを決める。分類の漏れなら `sql/legacy/compare.sql` と `tests/test_sql_bq.py` を直す PR を出し、その日を「再実行」して 0 になることを確かめる（直した分類は #11 にコメントする）。
+
+- `option_quote_only` の比率（`option_quote_only / option_compared`）も見る。2026-10-13 の 09:32〜11:58 JST は約 12%、08:52〜21:29 JST 全体は約 8%。気配の列だけを誤る新系のパーサーの不具合はこの分類に吸収されて検出できないので、比率が大きく上がったら気配の列を新旧で並べて見る
+- `*_new_stale` と `*_legacy_older` も件数を見る（2026-10-13 08:52 JST〜10-14 01:08 JST は `spot_new_stale` 2・`future_new_stale` 3（うち裏付けの無い書き換え途中の版 1）・`future_legacy_older` 1・`option_legacy_older` 2）。`*_new_stale` のうち、新系の T が直前と同じ中身の行と裏付けの無い書き換え途中の行は、それぞれ 1 日に表ごと 3 行を超えると全部 `unexplained` になる。どちらも新系の T の値が直前と同じか旧系より進んでいる行を説明済みにするので、急増したら新系の解析の誤りがすり抜けていないかを疑い、その日の行を新旧で並べて見る
+- 分類が落ち着くまで止めたいときは `legacy_compare_fail_on_unexplained = false` にする PR（plan は DTS `legacy_compare` の `params` の update 1）
 
 `copy_complete = false`（コピーの欠け）とコピーの窓の不一致は、切り替えに関係なく失敗する（比べた結果が当てにならないため）。
 

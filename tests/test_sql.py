@@ -94,7 +94,7 @@ SCHEMA_DIR = os.path.join(ROOT, 'schema', 'tokyo')
 SCHEDULED = {
     'sql/quality/quality_daily.sql': ({'project', 'dataset'}, 'quality_daily', 'window_date'),
     'sql/legacy/stage.sql': ({'project', 'legacy_dataset', 'stage_dataset'}, None, None),
-    'sql/legacy/compare.sql': ({'project', 'dataset', 'copy_dataset', 'fail_on_unexplained'}, 'legacy_compare_daily', 'compare_date'),
+    'sql/legacy/compare.sql': ({'project', 'dataset', 'copy_dataset', 'fail_on_unexplained', 'fail_from'}, 'legacy_compare_daily', 'compare_date'),
     # 1 時間足（#49）。結果は atm_* の 3 表への MERGE（検査は tests/test_ohlc.py）
     'sql/ohlc/atm_hourly.sql': ({'project', 'dataset'}, None, None),
 }
@@ -196,14 +196,19 @@ def test_errors_after_recording():
     compare = sq('sql/legacy/compare.sql')
     # 記録（MERGE）の後に違反・説明できない差分で失敗させる（新系の M2 で通知）
     assert re.search(r'MERGE .*IF \(SELECT violations FROM result\) > 0 THEN\s+SELECT ERROR\(FORMAT\(\'quality: ', quality, re.S)
-    # 説明できない差分で失敗させるのは切り替え（infra/prod/sq.tf の local）が true のときだけ。コピーの欠けは常に失敗
+    # 説明できない差分で失敗させるのは切り替え（infra/prod/sq.tf の local）が true で、窓の日付が下限以降のときだけ（#61。
+    # 判定は結果の fail_on_unexplained 列に入れ、tests/test_sql_bq.py が固定値で確かめる）。コピーの欠けは常に失敗
     assert 'DECLARE fail_on_unexplained BOOL DEFAULT ${fail_on_unexplained};' in compare
-    assert re.search(r'MERGE .*IF fail_on_unexplained AND \(SELECT unexplained FROM result\) > 0 THEN\s+SELECT ERROR\(', compare, re.S)
+    assert "DECLARE fail_from DATE DEFAULT DATE '${fail_from}';" in compare
+    assert "fail_on_unexplained AND DATE(win_start, 'Asia/Tokyo') >= fail_from AS fail_on_unexplained," in compare
+    assert re.search(r'MERGE .*IF \(SELECT fail_on_unexplained AND unexplained > 0 FROM result\) THEN\s+SELECT ERROR\(', compare, re.S)
     assert re.search(r'MERGE .*IF NOT \(SELECT copy_complete FROM result\) THEN\s+SELECT ERROR\(', compare, re.S)
     assert "'legacy_compare: unexplained " in compare
     tf = read(SQ_TF)
-    assert re.search(r'^\s*legacy_compare_fail_on_unexplained = false$', tf, re.M)
+    assert re.search(r'^\s*legacy_compare_fail_on_unexplained = true$', tf, re.M)
+    assert re.search(r'^\s*legacy_compare_fail_from\s+= "\d{4}-\d{2}-\d{2}"$', tf, re.M)
     assert 'fail_on_unexplained = local.legacy_compare_fail_on_unexplained' in tf
+    assert re.search(r'fail_from\s+= local\.legacy_compare_fail_from', tf)
     # コピーが今回の窓のものでなければ、記録の前に止める
     guard = compare.index('staged_window` WHERE window_start = win_start AND window_end = win_end')
     assert guard < compare.index('CREATE TEMP TABLE result') < compare.index('MERGE ')
