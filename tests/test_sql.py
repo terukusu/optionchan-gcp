@@ -86,7 +86,7 @@ def test_no_hardcoded_names(name):
         assert ref.startswith('${project}.${dataset}.'), ref
 
 
-# ---- 日次の品質チェック・新旧の突き合わせ（#40）。BigQuery で動かす検査は tests/test_sql_bq.py ----
+# ---- 日次の品質チェック・新旧の突き合わせ（#40）・1 時間足（#49）。BigQuery で動かす検査は tests/test_sql_bq.py・tests/test_ohlc_bq.py ----
 
 SQ_TF = os.path.join(ROOT, 'infra', 'prod', 'sq.tf')
 SCHEMA_DIR = os.path.join(ROOT, 'schema', 'tokyo')
@@ -95,6 +95,8 @@ SCHEDULED = {
     'sql/quality/quality_daily.sql': ({'project', 'dataset'}, 'quality_daily', 'window_date'),
     'sql/legacy/stage.sql': ({'project', 'legacy_dataset', 'stage_dataset'}, None, None),
     'sql/legacy/compare.sql': ({'project', 'dataset', 'copy_dataset', 'fail_on_unexplained'}, 'legacy_compare_daily', 'compare_date'),
+    # 1 時間足（#49）。結果は atm_* の 3 表への MERGE（検査は tests/test_ohlc.py）
+    'sql/ohlc/atm_hourly.sql': ({'project', 'dataset'}, None, None),
 }
 WINDOW_DECLARE = (
     "DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo');\n"
