@@ -434,7 +434,7 @@ GROUP BY d ORDER BY d'
 | fork からの PR の workflow 実行 | 外部の貢献者はすべて承認必須 |
 | 使えるアクション | GitHub 製 + `patterns_allowed` に列挙したもの（`hashicorp/setup-terraform@*`、`google-github-actions/auth@*`。#10）、SHA ピン留め必須 |
 | Environment `prod` | `master` のみ、required reviewer は所有者（自己承認可）。deploy workflow の `apply` job が使う（#10） |
-| secret / variables | secret `GCP_WIF_PROVIDER`（WIF プロバイダの完全名。プロジェクト番号を含む）、variables `GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY`（SA のメール）、variables `GCP_PROJECT_ID`（GCP プロジェクト ID）/ `TF_STATE_BUCKET`（prod の state のバケット名 `<PROJECT_ID>-tfstate`）（#55。ci・deploy が Terraform の `project_id`・backend とイメージの参照に使う）、secret `TF_ALERT_POLICY_IDS`（アラート取り込み用の一時的な値。Actions のログに出さないため secret にする。取り込み後に削除）（#10） |
+| secret / variables | secret `GCP_WIF_PROVIDER`（WIF プロバイダの完全名。プロジェクト番号を含む）、variables `GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY`（SA のメール）、variables `GCP_PROJECT_ID`（GCP プロジェクト ID）/ `TF_STATE_BUCKET`（prod の state のバケット名 `<PROJECT_ID>-tfstate`）（#55。ci・deploy が Terraform の `project_id`・backend とイメージの参照に使う）、secret `TF_ALERT_POLICY_IDS`（アラート取り込み用の一時的な値。Actions のログに出さないため secret にする。取り込み後に削除）（#10）。取引カレンダーの TOML の PR（#66、任意）: variables `GCP_SA_CALENDAR_TOML`（`sa-calendar-toml` のメール）/ `CALENDAR_APP_CLIENT_ID`（GitHub App の Client ID）、Environment `calendar`（`master` のみ。承認なし）の secret `CALENDAR_APP_PRIVATE_KEY`（App の秘密鍵）。設定は「取引カレンダー（#63）」の「TOML の PR（#66）」 |
 | secret scanning | 有効（push protection も有効） |
 
 承認数を 1 以上にすると自分の PR をマージできなくなる。`require_last_push_approval`（最後の push を別の人が承認）も同じ理由で `false` にする。
@@ -2231,14 +2231,64 @@ bq query --location=$L --use_legacy_sql=false 'DELETE FROM `optionchan_tokyo.tra
 ### TOML（`config/trading_calendar.toml`）
 
 - ingest が読むのは取引時間（`[sessions]`）・`grace_minutes`・`no_night_session_before` と、BigQuery の版を読めないときの予備の `closed_dates` / `covered_until`
-- 別リポジトリのシミュレーターが TOML の raw URL を同期しているので、**シミュレーターが BigQuery の版を読むようになる（縦切り 2）まで**、休業日が変わったら TOML も合わせる。最新版から生成できる（JPX にはアクセスしない。コメント・他のキーはそのまま、`covered_until` と今日以降の `closed_dates` だけ置き換える）:
+- 別リポジトリのシミュレーターが TOML の raw URL を同期しているので、**シミュレーターが BigQuery の版を読むようになる（縦切り 2）まで**、休業日が変わったら TOML も合わせる。workflow `calendar-toml`（下の「TOML の PR（#66）」）が毎日比べて PR を出す。手で合わせるときは最新版から生成できる（JPX にはアクセスしない。コメント・他のキーはそのまま、`covered_until` と今日以降の `closed_dates` だけ置き換える）:
 
 ```bash
 cd apps/ingest
-GCP_PROJECT=$P uv run --locked python -m optionchan_ingest.calendar_sync --print-toml > /tmp/trading_calendar.toml
-diff ../../config/trading_calendar.toml /tmp/trading_calendar.toml   # 差分を見て、コメント（確定の時期など）を直して PR
+# 今日以降の休業日・covered_until が違うときだけ TOML を書き換え、PR のタイトル・本文を JSON で出す（TOML の covered_until の方が新しければ書き換えない）
+GCP_PROJECT=$P uv run --locked python -m optionchan_ingest.calendar_sync --update-toml | jq -r .status
+# または常に生成して標準出力へ（過ぎた休業日も消える）
+GCP_PROJECT=$P uv run --locked python -m optionchan_ingest.calendar_sync --print-toml > <scratch>/trading_calendar.toml
 uv run --locked pytest -q tests/test_calendar.py tests/test_jpx_calendar.py
 ```
 
-- **廃止の条件**: シミュレーターの縦切り 2 が済み、かつ 2027-06 の確定の公表（2027 年下半期）を自動で取り込めたこと。廃止しても `[sessions]` などの設定は残し、`closed_dates` / `covered_until` だけを消す（BigQuery を読めないときは書いていない平日を取引日として扱う）。消すときは `apps/ingest/src/optionchan_ingest/calendar.py` の `load_calendar` のキーの検査（`_TOP_KEYS`）と `Calendar` の予備の値の扱い（`CalendarHolder` の TOML との比較、`--print-toml`）も直す（直さないと読み込みでエラーになる）
+- **廃止の条件**: シミュレーターの縦切り 2 が済み、かつ 2027-06 の確定の公表（2027 年下半期）を自動で取り込めたこと。廃止しても `[sessions]` などの設定は残し、`closed_dates` / `covered_until` だけを消す（BigQuery を読めないときは書いていない平日を取引日として扱う）。消すときは `apps/ingest/src/optionchan_ingest/calendar.py` の `load_calendar` のキーの検査（`_TOP_KEYS`）と `Calendar` の予備の値の扱い（`CalendarHolder` の TOML との比較、`--print-toml` / `--update-toml`）も直す（直さないと読み込みでエラーになる）。同時に workflow `calendar-toml.yml`・`.github/scripts/calendar-pr.sh`、`sa-calendar-toml`（`infra/bootstrap/calendar_toml.tf`・`infra/prod/calendar.tf` の `calendar_toml_reader`）、variables（`GCP_SA_CALENDAR_TOML`・`CALENDAR_APP_CLIENT_ID`）、Environment `calendar`（secret `CALENDAR_APP_PRIVATE_KEY` ごと）、GitHub App を消す
+
+### TOML の PR（#66）
+
+workflow `.github/workflows/calendar-toml.yml` が毎日 07:30 JST（06:40 の取り込みの後）に、BigQuery の最新版と master の TOML を比べる（`--update-toml`）。
+
+- **比べるもの**: 今日以降の `closed_dates` と `covered_until`。過ぎた休業日（生成した TOML からは消える）とコメントだけの違いでは PR を出さない（祝日が過ぎるたびにイメージを作り直さない）。TOML の `covered_until` の方が新しい（緊急回避で手で延ばした）ときは何もしない
+- **違うとき**: ブランチ `bot/trading-calendar` に TOML の変更を push し、PR を作る（開いていれば更新する。同じ内容なら push しない）。タイトル・本文に追加・削除した休業日と `covered_until` の新旧が入る
+- **一致したとき**: 開いている PR を閉じてブランチを消す（扱うのは、このリポジトリのブランチ `bot/trading-calendar` で App が作った PR と、github-actions が立てた Issue だけ）
+- **必須チェック**: PR と push は GitHub App のトークンで行うので、`pull_request` の CI（`pytest`・`terraform-plan`）が通常の PR と同じく走る。App が未設定なら PR を作らず、Issue「取引カレンダーの TOML を BigQuery の最新版に合わせる PR が要る（#66）」を立てる（所有者が上の `--update-toml` で PR を出す。一致したら Issue は自動で閉じる）
+- **TOML の方が新しいとき**: run に注記（warning「TOML の covered_until の方が BigQuery の最新版より新しい」）が出て、版が追いつくまで PR は出ない。緊急回避が済んだら TOML の `covered_until` を戻す（上の「ERROR を受けたとき」）
+- **マージ**: 本文の休業日を JPX「祝日取引」のページと見比べてから `gh pr merge --merge`。TOML はイメージの入力なので、ingest のイメージが作り直され deploy の `apply` の承認が要る（年に数回）。閉じた PR は次の日に作り直されるので、出したくないときは workflow を止める（`gh workflow disable calendar-toml.yml -R "$REPO"`）
+- **権限**: 最新版を読む job（`read-calendar`）は `sa-calendar-toml`（`trading_calendar`・`trading_calendar_latest` のテーブル単位の `dataViewer` と `bigquery.jobUser` だけ）を WIF で借用する。借用できるのは master の ref の job だけ。この job はリポジトリに書けない。PR を出す job（`propose`）は GCP の SA を借用しない
+- 定期の workflow は、リポジトリに 60 日間活動が無いと GitHub に止められる（メールが来る。`gh workflow enable calendar-toml.yml -R "$REPO"` で戻す）
+
+#### 設定（一度だけ。どれも無ければ workflow は何もしない）
+
+1. bootstrap を apply する（`sa-calendar-toml`、その `bigquery.jobUser` と WIF の借用。prod の `calendar_toml_reader` は SA が無いと失敗するので、#66 の PR をマージする前に、その PR のブランチの内容で apply する。手順は「Terraform」の「bootstrap の初回 apply」の 2〜4。要約の目安: create 3（SA 1・プロジェクト IAM 1・SA IAM 1）、update / delete / replace 0）
+2. PR をマージし、deploy の `apply` を承認する（prod の `calendar_toml_reader` 2 件）
+3. variables を設定する:
+
+```sh
+$TF -chdir=infra/bootstrap output -raw sa_calendar_toml_email | gh variable set GCP_SA_CALENDAR_TOML -R "$REPO"
+```
+
+4. GitHub App を作る（PR を自動で出すとき。無ければ Issue になる）: 自分のアカウントの Settings → Developer settings → GitHub Apps → New GitHub App。Webhook は無効、Repository permissions は **Contents: Read and write** と **Pull requests: Read and write** だけ（Metadata: Read は自動）、インストールできるのは自分のアカウントだけ。作成後、秘密鍵を生成し、App を**このリポジトリだけ**にインストールする。秘密鍵のファイルは登録したら消す
+
+秘密鍵は Environment `calendar`（`master` のみ）の secret にする（workflow の `propose` job だけが使う。承認は付けない）:
+
+```sh
+printf '%s' '<App の Client ID>' | gh variable set CALENDAR_APP_CLIENT_ID -R "$REPO"
+jq -n '{wait_timer: 0, deployment_branch_policy: {protected_branches: false, custom_branch_policies: true}}' \
+  | gh api -X PUT $R/environments/calendar --input - >/dev/null
+gh api -X POST $R/environments/calendar/deployment-branch-policies -f name=master -f type=branch >/dev/null
+gh secret set CALENDAR_APP_PRIVATE_KEY -R "$REPO" --env calendar < <scratch>/<App>.private-key.pem && rm -f <scratch>/<App>.private-key.pem
+# 確認（すべて true）
+gh api $R/environments/calendar/deployment-branch-policies --jq '[.branch_policies[] | {name, type}] == [{"name": "master", "type": "branch"}]'
+gh secret list -R "$REPO" --env calendar --json name -q '[.[].name] == ["CALENDAR_APP_PRIVATE_KEY"]'
+gh secret list -R "$REPO" --json name -q '[.[].name] | index("CALENDAR_APP_PRIVATE_KEY") == null'   # リポジトリの secret には置かない
+```
+
+5. 手動で 1 回動かして確かめる（差分が無ければ「unchanged」で何もしない）:
+
+```sh
+gh workflow run calendar-toml.yml -R "$REPO" --ref master
+gh run list -R "$REPO" --workflow calendar-toml.yml --limit 1   # 成功すること。ジョブの Summary に結果
+```
+
+App の秘密鍵が漏れたら、App の設定で鍵を削除して作り直し、secret を入れ替える。
 - `no_night_session_before`（直前の夜間セッションが無い取引日）は JPX の表に無いので、公表されたら従来どおり TOML に足す（通常は空）

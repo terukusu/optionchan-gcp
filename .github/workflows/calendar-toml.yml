@@ -1,0 +1,135 @@
+# 取引カレンダーの TOML（config/trading_calendar.toml）を BigQuery の最新版に合わせる PR を出す（#66）。
+# 最新版と TOML の今日以降の休業日・covered_until が違うときだけ PR を作る・更新する（過ぎた休業日・コメントだけの違いは数えない）。
+# 一致したら開いている PR を閉じる。TOML の covered_until の方が新しい（手で延ばした）ときは何もしない。
+# - read-calendar: 読み取り用の SA（vars.GCP_SA_CALENDAR_TOML。trading_calendar・trading_calendar_latest の dataViewer と
+#   bigquery.jobUser だけ。借用は master の ref だけ）で最新版を読み、TOML を生成する。リポジトリへの書き込み権限は無い
+# - propose: GitHub App のトークンで PR を出す（App で作った PR・push は必須チェックの CI を起動する）。
+#   App が未設定なら GITHUB_TOKEN で Issue を立てる（PR は所有者が手で出す）。App の秘密鍵は Environment calendar の secret
+# 設定は docs/runbook.md「取引カレンダー（#63）」の「TOML の PR（#66）」。SA の変数が無ければ何もしない
+name: calendar-toml
+
+on:
+  schedule:
+    # 毎日 07:30 JST（06:40 JST の取り込みの後）
+    - cron: "30 22 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: calendar-toml
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  read-calendar:
+    if: vars.GCP_SA_CALENDAR_TOML != '' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      status: ${{ steps.toml.outputs.status }}
+      title: ${{ steps.toml.outputs.title }}
+      body_b64: ${{ steps.toml.outputs.body_b64 }}
+      toml_b64: ${{ steps.toml.outputs.toml_b64 }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      # 依存の取得は GCP の認証より前（資格情報ファイルが無いうちに）
+      - name: ingest の依存のインストール
+        working-directory: apps/ingest
+        env:
+          UV_PYTHON_DOWNLOADS: never
+        run: |
+          python -m pip install uv==0.12.19
+          uv sync --locked --python 3.13
+      - name: repository variables の確認
+        env:
+          GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+        run: |
+          if [ -z "$GCP_PROJECT_ID" ]; then
+            echo "repository variable GCP_PROJECT_ID が未設定（runbook「GitHub リポジトリの設定」）"
+            exit 1
+          fi
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_SA_CALENDAR_TOML }}
+      - name: 最新版から TOML を生成
+        id: toml
+        working-directory: apps/ingest
+        env:
+          GCP_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          CALENDAR_PATH: ${{ github.workspace }}/config/trading_calendar.toml
+        run: |
+          uv run --locked python -m optionchan_ingest.calendar_sync --update-toml > "$RUNNER_TEMP/result.json"
+          result=$(tail -n 1 "$RUNNER_TEMP/result.json")
+          status=$(jq -r .status <<<"$result")
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "最新版と TOML: ${status}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$status" = toml_newer ]; then
+            # BigQuery の版が TOML（手で延ばした covered_until）に追いつくまで PR は出さない。run の注記に残す
+            echo "::warning::TOML の covered_until の方が BigQuery の最新版より新しいので PR を出さない（版が追いつくまで毎日この注記が出る）"
+          fi
+          if [ "$status" = changed ]; then
+            title=$(jq -r .title <<<"$result")
+            {
+              echo "title=${title//$'\n'/ }"
+              echo "body_b64=$(jq -r .body <<<"$result" | base64 -w0)"
+              echo "toml_b64=$(base64 -w0 "$CALENDAR_PATH")"
+            } >> "$GITHUB_OUTPUT"
+            jq -r .body <<<"$result" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  propose:
+    needs: read-calendar
+    if: needs.read-calendar.outputs.status == 'changed' || needs.read-calendar.outputs.status == 'unchanged'
+    runs-on: ubuntu-latest
+    # App の秘密鍵は Environment calendar（master のみ）の secret。この job は OIDC を使わない
+    environment: calendar
+    permissions:
+      contents: read
+      issues: write
+    env:
+      STATUS: ${{ needs.read-calendar.outputs.status }}
+      TITLE: ${{ needs.read-calendar.outputs.title }}
+      BODY_B64: ${{ needs.read-calendar.outputs.body_b64 }}
+      TOML_B64: ${{ needs.read-calendar.outputs.toml_b64 }}
+      BRANCH: bot/trading-calendar
+    steps:
+      # App は このリポジトリだけにインストールし、トークンは contents・pull-requests の write だけに絞る
+      - name: App のトークン
+        id: app
+        if: vars.CALENDAR_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.CALENDAR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.CALENDAR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: master
+          # PR のブランチへの push に App のトークンを使う（App が無ければ push しない）
+          token: ${{ steps.app.outputs.token || github.token }}
+          persist-credentials: ${{ steps.app.outcome == 'success' }}
+      - name: PR を作る・更新する・閉じる
+        if: steps.app.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token }}
+          APP_SLUG: ${{ steps.app.outputs.app-slug }}
+        run: .github/scripts/calendar-pr.sh pr
+      - name: Issue を作る・更新する・閉じる（App が未設定）
+        if: steps.app.outcome == 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/scripts/calendar-pr.sh issue

@@ -135,6 +135,65 @@ def test_render_toml_after_update(tmp_path):
     assert date(2026, 11, 23) not in cal.closed_dates  # 過去日は書かない
 
 
+# ---- TOML の差分（#66） ----
+
+
+def test_toml_change_none_when_same():
+    change = jc.toml_change(TOML_PATH.read_text(encoding="utf-8"), fixture_version(), TODAY)
+    assert not change.changed and not change.toml_newer
+    assert change.added == () and change.removed == ()
+
+
+def test_toml_change_ignores_past_dates():
+    # 2026-11-23 が過ぎると生成した TOML からは消えるが、差分には数えない（祝日が過ぎるたびに PR を出さない）
+    text = TOML_PATH.read_text(encoding="utf-8")
+    change = jc.toml_change(text, fixture_version(), date(2026, 11, 24))
+    assert not change.changed
+    assert "2026-11-23" not in change.text
+
+
+def test_toml_change_added_removed_and_covered_until():
+    text = TOML_PATH.read_text(encoding="utf-8")
+    # 2027-09-20 が実施するに変わり、2027-07-19（海の日）が実施しないに変わり、下半期が確定
+    version = jc.build_version(
+        std_page(confirmed_until=date(2027, 12, 31), closed=(date(2026, 11, 23), date(2027, 7, 19)))
+    )
+    change = jc.toml_change(text, version, TODAY)
+    assert change.changed and not change.toml_newer
+    assert [d for d, _ in change.added] == [date(2027, 7, 19)]
+    assert change.added[0][1].startswith("海の日（確定")
+    assert change.removed == ((date(2027, 9, 20), "敬老の日（BCP テストのため実施しない。予定）"),)
+    assert change.covered_until == (date(2027, 6, 30), date(2027, 12, 31))
+    assert set(tomllib.loads(change.text)["closed_dates"]) == {d for d in version.closed_dates if d >= TODAY}
+
+    title, body = jc.toml_pr_text(change, datetime(2026, 12, 1, 21, 40, tzinfo=UTC), TODAY)
+    assert title.startswith("取引カレンダーの TOML を BigQuery の最新版に合わせる")
+    assert title.endswith("（休業日 +1、休業日 -1、covered_until 2027-06-30 → 2027-12-31）")
+    assert "- covered_until: 2027-06-30 → 2027-12-31\n" in body
+    assert "  - 2027-07-19（海の日（確定" in body
+    assert "  - 2027-09-20（敬老の日（BCP テストのため実施しない。予定））" in body
+    assert "version_at 2026-12-01T21:40:00+00:00" in body
+
+
+def test_toml_change_covered_until_only():
+    text = TOML_PATH.read_text(encoding="utf-8").replace("covered_until = 2027-06-30", "covered_until = 2027-05-31")
+    change = jc.toml_change(text, fixture_version(), TODAY)
+    assert change.changed and change.added == () and change.removed == ()
+    title, body = jc.toml_pr_text(change, VERSION_AT_FOR_TOML, TODAY)
+    assert title.endswith("（covered_until 2027-05-31 → 2027-06-30）")
+    assert "  - なし" in body
+
+
+def test_toml_change_toml_newer():
+    # 手で TOML の covered_until を延ばした（緊急回避）ときは版に合わせない
+    text = TOML_PATH.read_text(encoding="utf-8").replace("covered_until = 2027-06-30", "covered_until = 2027-12-31")
+    change = jc.toml_change(text, fixture_version(), TODAY)
+    assert change.toml_newer
+
+
+VERSION_AT_FOR_TOML = datetime(2026, 10, 14, 21, 40, tzinfo=UTC)
+
+
 # ---- 祝日 CSV ----
 
 
