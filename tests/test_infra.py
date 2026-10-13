@@ -197,6 +197,15 @@ def test_legacy_stopped_removes_only_legacy_alerts():
     assert 'if contains(keys(local.alert_policies), k)' in imports
 
 
+
+def test_alert_policies_replaced_when_log_match_changes():
+    """ログ一致の条件はその場で更新すると API がポリシーを無効にするので、変わったら作り直す（作ってから消す）"""
+    tf = dict(all_tf())['prod/monitoring.tf']
+    assert 'resource "terraform_data" "log_match_conditions"' in tf
+    assert 'try(c.conditionMatchedLog, null)' in tf
+    assert 'create_before_destroy = true' in tf
+    assert 'replace_triggered_by  = [terraform_data.log_match_conditions[each.key]]' in tf
+
 # ---- 取引カレンダー（#63） ----
 
 
