@@ -159,8 +159,34 @@ def is_stale(
     """
     _require_aware(now, "now")
     _require_aware(page_updated_at, "page_updated_at")
-    limit = timedelta(minutes=day_limit if session.kind == DAY else night_limit)
+    limit = stale_limit(session, day_limit, night_limit)
     return min(now, session.end) - max(page_updated_at, session.start) > limit
+
+
+def stale_limit(
+    session: Session, day_limit: int = settings.STALE_DAY_MINUTES, night_limit: int = settings.STALE_NIGHT_MINUTES
+) -> timedelta:
+    """鮮度のしきい値（日中 / 夜間）"""
+    return timedelta(minutes=day_limit if session.kind == DAY else night_limit)
+
+
+def unavailable_window(
+    now: datetime,
+    session: Session,
+    day_limit: int = settings.STALE_DAY_MINUTES,
+    night_limit: int = settings.STALE_NIGHT_MINUTES,
+) -> tuple[datetime, datetime] | None:
+    """jpx_unavailable が続いているかの判定（#42）で一覧する生 HTML の名前の時刻の範囲 (start, end)。
+
+    この範囲に保存済みのスナップショットが無ければ、最後の保存は start 以前なので is_stale と同じ規則で stale。
+    start = min(now, セッション終了) − しきい値、end = now。セッションの開始からしきい値以内
+    （start <= セッション開始）は、最後の保存が無くても stale にならないので None（一覧しない）
+    """
+    _require_aware(now, "now")
+    start = min(now, session.end) - stale_limit(session, day_limit, night_limit)
+    if start <= session.start:
+        return None
+    return start, now
 
 
 def with_updated_at(page: FetchedPage, updated_at: datetime | None) -> FetchedPage:

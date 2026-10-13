@@ -14,7 +14,7 @@ from optionchan_ingest import settings
 from optionchan_ingest.app import Deps, fetch_wait_seconds, handle
 from optionchan_ingest.calendar import load_calendar
 from optionchan_ingest.io_bq import WriteFailed
-from optionchan_ingest.io_gcs import AlreadyExists, StorageFailed
+from optionchan_ingest.io_gcs import AlreadyExists, RawObject, StorageFailed
 from optionchan_ingest.parser import JST, JpxUnavailable, jst
 from optionchan_ingest.snapshot import FetchedPage, decode_raw
 
@@ -41,6 +41,8 @@ class Fake:
         exists_error=None,
         arrival=5.0,
         fetch_at_second=0.0,
+        raw_names=None,
+        list_error=None,
     ):
         self.calls = []
         self.timeouts = []
@@ -56,6 +58,8 @@ class Fake:
         self.arrival = arrival  # 分の頭から何秒目に届いたか
         self.fetch_at_second = fetch_at_second  # 既定 0（待たない）。待ちの検査では明示する
         self.sleeps = []
+        self.raw_names = raw_names  # 生 HTML の名前（None なら list_raw を渡さない = 継続の判定をしない）
+        self.list_error = list_error
 
     def _tick(self, kind, timeout):
         self.timeouts.append((kind, timeout))
@@ -95,6 +99,14 @@ class Fake:
         self.created[name] = data
         return 1234567
 
+    def list_raw(self, start_offset, end_offset, timeout):
+        self.calls.append(("list", start_offset, end_offset))
+        self._tick("list", timeout)
+        if self.list_error:
+            raise self.list_error
+        # GCS の一覧と同じく、名前が [start_offset, end_offset) のものだけ返す
+        return [RawObject(n, 1, MINUTE_HEAD) for n in self.raw_names if start_offset <= n < end_offset]
+
     def append_rows(self, table, rows, timeout):
         self.calls.append(("append", table))
         self._tick(f"append_{table}", timeout)
@@ -115,6 +127,7 @@ class Fake:
             monotonic=self.monotonic,
             fetch_at_second=self.fetch_at_second,
             sleep=self.sleep,
+            list_raw=None if self.raw_names is None else self.list_raw,
         )
 
 
@@ -230,6 +243,145 @@ def test_jpx_unavailable_is_warning(capsys, pages):
     assert fake.created == {}
     assert not [c for c in fake.calls if c[0] == "append"]
     assert [s for s, _ in events(capsys)] == ["WARNING"]
+
+
+# --- jpx_unavailable が続いたら ERROR（#42） ---
+
+UNAVAILABLE_PAGES = [
+    {1: JpxUnavailable("timeout"), 2: PAGE2},
+    {1: empty_page_html(), 2: PAGE2},
+    {1: PAGE1, 2: JpxUnavailable("HTTP 503")},
+    {1: PAGE1, 2: empty_page_html()},
+]
+UNAVAILABLE_IDS = ["page1_error", "page1_empty", "page2_error", "page2_empty"]
+DOWN = {1: JpxUnavailable("timeout"), 2: PAGE2}
+
+
+def raw(t):
+    return f"raw/{t:%Y/%m/%d}/{t:%Y%m%dT%H%M}.json.gz"
+
+
+@pytest.mark.parametrize("pages", UNAVAILABLE_PAGES, ids=UNAVAILABLE_IDS)
+def test_jpx_unavailable_continued_is_error(capsys, pages):
+    # 11:00 の日中。直近 30 分（10:30〜）に保存が無い → ERROR。応答は 200 jpx_unavailable のまま
+    fake = Fake(pages=pages, raw_names=[])
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    assert fake.created == {}
+    assert [c for c in fake.calls if c[0] == "list"] == [
+        ("list", "raw/2026/10/12/20261012T1030.json.gz", "raw/2026/10/12/20261012T1101.json.gz")
+    ]
+    records = logs(capsys)
+    assert [(r["severity"], r["event"]) for r in records] == [
+        ("ERROR", "jpx_unavailable_stale"),
+        ("WARNING", "jpx_unavailable"),
+    ]
+    error = records[0]
+    assert error["failure"] == "jpx_unavailable_stale"
+    assert "last_snapshot_at" not in error  # 窓の中に保存が無い
+    assert error["lag_seconds"] == (2 * 60 + 15) * 60  # セッション開始 08:45 から
+    assert error["detail"] == records[1]["detail"]
+    assert error["session"] == "day"
+
+
+@pytest.mark.parametrize(
+    "names, stale",
+    [
+        ([], True),
+        ([raw(jst(2026, 10, 12, 10, 29))], True),  # 窓の外（31 分前）
+        ([raw(jst(2026, 10, 12, 10, 30))], False),  # ちょうど 30 分前は stale ではない（is_stale と同じ）
+        ([raw(jst(2026, 10, 12, 10, 59))], False),  # 04 時台の単発の空ページと同じく、直前まで保存できていた
+        ([raw(jst(2026, 10, 12, 9, 0)), raw(jst(2026, 10, 12, 10, 45))], False),
+    ],
+)
+def test_jpx_unavailable_recent_snapshot(capsys, names, stale):
+    handle(IN_HOURS, Fake(pages=DOWN, raw_names=names).deps())
+    assert (("ERROR", "jpx_unavailable_stale") in events(capsys)) is stale
+
+
+def test_jpx_unavailable_stale_reports_last_snapshot(capsys):
+    # 11:00:30 に最後の保存が 10:30 → 30 分 30 秒で stale。最後の保存の時刻と遅れを出す
+    handle(
+        jst(2026, 10, 12, 11, 0) + timedelta(seconds=30),
+        Fake(pages=DOWN, raw_names=[raw(jst(2026, 10, 12, 10, 30))]).deps(),
+    )
+    error = next(r for r in logs(capsys) if r["event"] == "jpx_unavailable_stale")
+    assert error["last_snapshot_at"] == "2026-10-12T10:30:00+09:00"
+    assert error["lag_seconds"] == 30 * 60 + 30
+
+
+@pytest.mark.parametrize(
+    "now, names, stale, listed",
+    [
+        (jst(2026, 10, 12, 9, 15), [], False, False),  # 日中の開始 08:45 から 30 分以内は一覧しない
+        (jst(2026, 10, 12, 9, 16), [], True, True),
+        (jst(2026, 10, 12, 17, 40), [], False, False),  # 夜間の開始 17:00 から 40 分以内
+        (jst(2026, 10, 13, 0, 20), [], True, True),  # 夜間の日付またぎ
+        (jst(2026, 10, 13, 0, 20), [raw(jst(2026, 10, 12, 23, 50))], False, True),
+        (jst(2026, 10, 12, 16, 10), [raw(jst(2026, 10, 12, 15, 20))], False, True),  # 余裕の時間帯は終了 15:45 基準
+        (jst(2026, 10, 12, 16, 10), [raw(jst(2026, 10, 12, 15, 10))], True, True),  # 終了前から止まっていた
+    ],
+)
+def test_jpx_unavailable_session_edges(capsys, now, names, stale, listed):
+    fake = Fake(pages=DOWN, raw_names=names)
+    result = handle(now, fake.deps())
+    assert result.outcome == "jpx_unavailable"
+    assert (("ERROR", "jpx_unavailable_stale") in events(capsys)) is stale
+    assert any(c[0] == "list" for c in fake.calls) is listed
+
+
+def test_jpx_unavailable_night_lists_across_midnight(capsys):
+    fake = Fake(pages=DOWN, raw_names=[])
+    handle(jst(2026, 10, 13, 0, 20), fake.deps())
+    assert [c for c in fake.calls if c[0] == "list"] == [
+        ("list", "raw/2026/10/12/20261012T2340.json.gz", "raw/2026/10/13/20261013T0021.json.gz")
+    ]
+
+
+def test_jpx_unavailable_no_check_after_calendar_outdated(capsys):
+    after = CAL.covered_until + timedelta(days=3)
+    while after.weekday() >= 5:
+        after += timedelta(days=1)
+    fake = Fake(pages=DOWN, raw_names=[])
+    result = handle(datetime(after.year, after.month, after.day, 11, 0, tzinfo=JST), fake.deps())
+    assert result.outcome == "jpx_unavailable"
+    assert not [c for c in fake.calls if c[0] == "list"]
+    assert ("ERROR", "jpx_unavailable_stale") not in events(capsys)
+
+
+def test_jpx_unavailable_list_failure_stays_warning(capsys):
+    fake = Fake(pages=DOWN, raw_names=[], list_error=StorageFailed("list: ReadTimeout"))
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    records = logs(capsys)
+    assert [(r["severity"], r["event"]) for r in records] == [("WARNING", "jpx_unavailable")]
+    assert records[0]["stale_check"] == "storage_failed"
+
+
+def test_jpx_unavailable_deadline_stays_warning(capsys):
+    # 1 限月の取得で残りが 2 秒未満になった → 一覧せず WARNING のまま（deadline_exceeded にしない）
+    fake = Fake(pages=DOWN, raw_names=[])
+    fake.cost = {"fetch1": settings.REQUEST_DEADLINE_SECONDS - 1}
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    assert not [c for c in fake.calls if c[0] == "list"]
+    records = logs(capsys)
+    assert [(r["severity"], r["event"]) for r in records] == [("WARNING", "jpx_unavailable")]
+    assert records[0]["stale_check"] == "deadline_exceeded"
+
+
+def test_out_of_hours_does_not_list(capsys):
+    fake = Fake(raw_names=[])
+    result = handle(OUT_OF_HOURS, fake.deps())
+    assert result.status == 204
+    assert fake.calls == []
+
+
+def test_ingested_does_not_list(capsys):
+    # 通常の分は一覧しない（追加の I/O は jpx_unavailable の分だけ）
+    fake = Fake(raw_names=[])
+    assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
+    assert not [c for c in fake.calls if c[0] == "list"]
 
 
 def test_stale_logs_error_even_without_update(capsys):

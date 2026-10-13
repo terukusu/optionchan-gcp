@@ -995,7 +995,7 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 - M2 から `recovery_failed`（毎時の回収の一覧・クエリの失敗）を除くのは、一時的な失敗で毎時単発に出て次の 0 分で回復するため。回収だけが続けて失敗しても、取り込み自体が成功していれば取りこぼしが残らないので通知は来ない。取りこぼしが実際に残っているか、照合のクエリも失敗したときに、07:00 の照合が `raw_unrecovered` か `reconcile_failed`（どちらも ERROR）を出して通知される
 - gunicorn の起動・終了の行は stderr のテキストで severity が付かない（DEFAULT）ので M2 に当たらない（2026-10-13 のデプロイ 3 回で確認）。デプロイ直後の IAM 伝播待ちの 403 はリクエストログが WARNING、Scheduler 側のログ（`cloud_scheduler_job`）が ERROR だが、M2 の対象外（続けば M1 が鳴る）
 - 定期クエリ（BigQuery Data Transfer Service、#40）の失敗は `resource.type="bigquery_dts_config"` で入れている（プロジェクトの DTS は「日次の品質チェックと新旧の突き合わせ（#40）」の 4 本だけ。DTS を足すと同じく通知される）
-- 検知できないもの: `jpx_unavailable`（WARNING）が取引時間中に続く場合。JPX のページの形式が変わって更新時刻・行の要素が無くなっても「空ページ」と区別できず、ERROR が出ないまま保存されない（生 HTML も残らないので、照合・品質チェックにも出ない）。アプリ側の変更で別 Issue にする
+- `jpx_unavailable`（WARNING。空ページ・接続断）は単発では通知しない（旧系の 2026-09-15〜10-12 のログで、空ページは 04:00 / 04:20 台を中心に 1 日 1〜2 回、すべて 1 分だけ）。取引時間中に続いたときは ERROR `jpx_unavailable_stale`（#42）で M2 に乗る。判定は `stale` と同じしきい値（日中 30 分 / 夜間 40 分）で、`jpx_unavailable` の分に生 HTML のバケットを直近のしきい値分だけ一覧し、最後に保存できたスナップショットがそれより古ければ出す。JPX の改版で更新時刻・行の要素が無くなった場合（空ページと区別できない）や、JPX からの拒否・障害の継続を、最大 30〜40 分遅れで拾う。このとき生 HTML は保存されないので、ページは通知を受けてから直接見る
 
 料金（2027-09-01 以降。公式の価格ページで 2026-10-13 に確認）: メトリクス参照 1 件 $0.35 / 月。ログ一致の条件も 1 件と数え、点の料金は無い。M1 の点の料金は系列 1 本分（月 $0.1 未満の見込み）。並行稼働中は旧系 3 件 + 新系 2 件の 5 件で月 約 $1.9（約 290 円、税抜き。旧系の点の料金を含む）、#14 で旧系を消すと 2 件で月 約 $0.75。アラートの本数は一時的に 4 本（target.md 3.4 の「1〜2 本」は #14 の後）。
 
@@ -1089,6 +1089,7 @@ gcloud logging read "$F" --project $P --freshness=2h --limit=200 \
 |---|---|---|
 | `parse_failed` | ページの構造が想定と違う（生 HTML は保存済み） | 1 回だけなら次の分を見る。続くならパーサーを直す PR（`PARSER_VERSION` を上げる）→ デプロイ後に「再処理ジョブ」で期間を作り直す |
 | `stale` | 取引時間中にページの更新時刻が日中 30 分 / 夜間 40 分以上止まっている（毎分出る） | JPX 側の遅延。旧系の取り込み・JPX のページを見て、続くなら #11 に記録。新系の不具合ではないので何もしなくてよいことが多い |
+| `jpx_unavailable_stale` | 取引時間中に `jpx_unavailable`（ページが取れない・空）が続き、最後に保存できたスナップショット（`last_snapshot_at`。直近のしきい値分に 1 件も無ければこの項目は無い）から日中 30 分 / 夜間 40 分以上たった（`jpx_unavailable` の分ごとに出る。`detail` は取得の失敗（`HTTP 403`・`ConnectionError` など）か空ページの理由（`update-time is empty`・`no option rows`）） | `detail` で切り分ける。HTTP・接続のエラーなら JPX 側の障害か拒否（旧系の取り込みも止まっているか見る）。`update-time is empty` / `no option rows` が日中に続くなら JPX の改版を疑い、ページを開いて要素（`.update-time`・`.price-info-scroll .row-num`）を確かめ、パーサーを直す PR（`PARSER_VERSION` を上げる）。この間の生 HTML は無いので、取り込めなかった分は回復できない |
 | `write_failed` / `storage_failed` | BigQuery / GCS への書き込み・読み出しの失敗 | 生 HTML があれば毎時 0 分の回収（「回収と照合」）が埋める。続くなら BigQuery / GCS のステータス・権限を見る |
 | `deadline_exceeded`（`stage`） | 45 秒の期限切れ | 単発なら回収が埋める。続くなら `stage` の外部呼び出し（JPX・GCS・BigQuery）の遅延を見る |
 | `recovery_item_failed` | 回収の 1 件の想定外の例外 | その件は次の 0 分に再試行される。続くなら `object` の生 HTML とコードを見る |
