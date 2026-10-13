@@ -153,7 +153,7 @@
     "name": "price_time_raw",
     "type": "STRING",
     "mode": "NULLABLE",
-    "description": "ページの約定日時の表示（MM/DD HH:MM、年なし）。price_time の元"
+    "description": "ページの約定日時の表示（MM/DD HH:MM、年なし）。price_time の元。移行行（#12）で #4 の補正をした行（parser_version = legacy-fix4-1）は補正前の price_time（YYYY-MM-DD HH:MM:SS）"
   },
   {
     "name": "ingest_run_id",
