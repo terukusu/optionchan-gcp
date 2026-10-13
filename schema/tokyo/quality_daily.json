@@ -1,0 +1,104 @@
+[
+  {
+    "name": "window_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "窓の日付（JST。窓 [前日 07:00, 当日 07:00) の開始日 = 日中立会の日付）"
+  },
+  {
+    "name": "window_start",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "窓の開始（含む。JST の 07:00）"
+  },
+  {
+    "name": "window_end",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "窓の終了（含まない。window_start の 1 日後）"
+  },
+  {
+    "name": "runs",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "窓の ingest_runs の件数（回収・再処理を含むすべての実行）"
+  },
+  {
+    "name": "snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "窓のスナップショット数（latest_runs の件数）"
+  },
+  {
+    "name": "option_rows",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "最新版の option_price の行数"
+  },
+  {
+    "name": "rowcount_mismatch",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: ingest_runs の rows_spot / rows_future / rows_option が、その ingest_run_id の実件数と違う実行の数"
+  },
+  {
+    "name": "missing_table",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: latest_runs のスナップショット × 3 テーブルと、各テーブルの最新版の created_at の集合の差（片方にしか無い組の数）"
+  },
+  {
+    "name": "dup_keys",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: 最新版のキーの重複（spot・future は created_at、option は created_at・type・target_price・last_trading_day）の数"
+  },
+  {
+    "name": "months_not_2",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: option の限月（last_trading_day）が 2 種類でないスナップショットの数"
+  },
+  {
+    "name": "atm_not_1",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: 限月 × 種別で ATM（is_atm）が 1 行でない組の数"
+  },
+  {
+    "name": "price_time_future",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: price_time がその行のページの更新時刻（page_updated_at、無ければ created_at。JST）より後の行数（3 テーブル）"
+  },
+  {
+    "name": "price_time_too_old",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: price_time が created_at（JST）の 30 日以上前の行数（3 テーブル）"
+  },
+  {
+    "name": "sunday",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反: price_time か created_at（JST）が日曜の行数（3 テーブル）"
+  },
+  {
+    "name": "orphan_rows",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "情報（違反にしない）: ingest_runs に無い ingest_run_id の行数（書き込み途中の残骸。最新版では見えない）"
+  },
+  {
+    "name": "violations",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "違反の合計（orphan_rows を除く）。1 以上なら定期クエリは記録の後に ERROR() で失敗する"
+  },
+  {
+    "name": "checked_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "検査した時刻"
+  }
+]

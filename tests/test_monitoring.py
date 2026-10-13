@@ -186,6 +186,8 @@ def test_ingest_m2_errors(ingest_m2):
     f = c['conditionMatchedLog']['filter']
     assert 'resource.type="cloud_run_revision" AND resource.labels.service_name="ingest"' in f
     assert 'resource.type="cloud_run_job" AND resource.labels.job_name="reprocess"' in f
+    # 定期クエリ（BigQuery Data Transfer Service、#40）の失敗。プロジェクトの DTS は品質チェックと突き合わせの 4 本だけ
+    assert 'OR resource.type="bigquery_dts_config")' in f
     assert 'severity>=ERROR' in f
     # 除外は recovery_failed だけ (毎時単発で次の 0 分に回復。続けば 07:00 の reconcile_failed / raw_unrecovered)
     assert f.count('NOT ') == 1

@@ -3,7 +3,7 @@
   "documentation": {
     "subject": "[optionchan] M2 新しい取り込みで ERROR ログ",
     "mimeType": "text/markdown",
-    "content": "Cloud Run `ingest` またはジョブ `reprocess` が severity ERROR 以上のログを出しました（`parse_failed`・`write_failed`・`stale`・`raw_unrecovered` など。リクエストログの 5xx・メモリ超過などのシステムログを含む。`recovery_failed` は除く）。通知は 1 時間に 1 回までなので、対応時は直近の ERROR をすべて見てください。\n\n一次対応は runbook の「新しい取り込みの監視」節の「M2 を受けたとき」を参照してください。",
+    "content": "Cloud Run `ingest`・ジョブ `reprocess`・定期クエリ（BigQuery Data Transfer Service の `quality-daily`・`legacy-*`）が severity ERROR 以上のログを出しました（`parse_failed`・`write_failed`・`stale`・`raw_unrecovered`、定期クエリの `quality:`（品質チェックの違反）・`legacy_compare:`（説明できない差分）など。リクエストログの 5xx・メモリ超過などのシステムログを含む。`recovery_failed` は除く）。通知は 1 時間に 1 回までなので、対応時は直近の ERROR をすべて見てください。\n\n一次対応は runbook の「新しい取り込みの監視」節の「M2 を受けたとき」を参照してください。",
     "links": [
       {
         "displayName": "runbook: 新しい取り込みの監視",
@@ -14,9 +14,9 @@
   "combiner": "OR",
   "conditions": [
     {
-      "displayName": "ingest / reprocess の severity>=ERROR（recovery_failed を除く）",
+      "displayName": "ingest / reprocess / 定期クエリの severity>=ERROR（recovery_failed を除く）",
       "conditionMatchedLog": {
-        "filter": "((resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\") OR (resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"reprocess\")) AND severity>=ERROR AND NOT jsonPayload.event=\"recovery_failed\""
+        "filter": "((resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"ingest\") OR (resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"reprocess\") OR resource.type=\"bigquery_dts_config\") AND severity>=ERROR AND NOT jsonPayload.event=\"recovery_failed\""
       }
     }
   ],
