@@ -17,6 +17,7 @@ from optionchan_ingest.snapshot import (
     encode_raw,
     is_stale,
     raw_object_name,
+    unavailable_window,
     validate_rows,
 )
 
@@ -212,3 +213,51 @@ def test_stale_uses_session_end_after_close():
     assert not is_stale(jst(2026, 10, 15, 6, 30), jst(2026, 10, 15, 5, 50), NIGHT_SESSION)
     # 終了前から止まっていたら（15:10 で止まる）終了後も stale
     assert is_stale(jst(2026, 10, 14, 16, 0), jst(2026, 10, 14, 15, 10), DAY_SESSION)
+
+
+# --- jpx_unavailable の継続の判定で一覧する範囲（#42） ---
+
+
+def test_unavailable_window_day():
+    # 開始 08:45 からちょうど 30 分（09:15）までは、保存が無くても stale にならないので一覧しない
+    assert unavailable_window(jst(2026, 10, 14, 9, 0), DAY_SESSION) is None
+    assert unavailable_window(jst(2026, 10, 14, 9, 15), DAY_SESSION) is None
+    assert unavailable_window(jst(2026, 10, 14, 9, 16), DAY_SESSION) == (
+        jst(2026, 10, 14, 8, 46),
+        jst(2026, 10, 14, 9, 16),
+    )
+    assert unavailable_window(jst(2026, 10, 14, 11, 0), DAY_SESSION) == (
+        jst(2026, 10, 14, 10, 30),
+        jst(2026, 10, 14, 11, 0),
+    )
+
+
+def test_unavailable_window_night_crosses_midnight():
+    assert unavailable_window(jst(2026, 10, 14, 17, 40), NIGHT_SESSION) is None
+    start, end = unavailable_window(jst(2026, 10, 15, 0, 20), NIGHT_SESSION)
+    assert (start, end) == (jst(2026, 10, 14, 23, 40), jst(2026, 10, 15, 0, 20))
+    # 名前は時刻順なので、日付をまたいでも 1 回の一覧で済む
+    assert raw_object_name(start) < raw_object_name(end)
+
+
+def test_unavailable_window_after_close_uses_session_end():
+    # 余裕の時間帯は終了時刻を基準にする（is_stale と同じ）
+    assert unavailable_window(jst(2026, 10, 14, 16, 10), DAY_SESSION) == (
+        jst(2026, 10, 14, 15, 15),
+        jst(2026, 10, 14, 16, 10),
+    )
+    assert unavailable_window(jst(2026, 10, 15, 6, 20), NIGHT_SESSION)[0] == jst(2026, 10, 15, 5, 20)
+
+
+def test_unavailable_window_agrees_with_is_stale():
+    # 範囲の start ちょうどの保存は stale でない（is_stale は「しきい値を超えたら」）。start より前なら stale
+    now = jst(2026, 10, 14, 11, 0)
+    start, _ = unavailable_window(now, DAY_SESSION)
+    assert is_stale(now, start, DAY_SESSION) is False
+    assert is_stale(now, start - timedelta(minutes=1), DAY_SESSION)
+    assert not is_stale(now, start + timedelta(minutes=1), DAY_SESSION)
+
+
+def test_unavailable_window_requires_aware():
+    with pytest.raises(ValueError):
+        unavailable_window(datetime(2026, 10, 14, 11, 0), DAY_SESSION)

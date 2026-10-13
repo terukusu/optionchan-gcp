@@ -3,7 +3,9 @@
 処理（docs/architecture/target.md 3.1）:
 1. 取引カレンダーで時間外なら 204（JPX・GCS・BigQuery に触らない。クライアントも作らない。待たない）
 2. 分の頭から settings.FETCH_AT_SECOND 秒まで待ってから（#38）、1 限月ページを取得して更新時刻を得る。
-   鮮度切れなら ERROR stale。生 HTML が既にあれば skipped_no_update
+   鮮度切れなら ERROR stale。生 HTML が既にあれば skipped_no_update。
+   ページが取れない・空なら WARNING jpx_unavailable（次の分に任せる）。最後に保存できた生 HTML が
+   鮮度のしきい値より古ければ（jpx_unavailable が続いている）ERROR jpx_unavailable_stale も出す（#42）
 3. 2 限月ページを取得し、2 ページを封筒にして ifGenerationMatch=0 で作成（412 なら skipped_locked）
 4. 行を組み立てて構造を検査（違反は parse_failed。生 HTML は残し ingest_runs は書かない）
 5. spot_price → future_price → option_price → ingest_runs の順に Storage Write API で追記（失敗は write_failed）
@@ -20,15 +22,15 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from flask import Flask, Response, request
 
 from . import PARSER_VERSION, recovery, settings
-from .calendar import Calendar, load_calendar, session_at
+from .calendar import Calendar, Session, load_calendar, session_at
 from .io_bq import WriteFailed
-from .io_gcs import AlreadyExists, StorageFailed
+from .io_gcs import AlreadyExists, RawObject, StorageFailed
 from .log import log
 from .parser import JST, JpxUnavailable, ParseError, parse_page, parse_updated_at
 from .pipeline import Deadline, DeadlineExceeded, bounded, run_row, write_snapshot
@@ -40,6 +42,7 @@ from .snapshot import (
     is_stale,
     raw_object_name,
     source_object,
+    unavailable_window,
     validate_rows,
     with_updated_at,
 )
@@ -61,6 +64,9 @@ class Deps:
     trigger: str = "scheduler"
     fetch_at_second: float = settings.FETCH_AT_SECOND  # 分の頭からこの秒まで待って JPX を取得する（0 で待たない）
     sleep: Callable[[float], None] = time.sleep
+    # (start_offset, end_offset, timeout=) 生 HTML の一覧。失敗は StorageFailed。
+    # jpx_unavailable が続いているかの判定（#42）に使う。None なら判定しない（dry-run・時間外）
+    list_raw: Callable[..., list[RawObject]] | None = None
 
 
 @dataclass
@@ -99,6 +105,48 @@ def _calendar_notice(now: datetime, calendar: Calendar, common: dict) -> None:
         log("WARNING", "calendar_expiring", covered_until=calendar.covered_until, days_left=days_left, **common)
 
 
+def _unavailable_stale(now: datetime, session: Session, deps: Deps, deadline: Deadline, detail, common: dict) -> dict:
+    """jpx_unavailable が取引時間中に続いているか（#42）。続いていれば ERROR jpx_unavailable_stale を出す。
+
+    アプリは状態を持たないので、直近のしきい値分の生 HTML を一覧し、最後に保存できたスナップショットの時刻に
+    鮮度と同じ規則（is_stale）を当てる。判定は補助なので、一覧の失敗・期限は WARNING の印（stale_check）に
+    するだけで、新しい ERROR・500 にしない。戻り値は WARNING jpx_unavailable に足す項目
+    """
+    if deps.list_raw is None or deps.calendar.is_outdated(now):
+        return {}
+    window = unavailable_window(now, session)
+    if window is None:
+        return {}
+    start, end = window
+    try:
+        objects = bounded(
+            deadline,
+            "raw_list",
+            settings.GCS_LIST_TIMEOUT_SECONDS,
+            deps.list_raw,
+            raw_object_name(start),
+            raw_object_name(end + timedelta(minutes=1)),
+        )
+    except StorageFailed:
+        return {"stale_check": "storage_failed"}
+    except DeadlineExceeded:
+        return {"stale_check": "deadline_exceeded"}
+    times = [t for t in (recovery.name_time(o.name) for o in objects) if t is not None]
+    last = max(times, default=None)
+    since = session.start if last is None else max(last, session.start)
+    if is_stale(now, since, session):
+        log(
+            "ERROR",
+            "jpx_unavailable_stale",
+            failure="jpx_unavailable_stale",
+            last_snapshot_at=last,
+            lag_seconds=int((min(now, session.end) - since).total_seconds()),
+            detail=detail,
+            **common,
+        )
+    return {}
+
+
 def handle(now: datetime, deps: Deps, schedule_time: str | None = None, deadline: Deadline | None = None) -> Result:
     """deadline を渡すと、その残りで動く（ルートが毎時の回収と同じ期限を共有するため）。省略時はここで作る"""
     if deadline is None:
@@ -133,6 +181,11 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         log(severity, outcome, elapsed_ms=deadline.elapsed_ms(), **fields, **common)
         return Result(status, outcome)
 
+    def unavailable(detail):
+        # 空ページ・接続断。次の分に任せるが、取引時間中に続いていれば ERROR も出す（#42）
+        extra = _unavailable_stale(now, session, deps, deadline, detail, common)
+        return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=detail, **extra)
+
     _calendar_notice(now, deps.calendar, common)
 
     session = session_at(now, deps.calendar)
@@ -154,7 +207,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         page1 = bounded(deadline, "jpx_page1", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 1)
         updated_at = parse_updated_at(page1.html)
     except JpxUnavailable as e:
-        return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=str(e))
+        return unavailable(str(e))
     except ParseError as e:
         return done("ERROR", "parse_failed", 500, failure="parse_failed", detail=str(e))
     page1 = with_updated_at(page1, updated_at)
@@ -173,7 +226,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
     try:
         page2 = bounded(deadline, "jpx_page2", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 2)
     except JpxUnavailable as e:
-        return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=str(e))
+        return unavailable(str(e))
     jpx_fetch_ms = int((deps.monotonic() - t_jpx) * 1000)
 
     # 解析（空ページなら保存せず次の分に任せる。構造違いは生 HTML を残してから parse_failed）
@@ -182,7 +235,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         try:
             parsed[number] = parse_page(page.html)
         except JpxUnavailable as e:
-            return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=f"page {number}: {e}")
+            return unavailable(f"page {number}: {e}")
         except ParseError as e:
             parse_errors.append(f"page {number}: {e}")
     p1, p2 = parsed.get(1), parsed.get(2)
@@ -294,6 +347,7 @@ def _real_deps() -> Deps:
         store.create,
         writer.append,
         fetch_at_second=cfg.fetch_at_second,
+        list_raw=store.list,
     )
     return _deps
 
