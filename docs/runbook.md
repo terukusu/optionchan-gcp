@@ -968,7 +968,7 @@ gcloud scheduler jobs pause ingest --location $L --project $P   # この PR が�
 gcloud scheduler jobs describe ingest --location $L --project $P --format='value(state)'   # PAUSED
 ```
 
-通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。`ingest_paused = true` の間は新系の M1 も Terraform が無効にする（`monitoring.tf` の `paused_with_ingest`。再開の PR で有効に戻る）。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系の値で補うかは #12 で扱う）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
+通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。`ingest_paused = true` の間は新系の M1 も Terraform が無効にする（`monitoring.tf` の `paused_with_ingest`。再開の PR で有効に戻る）。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系が動いている間は、旧系の値で「過去データの移行（#12）」の「E 以降の取りこぼしを補う」の手順で補える）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
 
 ### 切り戻し
 
@@ -1320,8 +1320,239 @@ done   # 合計の billed が 3 GiB 以下
 ### 停止・削除
 
 - 一時停止: `infra/prod/sq.tf` の該当の DTS に `disabled = true` を足す PR。急ぐときはコンソール（BigQuery → データ転送）で無効にし、続けて同じ PR を出す（出さないと次の apply で有効に戻る）
-- 旧系の停止（#14）で突き合わせを消す: `legacy-*` の DTS 3 本・作業用データセット 2 つ・`legacy_compare_daily` の付与を消し、`legacy_compare_daily` は `deletion_protection = false` の PR を先に出してから消す（結果は先に #11 に記録する）。bootstrap の旧テーブルの読み取り 3 件を外す（revert + 所有者の apply）。品質チェックは残す
+- 旧系の停止（#14）で突き合わせを消す（その前に、新系の取りこぼしを旧系の値で補う。「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。作業用データセットを使う）: `legacy-*` の DTS 3 本・作業用データセット 2 つ・`legacy_compare_daily` の付与を消し、`legacy_compare_daily` は `deletion_protection = false` の PR を先に出してから消す（結果は先に #11 に記録する）。bootstrap の旧テーブルの読み取り 3 件を外す（revert + 所有者の apply）。品質チェックは残す
 - 全部を戻す（この Issue の revert）: prod は delete 13 と M2 の update 1（結果のテーブルは先に `deletion_protection = false`）、bootstrap は revert + 所有者の apply（`sa-sq-dts` は `deletion_policy = "PREVENT"` なので state から外すだけになる）。旧系の取り込みには影響しない
+
+## 過去データの移行（#12）
+
+旧系のデータセット `optionchan`（US）の `spot_price` / `future_price` / `option_price` を、東京の `optionchan_tokyo` へ移す（target.md 6 章 3a）。**#11（並行稼働）の合格の後に、所有者が 1 回だけ行う**。一時データセット・DTS のコピー・クエリ量上限の一時変更は Terraform 外で、この節の手順で作って消す。SQL は `sql/legacy_import/`（試験は `tests/test_legacy_import.py`・`tests/test_legacy_import_bq.py`）。
+
+| SQL | 場所 | 内容 |
+|---|---|---|
+| `fingerprint.sql` | US と東京 | コピーの検証。日（JST 07:00 区切り）× 表ごとに 行数・`BIT_XOR(FARM_FINGERPRINT(TO_JSON_STRING(STRUCT(<旧スキーマの列>))))`・フィンガープリントの合計。US の `optionchan` と東京の一時データセットで流して CSV を diff する |
+| `insert.sql` | 東京 | 移行。範囲の旧系のスナップショット T のうち、`ingest_runs` に記録の無いものを追記する。流し直しても重複しない |
+| `verify.sql` | 東京 | 移行の検証（1 行）。移し漏れ・新旧の重なり・値の違い・残骸・行数の不一致がすべて 0 であること |
+
+**何を移すか**: 旧系の T（3 表の `created_at`）のうち、新系の `ingest_runs` に同じ `snapshot_at` の記録が 1 件も無いもの。新系の稼働前（最初のスナップショットは 2026-10-12 23:39 UTC = 08:39 JST）はすべて、並行稼働中は新系の取りこぼし（`legacy_compare_daily` の `legacy_only`）だけになる。新系の記録がある T は新系のまま（#38 の前の 09:31 JST までの分も。旧系も 1 分の中のどれかの版を取っていて、#40 の分類で説明済み）。範囲の終わり E は品質チェック済みの窓の終わり以下（`insert.sql` が `quality_daily` の最大の `window_end` で止める）。
+
+**移行行の見え方**: T ごとに `ingest_run_id = 'legacy-<T の UTC, YYYYMMDDTHHMMSSZ>'`（例 `legacy-20261009T001500Z`）。`ingest_runs` に T ごとの完了記録（`trigger = 'legacy_import'`、`parser_version = 'legacy'`、`source_object = 'legacy:optionchan'`、`started_at = finished_at = T`、行数は実数）を書くので、最新版のテーブル関数（「最新版の読み方」）がそのまま返す。追加列（`page_updated_at`・`price_time_raw`・`parser_version`・`source_object`）は NULL（元データのまま。補正は #4。`price_time_raw` は #4 が埋める）。旧系の重複（同じ `created_at` で中身が違う行）・欠け（片方の表だけのスナップショット）もそのまま移る。`finished_at = T` なので、後で同じ T の生 HTML を再処理すれば新系の版が選ばれる。
+
+**いつ行うか**: **土曜 13:00 JST 以降**に始め、日曜のうちに終える。E はその土曜の 07:00 JST（金曜 22:00 UTC）。
+
+- 新旧とも書き込みが無い（旧系・新系とも土曜 06:00 JST 頃に止まる。新系の毎時の回収は直近 6 時間の生 HTML なので 12 時台で終わる）。Storage Write API で直前に書いた行には DML の制約があり（target.md 3.1）、`insert.sql` の残骸の削除・切り戻しの DELETE が当たらないようにする
+- 土曜 07:15 の品質チェックで E までが確認済みになり、07:30 の突き合わせで金曜分の記録がある
+- クエリ量上限を週末だけ上げる。上限は太平洋時間の日ごと（0 時 = 夏時間 16:00 JST / 冬時間 17:00 JST にリセット）で、土曜 16:00（17:00）〜日曜 16:00（17:00）JST は 1 つの日になり、日曜 07:15 の品質チェック・07:30 の突き合わせ（合わせて 1GiB 程度）もその日の枠を使う。枠を使い切るとそれらが失敗する（M2 が鳴る）ので、上限は見込み（約 390GiB）に十分な余裕を持たせる（1.）
+- 一連の作業は 1 つの端末で、上から順に行う（同じ年の `insert.sql` を 2 つ同時に流すと、どちらも完了記録を書く前に移す T を選ぶので二重に入る）
+
+### 変数
+
+「Terraform」の「共通の変数」の `P`、「新しい取り込み（ingest）」の `L`、「日次の品質チェックと新旧の突き合わせ（#40）」の `tc` に加えて:
+
+```sh
+IMP=optionchan_import
+E='<YYYY-MM-DD> 22:00:00+00'   # 範囲の終わり: 開始する土曜の 07:00 JST（前日の金曜 22:00 UTC）。この書式のまま（下の比較が文字列）
+S0='2018-10-01 00:00:00+00'     # 範囲の始まり（旧系の最初のパーティションは 2018-10-19）
+C0='2026-10-12 23:39:00+00'     # 新系の最初のスナップショット（並行稼働の範囲の始まり。新系の行はこれ以降だけ）
+W=<スクラッチのディレクトリ>       # 結果の CSV・JSON を置く（リポジトリ・Issue に貼らない）
+# SQL の名前を入れる（第 2 引数: 一時データセット / fingerprint の読み先）
+render() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" \
+  -e "s/[$]{import_dataset}/${2:-$IMP}/g" -e "s/[$]{source_dataset}/${2:-$IMP}/g" "sql/legacy_import/$1.sql"; }
+q() { bq query --project_id=$P --use_legacy_sql=false --nouse_cache "$@"; }
+# 範囲 [$1, $2) をクエリパラメータ start_at / end_at で渡す（値を SQL に埋め込まない）
+# （--parameter は SQL を引数で渡すときにその前に来るよう先に置く。bq はフラグが最後の引数より後ろにあると止まる）
+qr() { local s=$1 e=$2; shift 2; q --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" "$@"; }
+```
+
+### 事前確認
+
+```sh
+# E まで品質チェック済みであること（insert.sql も同じ条件で止まる）
+q --location=$L --format=csv 'SELECT MAX(window_end) FROM optionchan_tokyo.quality_daily'   # = E
+# 旧系の全体（行数・パーティション。記録して後で比べる）
+q --location=US --format=pretty '
+SELECT table_name, COUNT(*) parts, MIN(partition_id) first, SUM(total_rows) n
+FROM optionchan.INFORMATION_SCHEMA.PARTITIONS WHERE table_name IN ("spot_price", "future_price", "option_price") GROUP BY 1'
+```
+
+- データセットコピーの転送料の基準を、#40 の `legacy-copy`（毎日 約 100MB）の課金で確かめる。課金エクスポート（「予算アラートを受けたとき」の 1. のクエリ）を `service.description = "BigQuery"` で SKU ごとに見て、リージョン間の転送の SKU の量が `optionchan_legacy_stage` の表の物理・論理のどちらに近いかを見る。物理なら転送は 約 4.8GB で 約 55 円、論理なら 約 73GiB で 約 880 円（月の予算 500 円の 50% / 80% の通知が出る。それでも進めるかを決める）。判断（基準・見込み額・進めるか）を #12 にコメントする。論理基準で進めるなら、#12 の AC 9（転送 約 100 円以下）を見込み額に直してから始める
+
+### 1. クエリ量上限を一時的に上げる
+
+全件のスキャンが 5 回（下の見積もり。合計 約 390GiB）あるので、「BigQuery のクエリ量上限」の設定コマンドで `--value=614400`（600GiB）にする。フィンガープリント・検証のやり直し 1 回分（約 75〜165GiB）と、日曜朝の定期実行の分の余裕を持たせる。その日（太平洋時間）の使用量（「BigQuery のクエリ量上限」の「今日のスキャン量」のクエリ）が 550GiB を超えたら、次のリセットまで新しい全件スキャンを始めない。作業の後に 6. で戻す。
+
+### 2. 一時データセットとコピー
+
+```sh
+bq mk --dataset --location=$L --storage_billing_model=PHYSICAL --max_time_travel_hours=48 \
+  --default_table_expiration=1209600 --description='旧 optionchan の一時コピー（#12。移行の検証の後に削除）' $P:$IMP
+bq mk --transfer_config --project_id=$P --location=$L --data_source=cross_region_copy --target_dataset=$IMP \
+  --display_name='optionchan legacy-import' --no_auto_scheduling \
+  --params="{\"source_project_id\":\"$P\",\"source_dataset_id\":\"optionchan\",\"overwrite_destination_table\":\"true\"}"
+# 作成直後に実行が始まることがある。1 分ほど待って実行の数を見て、0 件のときだけ手で 1 回実行する（2 本同時に走らせない。転送料が 2 倍になる）
+sleep 60
+n=$(bq ls --transfer_run --run_attempt=LATEST --max_results=10 --format=json "$(tc legacy-import $L)" | jq length)
+echo "runs=$n"
+[ "${n:-0}" = 0 ] && bq mk --transfer_run --run_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$(tc legacy-import $L)"
+bq ls --transfer_run --run_attempt=LATEST --max_results=3 --format=json "$(tc legacy-import $L)" | jq -c '.[] | {runTime, state}'   # 1 件
+# SUCCEEDED になるまで待つ（数十分〜。旧系の全表 6 つが来る）
+bq ls --format=json $P:$IMP | jq -r '.[].tableReference.tableId'
+for t in spot_price future_price option_price; do
+  echo "$t $(bq show --format=json $P:optionchan.$t | jq -r .numRows) $(bq show --format=json $P:$IMP.$t | jq -r .numRows)"
+done   # 土曜の午後は旧系に書き込みが無いので、行数が同じこと
+```
+
+1 時間足（`atm_*`）もコピーされるが、この Issue では移さない（東京側の設計が未定。旧データセットを消す（#15）前に扱いを決める）。
+
+### 3. コピーの検証
+
+```sh
+render fingerprint optionchan | qr "$S0" "$E" --location=US --format=csv --max_rows=100000 \
+  --maximum_bytes_billed=85899345920 > $W/fp-us.csv
+render fingerprint | qr "$S0" "$E" --location=$L --format=csv --max_rows=100000 \
+  --maximum_bytes_billed=85899345920 > $W/fp-import.csv
+wc -l $W/fp-us.csv $W/fp-import.csv   # 同じ行数（日 × 3 表 + 見出し。約 6,800）
+diff $W/fp-us.csv $W/fp-import.csv && echo MATCH
+```
+
+- `MATCH` でなければ、違う日・表を見て、DTS の実行を 1 回やり直し（上書き）、`fp-import.csv` を作り直す。続けて違うなら止める（一時データセットを消して終わり。`optionchan_tokyo` には何も書いていない）
+- 東京の 1 回目は 約 73GiB のスキャン（US も同じ）
+
+### 4. 移行
+
+移行前の基準値（並行稼働の範囲だけ。新系の行はここにしか無い）:
+
+```sh
+render verify | qr "$C0" "$E" --location=$L --format=json --maximum_bytes_billed=10737418240 > $W/verify-before.json
+jq -c '.[-1][0] | {missing_snapshots, overlap_snapshots, new_snapshots, new_rows_spot, new_rows_future, new_rows_option}' $W/verify-before.json
+# missing_snapshots = 並行稼働中の新系の取りこぼし（legacy_compare_daily の legacy_only_snapshots の合計と同じ見込み）。overlap 等は 0
+```
+
+書き込む前に `optionchan_tokyo` の 4 表のテーブルスナップショットを一時データセットに取る（期限 14 日。移行は追記と `legacy-` の行の削除だけなので、ベースの表との差分の保存料はほぼ 0）:
+
+```sh
+for t in spot_price future_price option_price ingest_runs; do
+  bq cp --snapshot --no_clobber --expiration=1209600 $P:optionchan_tokyo.$t $P:$IMP.snap_$t
+done
+bq ls --format=json $P:$IMP | jq -r '.[] | select(.type == "SNAPSHOT") | .tableReference.tableId'   # 4 件
+```
+
+最初に一番小さい 2018 年（option 約 1.7GiB）だけを流し、その年の範囲で検証し、もう一度流して重複しないことを確かめる:
+
+```sh
+s='2018-01-01 00:00:00+00'; e='2019-01-01 00:00:00+00'
+render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $W/insert-2018.json
+jq -c '.[-1][0]' $W/insert-2018.json                      # snapshots > 0
+render verify | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=21474836480 > $W/verify-2018.json
+jq -c '.[-1][0] | del(.mismatch_samples)' $W/verify-2018.json   # 5. の 7 項目が 0、missing_snapshots も 0
+render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $W/insert-2018-again.json
+jq -c '.[-1][0]' $W/insert-2018-again.json                # snapshots = 0（流し直しても重複しない）
+```
+
+どれかが期待と違えば止めて、下の「切り戻し」を 2018 年の範囲で行う。よければ残りの年を流す（1 本の DML で変えられるパーティションは 4,000 まで。旧系は 2,256 だが、やり直しの単位を小さくする）:
+
+```sh
+for y in $(seq 2019 2026); do
+  s="$y-01-01 00:00:00+00"; e="$((y + 1))-01-01 00:00:00+00"; [[ "$e" > "$E" ]] && e=$E
+  render insert | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=53687091200 > $W/insert-$y.json \
+    || { echo "failed: $y"; break; }
+  echo "$y $(jq -c '.[-1][0] | {snapshots, rows_spot, rows_future, rows_option}' $W/insert-$y.json)"
+done
+```
+
+- 1 年 約 1,000 万〜1.1 億行（option）。1 回 数分の見込み
+- 失敗したら、原因（クォータ・権限・`legacy_import: ...` の `ERROR()`）を直して**同じ年から**流し直す。前回の残骸（データの表に書けて完了記録の無い `legacy-` 行）は `insert.sql` の最初に消え、完了記録のある T は選ばれないので重複しない
+- `legacy_import: end_at ... is after the last checked window end`: E が品質チェック済みの窓より後。E を直す
+- `legacy_import: duplicate ingest_run_id`: 秒未満の `created_at` がある（2026-10 の実測では無い）。その年を止めて調べる
+
+### 5. 移行の検証
+
+```sh
+render verify | qr "$S0" "$E" --location=$L --format=json --maximum_bytes_billed=214748364800 > $W/verify-after.json
+jq -c '.[-1][0] | del(.mismatch_samples)' $W/verify-after.json
+jq -c '.[-1][0].mismatch_samples' $W/verify-after.json
+```
+
+- `missing_snapshots`・`overlap_snapshots`・`unknown_legacy_runs`・`bad_run_ids`・`row_mismatches`・`orphan_rows`・`run_count_mismatches` がすべて 0
+- `new_rows_*` が移行前（`verify-before.json`）と同じ（新系の行に触れていない）
+- `migrated_rows_*` + 並行稼働中に新系の記録があった旧系の行 = 旧系の行数（`fp-import.csv` の `n` の合計）
+- 0 でない項目があれば `mismatch_samples`（表・T の先頭 20）から見る。その年だけ戻すなら下の「切り戻し」を年の範囲で行い、4. をその年から流し直す
+
+T0 前後（最新版で見て、日ごとに新旧が重ならず、旧系の日は旧系の件数どおり）:
+
+```sh
+q --location=$L --format=pretty --maximum_bytes_billed=10737418240 --parameter="e:TIMESTAMP:$E" '
+SELECT DATE(TIMESTAMP_SUB(created_at, INTERVAL 7 HOUR), "Asia/Tokyo") AS d, COUNT(*) AS n,
+  COUNTIF(STARTS_WITH(ingest_run_id, "legacy-")) AS legacy, COUNT(DISTINCT created_at) AS snapshots
+FROM `optionchan_tokyo.option_price_latest`(TIMESTAMP_SUB(@e, INTERVAL 10 DAY), @e)
+GROUP BY d ORDER BY d'
+# 2026-10-12 まで: n = legacy = fp-import.csv のその日の option_price の n。2026-10-13 以降: legacy は取りこぼしの分だけ
+# 同じ T の移行の記録が 2 件以上（同じ年を二重に流した）: 0
+q --location=$L --format=csv --parameter="s:TIMESTAMP:$S0" --parameter="e:TIMESTAMP:$E" '
+SELECT COUNT(*) FROM (
+  SELECT snapshot_at FROM optionchan_tokyo.ingest_runs
+  WHERE snapshot_at >= @s AND snapshot_at < @e AND trigger = "legacy_import" GROUP BY snapshot_at HAVING COUNT(*) > 1)'
+```
+
+直近 10 日より前の日は、上の verify で足りる: 移行の記録は T ごとに 1 件（上の検査）で新系の記録と重ならない（`overlap_snapshots = 0`）ので、最新版のテーブル関数は移行の記録の T ごとに `legacy-` の行をすべて返す。その行は T ごとに旧系と同じ（`row_mismatches = 0`）で、旧系のすべての T に記録がある（`missing_snapshots = 0`）。したがって新系の稼働前の日は、最新版の行 = 旧系の行になる。
+
+結果は件数・要約だけを #12 にコメントする（`verify-after.json` の 0 の項目と `migrated_rows_*`、`fp` の一致、スキャン量）。CSV・JSON の全文は貼らない。
+
+### 6. 後片付け
+
+```sh
+ids=$(tc legacy-import $L); [ "$(echo "$ids" | grep -c .)" = 1 ] && bq rm -f --transfer_config "$ids"
+# コピーした表を消す（スナップショットは期限の 14 日まで残す）
+for t in $(bq ls --format=json $P:$IMP | jq -r '.[] | select(.type == "TABLE") | .tableReference.tableId'); do bq rm -f -t $P:$IMP.$t; done
+bq ls --format=json $P:$IMP | jq -r '.[] | "\(.type) \(.tableReference.tableId)"'   # SNAPSHOT 4 件だけ
+```
+
+スナップショットの期限（14 日）が過ぎたら、データセットごと消す: `bq rm -r -f -d $P:$IMP`（`bq ls --project_id=$P` に `optionchan_import` が無いこと）。
+
+クエリ量上限を `--value=32768 --force` に戻す（「BigQuery のクエリ量上限」。その日のスキャン量が 32GiB を超えているときは、太平洋時間の 0 時を過ぎてから戻す。超えたまま下げると、その日の残りのクエリ（品質チェック・突き合わせを含む）が失敗する）。
+
+### 切り戻し
+
+移行行だけを消す。完了記録を先に消す（その時点でテーブル関数から見えなくなる）→ データの表の順。年の範囲だけ戻すときは `$S0` / `$E` をその年の範囲にする。土曜の午後〜日曜に行う（上の「いつ行うか」）。
+
+```sh
+qr "$S0" "$E" --location=$L '
+DELETE FROM optionchan_tokyo.ingest_runs WHERE snapshot_at >= @start_at AND snapshot_at < @end_at AND trigger = "legacy_import"'
+for t in spot_price future_price option_price; do
+  qr "$S0" "$E" --location=$L "
+  DELETE FROM optionchan_tokyo.$t WHERE created_at >= @start_at AND created_at < @end_at AND STARTS_WITH(ingest_run_id, 'legacy-')"
+done
+```
+
+旧データセット `optionchan` はそのまま残っている（#15 まで消さない）。タイムトラベル（7 日）と 4. のテーブルスナップショット（14 日）で移行前の状態も読める。スナップショットからの復元（`bq cp --restore`）は移行の後に新系が書いた行も消すので、上の DELETE で戻せないときの最後の手段にする（復元するなら新系の取り込みを止め、復元の後に「再処理ジョブ」の `--only-missing` でその間を作り直す）。
+
+### 所要時間・コストの見積もり
+
+| 項目 | 見込み |
+|---|---|
+| 所要時間 | コピー 数十分〜1 時間程度（未計測）、フィンガープリント 各 数分、移行 9 回で 30〜60 分、検証 10 分程度。土曜の午後から日曜で終わる |
+| データセットコピーの転送 | 物理基準なら 約 4.8GB × $0.08/GiB ≒ 約 55 円（target.md 7.3）。論理基準なら 約 73GiB で 約 880 円（事前確認で判断） |
+| クエリ（スキャン） | US のフィンガープリント 72.8GiB（dry run）、東京の一時データセットのフィンガープリント 約 73GiB、移行 約 75GiB（`option_price` の全列 + 小さい表）、移行後の検証 約 165GiB（一時データセット 約 73GiB + `optionchan_tokyo` の旧スキーマの列と `ingest_run_id`）、移行前の基準値 1GiB 未満。合計 約 390GiB。月 1TiB の無料枠（他プロジェクトと共有）に収まれば 0 円、超えても 約 2.5 ドル |
+| 保存 | `optionchan_tokyo` が物理 約 5GB 増える（月 約 15〜20 円、target.md 7.2）。一時データセットのコピーは消すまで + タイムトラベル 48 時間 + フェイルセーフ 7 日の間、物理 約 5GB（数円）。スナップショットはベースとの差分だけ（ほぼ 0） |
+
+実行後に課金エクスポートで実績を確かめ、#12 に記録する（転送の SKU の量と金額、BigQuery のクエリの量）。
+
+### 他の仕組みとの関係
+
+- **最新版のテーブル関数**: 変えない。移行行は `legacy-` の完了記録で選ばれる。移行行の記録は `finished_at = T` なので、同じ T を新系が回収・再処理すれば新系の版が選ばれる
+- **品質チェック（`quality_daily`）**: E 以降の窓だけを見るので、移行行で違反は出ない。過去の日を「再実行・バックフィル」で手で流し直すと、旧系の重複（`dup_keys`）・欠け（`missing_table`）・#4 の日付ずれ（`price_time_*`・`sunday`）で違反が出うる（`ingest_run_id` が `legacy-` の行で見分ける）。その結果は誤報として扱う
+- **新旧の突き合わせ（`legacy_compare_daily`）**: 新系側から `legacy-` の行を除く（`sql/legacy/compare.sql`）。取りこぼしを補った日を再実行しても `legacy_only` は 0 にならない（新系の取りこぼしの記録として残る）
+- **回収・再処理**: 完了記録の `source_object = 'legacy:optionchan'` は生 HTML の名前と一致しないので、回収・`--only-missing` の判定には影響しない（取りこぼしを補った T に生 HTML があれば、再処理すると新系の版が選ばれる）
+- **#4（過去データの補正）**: 移行の後に別ステップで行う。`price_time_raw` は移行行では NULL で、#4 が元の値を残す
+
+### E 以降の取りこぼしを補う（#14 で旧系を止めるとき）
+
+E から旧系を止めるまでの新系の取りこぼし（`legacy_compare_daily` の `legacy_only_snapshots` が 1 以上の日）は、旧系を止める前に同じ `insert.sql` で補う。一時データセットの代わりに #40 の `optionchan_legacy_copy`（旧スキーマのまま、1 日分）を使う。行うのは上の「いつ行うか」と同じ土曜の午後〜日曜（新系の書き込みが無く、legacy-stage / legacy-copy の手動実行が毎朝 07:02〜07:30 の定期実行と重ならない）。1 日分なのでクエリ量上限は変えなくてよい:
+
+1. 補う日 W ごとに「再実行・バックフィル」の手順で legacy-stage → legacy-copy を流す（compare は不要）
+2. `render insert optionchan_legacy_copy | qr "<W の 07:00 JST の UTC>" "<W+1 の 07:00 JST の UTC>" --location=$L --format=json`、続けて同じ範囲で `render verify optionchan_legacy_copy` を流し、5. と同じ項目が 0 であることを見る
+3. 作業用データセットは翌朝の定期実行で前日分に戻る
+
+新系の取り込みを止めていた期間（「停止・再開」）の分も同じ手順で補える。
 
 ## 取引カレンダーの更新
 
