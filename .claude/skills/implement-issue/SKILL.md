@@ -37,11 +37,11 @@ allowed-tools: [Read, Edit, Write, Bash, Glob, Grep, Agent, TaskCreate, TaskUpda
 | ビューアー | `appengine/` | App Engine standard (`app.yaml`) | **python37** |
 | BigQuery スキーマ | `schema/*.json` | `bq mk` / `bq update`（memo.txt） | データセット `optionchan` |
 
-- GCP プロジェクト `optionchan-222710`。gcloud は構成 `teru` を使う（`gcloud config configurations list` で active を確認。違えば各コマンドに `CLOUDSDK_ACTIVE_CONFIG_NAME=teru` を前置する。`gcloud config` のグローバル設定を勝手に書き換えない）
+- GCP プロジェクトは利用者自身のもの（リポジトリに ID を書かない）。Phase 0 で `P=${GCP_PROJECT_ID:-$(gcloud config get-value project 2>/dev/null)}` として決め、空なら中断してユーザーに確認する。以下のコマンドの `$P` はこれ。gcloud は利用者の active 構成を使う（`gcloud config configurations list` で確認。別の構成を使う場合はユーザーが環境変数 `CLOUDSDK_ACTIVE_CONFIG_NAME` 等で指定する。`gcloud config` のグローバル設定を勝手に書き換えない）
 - `functions/` から複数関数がデプロイされているが、**関数ごとにデプロイ時点が違い、デプロイ済みソースも別々**。さらに本番デプロイ済みコードと git の間にドリフトがある（2024-08 のデプロイ内容が未コミット）。差分確認は関数ごとに行う
 - `auth.txt`（共通パスワード, gitignore 済み）が `functions/`・`functions_py/atm_iv/`・`appengine/` のデプロイに必要（`main.py` が import 時に読む。無いとコールドスタートで落ちる）。**中身を表示・コミット・Issue/PR に転記しない**
 - **python37 の注意**: Cloud Functions / App Engine とも python37 は廃止済みで、そのままでは再デプロイできない可能性が高い。python37 の関数・アプリに手を入れる Issue は、ランタイム移行（requirements の更新・挙動差の確認を含む）を同じ Issue で行うか、別 Issue に切り出すかを Phase 2 で必ず明示し、ユーザーに確認する
-- gh は `gh` コマンドをそのまま使う（アカウント切替はユーザーが `GH_CONFIG_DIR` 等で行う。スキル側で `gh auth switch` や設定変更をしない）。対象リポジトリ `terukusu/optionchan-gcp`、デフォルトブランチ `master`
+- gh は `gh` コマンドをそのまま使う（アカウント切替はユーザーが `GH_CONFIG_DIR` 等で行う。スキル側で `gh auth switch` や設定変更をしない）。対象リポジトリは `REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` で取り、`--repo "$REPO"` で渡す。デフォルトブランチ `master`
 
 ## Phase 構成
 
@@ -106,14 +106,14 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
 
 ## Phase 0: 初期化（main 直実行）
 
-- `gh auth status` と `git status` を確認（未認証・未コミット変更があれば中断）。`gh repo view terukusu/optionchan-gcp --json name` が通ること
+- `gh auth status` と `git status` を確認（未認証・未コミット変更があれば中断）。`REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` が通ること（取った `REPO` が自分のリポジトリか確認する。fork を clone して upstream があると元リポジトリになることがあるので、そのときは `gh repo set-default` で選び直すようユーザーに依頼する）
 - `$ARGUMENTS` から Issue 番号を抽出（URL なら末尾の数字。空なら中断）し、数値検証する:
   ```bash
   printf '%s' "$ISSUE_NUM" | grep -qE '^[0-9]+$' || { echo "[error] ISSUE_NUM is not numeric: $ISSUE_NUM"; exit 1; }
   ```
-- Issue 取得: `gh issue view "$ISSUE_NUM" --repo terukusu/optionchan-gcp --json title,body,labels,comments,state`（無い / closed なら中断）
+- Issue 取得: `gh issue view "$ISSUE_NUM" --repo "$REPO" --json title,body,labels,comments,state`（無い / closed なら中断）
 - `git checkout master && git pull --ff-only` → `git checkout -b feature/issue-<ISSUE_NUM>`（既存ブランチなら再利用 or 再作成をユーザーに確認）
-- gcloud の active 構成が `teru` であることを確認（`gcloud config configurations list`）。違う場合の扱いは「プロジェクト前提」参照
+- GCP プロジェクト `P` を決める（「プロジェクト前提」参照）。active 構成とプロジェクトが意図したものかをユーザーに示して確認する
 - `HANDOFF_DIR` を作成（handoff 節）
 
 完了後: `✓ Phase 0 初期化 完了` と Issue タイトルを報告。
@@ -131,12 +131,12 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
 1. 共通プロローグ
 2. 役割: Issue の why / what / AC / スコープ外 を生成・改訂する。必要なら読み取り専用の調査（コード・`bq query`・`gcloud logging read`）で事実を補う
 3. **3 視点の順次セルフレビュー**（対象は Issue 本文。最大 3 ラウンド。全視点 approve で終了）:
-   - **プロダクト視点**: 本当の課題か、ビューアー利用者（オーナー本人）にとっての価値、スコープ境界、やらなかったらどうなるか
+   - **プロダクト視点**: 本当の課題か、ビューアー利用者（運用者本人）にとっての価値、スコープ境界、やらなかったらどうなるか
    - **技術視点**: 実現可能性、既存構成（Cloud Functions / BigQuery / App Engine）との整合、本番取り込みへの影響、廃止ランタイムの影響、over-engineering
    - **QA視点**: AC が観察可能な assertion（`py_compile` / `pytest` / `grep` / `bq query` の結果条件 / `gcloud logging read` の件数）に落ちているか、エッジケース（取引時間外・限月切替・JPX ページ構造変化・欠損値 `-`）
 4. **本文編集ポリシー**:
    - 編集**前**に、元本文を先頭行が `<!-- refinement-original -->` ちょうどのコメントとして投稿する（`gh issue comment --body-file`）。既に同コメントがあれば再投稿しない。**投稿に失敗したら本文編集を一切行わず中断**
-   - 本文は `mktemp` の一時ファイル経由で `gh issue edit <num> --repo terukusu/optionchan-gcp --body-file <tmp>` で更新し、成否によらず一時ファイルを削除
+   - 本文は `mktemp` の一時ファイル経由で `gh issue edit <num> --repo "$REPO" --body-file <tmp>` で更新し、成否によらず一時ファイルを削除
    - 推奨構成: `## 背景（why）` / `## やること（what）` / `## 受け入れ条件（AC）` / `## スコープ外` / `## デプロイ対象`（関数名 / App Engine / BigQuery / なし）
    - AC の形式は `.claude/skills/create-issue/SKILL.md` の「AC の形式規約」に従う
 5. reply:
@@ -156,7 +156,7 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
 
 1. 共通プロローグ
 2. 役割: Issue を実装可能な計画に落とす
-3. **調査**: 変更対象ファイル、呼び出し元（`grep -rn`）、関係する BigQuery テーブルとスキーマ（`schema/*.json` と `bq show --schema optionchan.<table>`）、対象関数の本番設定（`gcloud functions describe <fn> --region us-east1 --project optionchan-222710` の runtime / trigger / memory / timeout）
+3. **調査**: 変更対象ファイル、呼び出し元（`grep -rn`）、関係する BigQuery テーブルとスキーマ（`schema/*.json` と `bq show --schema --project_id="$P" optionchan.<table>`）、対象関数の本番設定（`gcloud functions describe <fn> --region us-east1 --project "$P"` の runtime / trigger / memory / timeout）
 4. **ドリフト確認**: 変更対象の関数について、デプロイ済みソースと `master` の差分を取る（手順は Phase 6 の「デプロイ済みソースとの差分確認」と同じコマンド。`git diff` の比較対象は master の作業ツリー）。差分があれば handoff の `## 未解決・懸念` に「ドリフトあり: <関数> <差分ファイル>」と書く。**ドリフトがある関数を変更する計画は、先にデプロイ済みソースを取り込む（別 Issue / 別コミット）かどうかの判断をユーザーに求める前提で書く**
 5. **計画に含める内容**:
    - AC と計画ステップの 1 対 1 対応
@@ -234,7 +234,7 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
 3. 変更ファイルを個別に `git add` する（**`git add -A` / `git add .` は使わない**）
 4. commit（HEREDOC でメッセージを渡す。1 行目は `<種別>: <要約> (#<ISSUE_NUM>)`、日本語可）。末尾の署名行は Claude Code の通常ルールに従う
 5. `git push -u origin feature/issue-<ISSUE_NUM>`
-6. PR 作成: `gh pr create --repo terukusu/optionchan-gcp --base master --title '<要約> (#<ISSUE_NUM>)' --body-file <tmp>`。本文:
+6. PR 作成: `gh pr create --repo "$REPO" --base master --title '<要約> (#<ISSUE_NUM>)' --body-file <tmp>`。本文:
    ```markdown
    ## Summary
    - <変更点>
@@ -268,7 +268,7 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
 ### 1. 本番設定の取得
 
 ```bash
-CLOUDSDK_ACTIVE_CONFIG_NAME=teru gcloud functions describe <FN> --region us-east1 --project optionchan-222710 \
+gcloud functions describe <FN> --region us-east1 --project "$P" \
   --format='yaml(runtime,entryPoint,eventTrigger,httpsTrigger,availableMemoryMb,timeout,environmentVariables,serviceAccountEmail,updateTime)'
 ```
 
@@ -280,8 +280,8 @@ runtime が python37 等の廃止ランタイムなら、そのまま同じ runt
 FN=<FN>; SRC=<functions | functions_py/timeframe | functions_py/atm_iv>
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/optionchan-deployed-${FN}-XXXXXX")
 # 署名付き URL は表示しない (変数に入れるだけ)
-URL=$(curl -sf -X POST -H "Authorization: Bearer $(CLOUDSDK_ACTIVE_CONFIG_NAME=teru gcloud auth print-access-token)" -H 'Content-Length: 0' \
-  "https://cloudfunctions.googleapis.com/v1/projects/optionchan-222710/locations/us-east1/functions/${FN}:generateDownloadUrl" \
+URL=$(curl -sf -X POST -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'Content-Length: 0' \
+  "https://cloudfunctions.googleapis.com/v1/projects/${P}/locations/us-east1/functions/${FN}:generateDownloadUrl" \
   | python3 -c 'import sys,json; print(json.load(sys.stdin)["downloadUrl"])')
 curl -sf -o "$WORK/deployed.zip" "$URL" && unzip -q "$WORK/deployed.zip" -d "$WORK/deployed"
 echo "退避先: $WORK/deployed.zip"
@@ -299,14 +299,14 @@ test -f "$SRC/auth.txt" && cmp -s "$WORK/deployed/auth.txt" "$SRC/auth.txt" && e
 - (b) が PR の diff と一致することを確認する（`.gcloudignore` で除外されるファイルを考慮）
 - `auth.txt` がローカルに無い場合は、ユーザーに用意してもらうか、承認を得てデプロイ済み zip から `$SRC/auth.txt` へコピーする（中身は表示しない）
 - `deployed.zip` はロールバック用に保持し、パスを報告する
-- App Engine の場合は `gcloud app versions list --project optionchan-222710` で現行バージョンを控える（ロールバックはトラフィックを旧バージョンへ戻す: `gcloud app services set-traffic default --splits=<旧version>=1`）。ソース差分は Admin API の `apps.services.versions.get?view=FULL` の `deployment.files` から取得できる場合がある。取得できなければその旨をユーザーに伝えて判断を仰ぐ
+- App Engine の場合は `gcloud app versions list --project "$P"` で現行バージョンを控える（ロールバックはトラフィックを旧バージョンへ戻す: `gcloud app services set-traffic default --splits=<旧version>=1`）。ソース差分は Admin API の `apps.services.versions.get?view=FULL` の `deployment.files` から取得できる場合がある。取得できなければその旨をユーザーに伝えて判断を仰ぐ
 
 ### 3. デプロイ計画の提示と承認
 
 ユーザーに以下を提示し、**「このコマンドで本番にデプロイしてよいですか？」と確認**する:
 
 - 対象（関数名 / App Engine / BigQuery 変更）と、(b) の差分要約・ドリフト確認結果
-- 実行するコマンド全文。Cloud Functions は 1 で取得した設定を引き継ぐ（例: `gcloud functions deploy <FN> --no-gen2 --region=us-east1 --project=optionchan-222710 --source=<SRC> --runtime=<runtime> --entry-point=<entryPoint> --trigger-topic=<topic> | --trigger-resource=optionchan --trigger-event=google.storage.object.finalize | --trigger-http, --memory=<MB> --timeout=<s>`。memo.txt は古い値を含むので describe の結果を正とする）
+- 実行するコマンド全文。Cloud Functions は 1 で取得した設定を引き継ぐ（例: `gcloud functions deploy <FN> --no-gen2 --region=us-east1 --project="$P" --source=<SRC> --runtime=<runtime> --entry-point=<entryPoint> --trigger-topic=<topic> | --trigger-resource=optionchan --trigger-event=google.storage.object.finalize | --trigger-http, --memory=<MB> --timeout=<s>`。memo.txt は古い値を含むので describe の結果を正とする）
 - ロールバック手順（`deployed.zip` を展開したディレクトリを `--source` にして同じ設定で再デプロイ / App Engine はトラフィック切り戻し）
 - 事後確認の方法（下記 5）
 
@@ -320,11 +320,11 @@ BigQuery の DML / DDL・`bq update`・Scheduler / Pub/Sub / GCS 設定の変更
 
 ```bash
 # エラーログ (デプロイ後 10 分)
-CLOUDSDK_ACTIVE_CONFIG_NAME=teru gcloud logging read \
+gcloud logging read \
   'resource.type="cloud_function" AND resource.labels.function_name="<FN>" AND severity>=ERROR' \
-  --project optionchan-222710 --freshness=10m --limit=20
+  --project "$P" --freshness=10m --limit=20
 # 取り込みが続いているか (取引時間中のみ意味がある。パーティション列で絞る)
-CLOUDSDK_ACTIVE_CONFIG_NAME=teru bq query --project_id=optionchan-222710 --use_legacy_sql=false \
+bq query --project_id="$P" --use_legacy_sql=false \
   'SELECT MAX(created_at) AS latest, COUNT(*) AS n FROM optionchan.option_price WHERE created_at > TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 30 MINUTE)'
 ```
 
@@ -357,7 +357,7 @@ CLOUDSDK_ACTIVE_CONFIG_NAME=teru bq query --project_id=optionchan-222710 --use_l
 | コードレビュー 2 回 block / 解決不能な指摘 | 状況を提示しユーザーに判断を委ねる |
 | ドリフト検出 / 廃止ランタイムでデプロイ不可 | デプロイせず中断し、ユーザーに判断を委ねる |
 | デプロイ失敗・デプロイ後エラー | 即報告し、ロールバック実行の可否をユーザーに確認 |
-| gh 失敗 | `gh auth status` と `gh repo view terukusu/optionchan-gcp` を確認（アカウント切替はユーザーに依頼） |
+| gh 失敗 | `gh auth status` と `gh repo view --json nameWithOwner` を確認（アカウント切替はユーザーに依頼） |
 
 ## 進捗報告
 

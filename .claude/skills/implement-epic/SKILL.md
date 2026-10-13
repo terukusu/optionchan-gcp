@@ -20,7 +20,7 @@ EPIC の作成・再整理は `/create-epic` の責務。本スキルは EPIC �
 | 1 | `$ARGUMENTS` が Issue 番号 / URL に解決でき、`^[0-9]+$` に一致する（`--` 始まりのトークンはフラグ） | 番号を指定してもらう |
 | 2 | その Issue が EPIC である（タイトルに `EPIC` / `Epic` を含む、または子を束ねる体裁） | 通常 Issue なら `/implement-issue` を案内 |
 | 3 | EPIC 本文が `### 子 Issue と着手順` と `### 終了条件（判定担当つき）` を持つ（`/create-epic` のテンプレート見出し） | `/create-epic <番号>` での再整理を案内 |
-| 4 | `gh auth status` が通り、`gh repo view terukusu/optionchan-gcp` が成功し、作業ツリーがクリーン | 認証 / 未コミット変更の解消を依頼 |
+| 4 | `gh auth status` が通り、`REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)` が成功し（取った `REPO` が自分のリポジトリか確認する。fork を clone して upstream があると元リポジトリになることがあるので、そのときは `gh repo set-default` で選び直すようユーザーに依頼する）（以降のコマンドは `--repo "$REPO"`）、作業ツリーがクリーン | 認証 / 未コミット変更の解消を依頼 |
 
 ## 進捗の導出
 
@@ -28,7 +28,7 @@ EPIC の作成・再整理は `/create-epic` の責務。本スキルは EPIC �
 
 - 「次に着手する子」は毎回導出する: (a) EPIC のサブイシュー一覧と各子の `state`
   ```bash
-  gh api graphql -f query='query{repository(owner:"terukusu",name:"optionchan-gcp"){issue(number:<EPIC番号>){subIssues(first:50){nodes{number title state}}}}}'
+  gh api graphql -f owner="${REPO%/*}" -f name="${REPO#*/}" -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){issue(number:<EPIC番号>){subIssues(first:50){nodes{number title state}}}}}'
   ```
   (b) EPIC 本文 `### 子 Issue と着手順` 表の `順` と `依存` 列
 - 順序は **EPIC 本文の表が決める**。LLM が優先順位を並べ替えない。表に無い子がサブイシューに現れたら順序不明として報告し、自分で位置を決めない
@@ -58,7 +58,7 @@ EPIC の作成・再整理は `/create-epic` の責務。本スキルは EPIC �
 ## 手順
 
 0. **起動ガード**: 「適用条件」1〜4 を上から判定する。`--approve-plans` の有無をここで確定し、以降変更しない
-1. **EPIC 本文の取得**: `gh issue view <EPIC番号> --repo terukusu/optionchan-gcp --json title,body,state`。表と終了条件から事実情報だけを読む
+1. **EPIC 本文の取得**: `gh issue view <EPIC番号> --repo "$REPO" --json title,body,state`。表と終了条件から事実情報だけを読む
 2. **子 Issue 集合と依存の導出**: サブイシューの番号・state と表の `順` / `依存` を突き合わせ、「未クローズかつ依存先がすべてクローズ済み」の子を着手可能集合とする
 3. **次の 1 本の決定**: 着手可能集合のうち `順` が最小のもの。着手可能な子が無ければ理由（全完了 / 依存待ち / 表に無い子がある）を報告して停止
 4. **委譲**: 選んだ子に対して `/implement-issue <子番号>` を **この同一セッションで逐次インライン実行** する（`.claude/skills/implement-issue/SKILL.md` を Read してその手順どおりに進める）。`Agent` ツールでの `/implement-issue` 起動や `claude -p` の子プロセス起動はしない（ブランチ操作が衝突し、確認ポイントが人に届かなくなるため）
@@ -70,4 +70,4 @@ EPIC の作成・再整理は `/create-epic` の責務。本スキルは EPIC �
 - 子 Issue の並行実行（`/implement-issue` が `git checkout` を行うため同一作業ツリーでは破綻する）
 - EPIC 本文の書き換え・EPIC の自動クローズ・LLM による優先順位の並べ替え
 - マージ・本番デプロイ承認の委任
-- 無人実行（スケジュール実行等）。個人プロジェクトで本番が毎分稼働中のため、各デプロイには人が立ち会う
+- 無人実行（スケジュール実行等）。本番が毎分稼働中のため、各デプロイには人が立ち会う

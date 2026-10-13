@@ -36,7 +36,7 @@ flowchart LR
         TFS[("GCS tfstate")]
     end
 
-    subgraph PROD["optionchan-222710（asia-northeast1）"]
+    subgraph PROD["本番の GCP プロジェクト（asia-northeast1）"]
         SCH["Cloud Scheduler（毎分 1 ジョブ）"]
         ING["Cloud Run ingest（取り込み・回収、ingress internal、sa-ingest）"]
         RAW[("GCS raw 生 HTML（Standard、上書き禁止）")]
@@ -226,7 +226,7 @@ flowchart LR
 **CI（GitHub Actions）と Workload Identity 連携**
 
 - プロバイダの属性条件は数値 ID（`assertion.repository_id` / `repository_owner_id`）で絞る
-- `sa-tf-apply` は `principal://…/subject/repo:terukusu/optionchan-gcp:environment:prod` にだけ許可。Environment `prod` は `master` のみ・required reviewer
+- `sa-tf-apply` は `principal://…/subject/repo:<OWNER>/<REPO>:environment:prod`（`<OWNER>/<REPO>` は bootstrap の `github_repository`） にだけ許可。Environment `prod` は `master` のみ・required reviewer
 - `pull_request_target` / `workflow_run` は使わない。fork からの PR はすべて承認必須、workflow の既定権限は read（この 2 つは #22 で設定済み）、`id-token: write` は job 単位
 - `master` にブランチ保護、Actions による PR 承認を無効化、secret scanning と push protection を有効化（フェーズ 0 で設定・確認。#22、手順は runbook の「GitHub 設定」）
 - サプライチェーン: Actions は SHA ピン留め（必須化）と許可アクションの限定（この 2 つは #22 で設定済み）、`uv.lock` はハッシュ付き、Dependabot か Renovate、ベースイメージとデプロイは digest 固定、Artifact Registry にクリーンアップポリシー

@@ -1,7 +1,7 @@
+# 既定値は持たない（リポジトリは誰でも clone して自分のプロジェクトで使う前提）。TF_VAR_project_id か tfvars で渡す
 variable "project_id" {
   description = "GCP プロジェクト ID"
   type        = string
-  default     = "optionchan-222710"
 }
 
 variable "region" {
@@ -17,8 +17,8 @@ variable "ingest_image" {
   type        = string
 
   validation {
-    condition     = can(regex("^asia-northeast1-docker\\.pkg\\.dev/[a-z0-9-]+/optionchan/ingest(@sha256:[0-9a-f]{64}|:src-[0-9a-f]{20})$", var.ingest_image))
-    error_message = "ingest_image は asia-northeast1-docker.pkg.dev/<project>/optionchan/ingest の digest 参照か src-<20hex> のタグ参照で指定する。"
+    condition     = can(regex("^[a-z0-9-]+-docker\\.pkg\\.dev/[a-z0-9-]+/optionchan/ingest(@sha256:[0-9a-f]{64}|:src-[0-9a-f]{20})$", var.ingest_image))
+    error_message = "ingest_image は <region>-docker.pkg.dev/<project>/optionchan/ingest の digest 参照か src-<20hex> のタグ参照で指定する。"
   }
 }
 
@@ -28,8 +28,8 @@ variable "viewer_image" {
   type        = string
 
   validation {
-    condition     = can(regex("^asia-northeast1-docker\\.pkg\\.dev/[a-z0-9-]+/optionchan/viewer(@sha256:[0-9a-f]{64}|:src-[0-9a-f]{20})$", var.viewer_image))
-    error_message = "viewer_image は asia-northeast1-docker.pkg.dev/<project>/optionchan/viewer の digest 参照か src-<20hex> のタグ参照で指定する。"
+    condition     = can(regex("^[a-z0-9-]+-docker\\.pkg\\.dev/[a-z0-9-]+/optionchan/viewer(@sha256:[0-9a-f]{64}|:src-[0-9a-f]{20})$", var.viewer_image))
+    error_message = "viewer_image は <region>-docker.pkg.dev/<project>/optionchan/viewer の digest 参照か src-<20hex> のタグ参照で指定する。"
   }
 }
 

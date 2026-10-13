@@ -6,7 +6,9 @@
 
 読み取りのみ (Monitoring API の timeSeries.list)。標準ライブラリだけで動く。リポジトリ直下で実行する:
 
-    CLOUDSDK_ACTIVE_CONFIG_NAME=<config> python3 -I monitoring/backtest.py [--project optionchan-222710] [--days 42]
+    CLOUDSDK_ACTIVE_CONFIG_NAME=<config> GCP_PROJECT_ID=<PROJECT_ID> python3 -I monitoring/backtest.py [--days 42]
+
+プロジェクトは --project か環境変数 GCP_PROJECT_ID で渡す（既定値は持たない）。
 
 出力は判定ごとの要約 1 行と期間だけ (生の時系列・トークンは出さない)。
 終了コード: 発火なし 0、発火あり 1、API エラー 2。
@@ -210,9 +212,12 @@ def _fmt(dt):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument('--project', default='optionchan-222710')
+    parser.add_argument('--project', default=os.environ.get('GCP_PROJECT_ID') or None,
+                        help='GCP プロジェクト ID（既定: 環境変数 GCP_PROJECT_ID）')
     parser.add_argument('--days', type=int, default=MAX_DAYS)
     args = parser.parse_args(argv)
+    if not args.project:
+        parser.error('--project か環境変数 GCP_PROJECT_ID でプロジェクト ID を渡す')
     days = max(1, min(args.days, MAX_DAYS))
 
     with open(os.path.join(HERE, 'm1-liveness.json'), encoding='utf-8') as f:

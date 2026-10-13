@@ -1,6 +1,6 @@
 """日次の品質チェック・新旧の突き合わせ（#40）の SQL を BigQuery で実際に動かす検査。
 
-CI では動かさない（BigQuery の認証が要る）。手元で `OPTIONCHAN_BQ_TEST=1 python -m pytest -q tests/test_sql_bq.py`。
+CI では動かさない（BigQuery の認証が要る）。手元で `OPTIONCHAN_BQ_TEST=1 OPTIONCHAN_BQ_PROJECT=<PROJECT_ID> python -m pytest -q tests/test_sql_bq.py`。
 - 固定値の検査: SQL の `-- result:begin`〜`-- result:end`（結果 1 行の SELECT）を取り出し、`-- source:begin`〜`-- source:end`
   （テーブルを読む CTE）を固定値の CTE に差し替えて SELECT だけを実行する（テーブルを読まない。課金 0 バイト）
 - 実テーブルの dry run: 差し替えずに `--dry_run` し、見積もりバイト数が上限以下であること（突き合わせはコピーのデータセットの代わりに
@@ -14,10 +14,14 @@ import subprocess
 
 import pytest
 
-pytestmark = pytest.mark.skipif(os.environ.get('OPTIONCHAN_BQ_TEST') != '1', reason='OPTIONCHAN_BQ_TEST=1 のときだけ')
+# プロジェクトに既定値は持たない（誰でも clone して自分のプロジェクトで使う前提。#55）
+PROJECT = os.environ.get('OPTIONCHAN_BQ_PROJECT', '')
+pytestmark = pytest.mark.skipif(
+    os.environ.get('OPTIONCHAN_BQ_TEST') != '1' or not PROJECT,
+    reason='OPTIONCHAN_BQ_TEST=1 と OPTIONCHAN_BQ_PROJECT のときだけ',
+)
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-PROJECT = os.environ.get('OPTIONCHAN_BQ_PROJECT', 'optionchan-222710')
 TOKYO = 'asia-northeast1'
 QUALITY = os.path.join(ROOT, 'sql', 'quality', 'quality_daily.sql')
 STAGE = os.path.join(ROOT, 'sql', 'legacy', 'stage.sql')

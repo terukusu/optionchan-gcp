@@ -15,7 +15,10 @@ import pytest
 
 from test_sql_bq import GiB, MiB, PROJECT, TOKYO, between, bq, cte, literal, read, render
 
-pytestmark = pytest.mark.skipif(os.environ.get('OPTIONCHAN_BQ_TEST') != '1', reason='OPTIONCHAN_BQ_TEST=1 のときだけ')
+pytestmark = pytest.mark.skipif(
+    os.environ.get('OPTIONCHAN_BQ_TEST') != '1' or not PROJECT,
+    reason='OPTIONCHAN_BQ_TEST=1 と OPTIONCHAN_BQ_PROJECT のときだけ',
+)
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 SQL_DIR = os.path.join(ROOT, 'sql', 'ohlc')

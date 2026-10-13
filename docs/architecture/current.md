@@ -2,7 +2,7 @@
 
 - 時点: **2026-10-12**（本番 GCP の実状態と `master` を調べて作成。同日の PR #6 のマージと `download_jpx` のデプロイまでを反映）
 - 位置づけ: アーキテクチャリファクタリングの **Before** 資料。After と比較するため、現状を事実ベースで記録する。良し悪しの判断は末尾の「現行の課題」にまとめる
-- GCP プロジェクト: `optionchan-222710`
+- GCP プロジェクト: 本番のプロジェクト（ID はリポジトリに書かない。コマンドでは `<PROJECT_ID>` / runbook の `$P`）
 
 ## 1. 概要
 
@@ -24,7 +24,7 @@ flowchart LR
         CDN["CDN<br/>cdnjs / jsDelivr<br/>(Chart.js, Luxon)"]
     end
 
-    subgraph GCP["GCP プロジェクト optionchan-222710"]
+    subgraph GCP["本番の GCP プロジェクト"]
         subgraph ANE1["asia-northeast1 (東京)"]
             SCH1["Cloud Scheduler<br/>minutely_task<br/>* * * * * (JST)"]
             SCH2["Cloud Scheduler<br/>create_timeframe<br/>1 0 * * * (UTC)"]
