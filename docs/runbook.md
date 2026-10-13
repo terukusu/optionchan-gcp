@@ -1176,7 +1176,7 @@ prod の plan の目安: create 13（データセット 2、テーブル 2、デ
 for loc in $L us; do
   bq ls --transfer_config --transfer_location=$loc --project_id=$P --format=json \
     | jq -c '.[] | {displayName, dataSourceId, schedule, disabled: (.disabled // false), owner: (.ownerInfo.email // "" | split("@")[0])}'
-done   # 東京 3 本・US 1 本、owner はすべて sa-sq-dts、schedule は every day 22:15 / 22:10 / 22:30 / 22:02（UTC）
+done   # 東京 3 本・US 1 本（#49 の後は東京に atm-hourly（22:40）が加わり 4 本）、owner はすべて sa-sq-dts、schedule は every day 22:15 / 22:10 / 22:30 / 22:02（UTC）
 ```
 
 `ownerInfo` が出ない場合は `bq show --transfer_config --format=json "$(tc quality-daily $L)" | jq .ownerInfo` で見る。plan に DTS の `params` などの update が出続けるなら、API が返す形に `infra/prod/sq.tf` を合わせる PR を出す。
@@ -1401,7 +1401,7 @@ for t in spot_price future_price option_price; do
 done   # 土曜の午後は旧系に書き込みが無いので、行数が同じこと
 ```
 
-1 時間足（`atm_*`）もコピーされるが、この Issue では移さない（東京側の設計が未定。旧データセットを消す（#15）前に扱いを決める）。
+1 時間足（`atm_*`）もコピーされる。これは 5. の後、6. の後片付けの前に「1 時間足（#49）」の「過去分の移行」で移す（この節の SQL では移さない）。
 
 ### 3. コピーの検証
 
@@ -1499,6 +1499,8 @@ SELECT COUNT(*) FROM (
 
 ### 6. 後片付け
 
+先に「1 時間足（#49）」の「過去分の移行」を済ませる（一時データセットの旧 `atm_*` を使う）。
+
 ```sh
 ids=$(tc legacy-import $L); [ "$(echo "$ids" | grep -c .)" = 1 ] && bq rm -f --transfer_config "$ids"
 # コピーした表を消す（スナップショットは期限の 14 日まで残す）
@@ -1551,8 +1553,217 @@ E から旧系を止めるまでの新系の取りこぼし（`legacy_compare_da
 1. 補う日 W ごとに「再実行・バックフィル」の手順で legacy-stage → legacy-copy を流す（compare は不要）
 2. `render insert optionchan_legacy_copy | qr "<W の 07:00 JST の UTC>" "<W+1 の 07:00 JST の UTC>" --location=$L --format=json`、続けて同じ範囲で `render verify optionchan_legacy_copy` を流し、5. と同じ項目が 0 であることを見る
 3. 作業用データセットは翌朝の定期実行で前日分に戻る
+4. 補った日の 1 時間足を「1 時間足（#49）」の「再実行・バックフィル」で作り直す
 
 新系の取り込みを止めていた期間（「停止・再開」）の分も同じ手順で補える。
+
+## 1 時間足（#49）
+
+旧系の `insert_ohlc`（Cloud Functions、python37、毎日 00:01 UTC）の置き換え（target.md 3.2）。新系の最新版から ATM の 1 時間足を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の 3 表。旧系（`insert_ohlc`・旧 `optionchan.atm_*`）は変えない（止めるのは #14）。定義は `infra/prod/sq.tf`、SQL は `sql/ohlc/`（試験は `tests/test_ohlc.py`・`tests/test_ohlc_bq.py`）。
+
+| もの | 内容 |
+|---|---|
+| DTS `optionchan atm-hourly`（asia-northeast1、`sa-sq-dts`、毎日 07:40 JST = `every day 22:40` UTC） | `sql/ohlc/atm_hourly.sql`。窓は `@run_time` の JST の日付 D に対し `[D-1 07:00, D 07:00) JST`（「日次の品質チェックと新旧の突き合わせ（#40）」と同じ 1 日分）。`option_price_latest` の ATM の put（`is_atm AND type = 2`）から限月 × 1 時間（UTC の正時 = JST の正時）の OHLC を作り、3 表へ MERGE する（窓の中を置き換える。ATM の行が 1 件も無い窓では何もしない。3 表は 1 トランザクション）。#40 の 4 本（07:02〜07:30）の後で、失敗の M2 の抑制は 08:40 に終わる |
+| `optionchan_tokyo.atm_iv` / `atm_option_price` / `atm_target_price` | 列は旧系と同じ（`schema/ohlc/atm_ohlc.json`）。パーティションは月（`started_at`）、クラスタは `last_trading_day`。キーは `(last_trading_day, time_frame, started_at)`、`time_frame = 3600` |
+| `sql/ohlc/legacy_check.sql`（US、手で流す） | 旧系の同値の確認: 旧 `option_price` に同じ 1 時間足の計算を当てて旧 3 表と比べる |
+| `sql/ohlc/export.sql`（US）→ `compare.sql`（東京） | 並行稼働中の日の新旧の突き合わせ |
+| `sql/ohlc/import.sql`・`fingerprint.sql`（東京・US） | 旧系の過去分の移行と、その検証（#12 の後） |
+
+- 1 時間足の意味は旧系と同じ: `open` / `close` = その 1 時間で `created_at` が最も早い / 遅い NULL でない値、`high` / `low` = 最大 / 最小、全部 NULL なら NULL の行。1 時間の中で ATM の行使価格が変わっても分けない。同じ `created_at` の行（旧系の重複を移した行）の順は `target_price` で決める
+- 旧系は前日（UTC の日）分を 00:01 UTC に集計するので、08:45〜08:59 JST の行（JPX のページの遅れで未着）の分だけ、UTC 23 時台（08:00 JST）の 1 時間足が欠ける・違う。新系は 07:40 に前日の窓を作るので欠けない（2026-09-12〜10-12 の比較で、違いは 23 時台の各表 38〜39 件だけ）
+- 失敗は Cloud Logging の `resource.type="bigquery_dts_config"`・severity ERROR で、新系の M2 が通知する（#40 と同じ。条件は変えていない）
+- 料金: 1 日 約 65MB のスキャン（新系の 1 日の最新版の 5 列）。3 表は 1 表 1 日 約 40 行
+
+### 変数
+
+「日次の品質チェックと新旧の突き合わせ（#40）」の「変数」（`P`・`L`・`SQ`・`tc`）に加えて:
+
+```sh
+W=<スクラッチのディレクトリ>   # 結果の JSON を置く（リポジトリ・Issue に貼らない）
+# sql/ohlc/<名前>.sql の名前を入れる（第 2 引数: legacy_dataset / source_dataset / import_dataset に入れるデータセット）
+ro() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" -e "s/[$]{legacy_dataset}/optionchan/g" \
+  -e "s/[$]{source_dataset}/${2:-optionchan}/g" -e "s/[$]{import_dataset}/${2:-optionchan_import}/g" "sql/ohlc/$1.sql"; }
+q() { bq query --project_id=$P --use_legacy_sql=false --nouse_cache "$@"; }
+# 範囲 [$1, $2) をクエリパラメータで渡す（値を SQL に埋め込まない。--parameter は SQL の前に置く）
+qr() { local s=$1 e=$2; shift 2; q --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" "$@"; }
+# 窓の日付 $1（YYYY-MM-DD）の手動実行を 1 つ作り、終わるまで待って「日付 状態」を出す（SUCCEEDED 以外なら戻り値 1）
+rt() { local d=$1 cfg st; cfg=$(tc atm-hourly $L < /dev/null)
+  bq mk --transfer_run --run_time="${d}T22:40:00Z" "$cfg" < /dev/null > /dev/null || { echo "$d MK_FAILED"; return 1; }
+  while :; do
+    st=$(bq ls --transfer_run --run_attempt=LATEST --max_results=50 --format=json "$cfg" < /dev/null \
+      | jq -r --arg d "${d}T22:40" '[.[] | select(.runTime | startswith($d))][0].state // "PENDING"')
+    case $st in SUCCEEDED|FAILED|CANCELLED) break ;; esac; sleep 20
+  done
+  echo "$d $st"; [ "$st" = SUCCEEDED ]; }
+# 窓の日付を標準入力から 1 行 1 件で受け、1 日ずつ順に rt する（rt の bq は標準入力を読まない）。失敗した日は最後にまとめて出す（その日だけ rt でやり直す）
+rdays() { local d failed=""; while read -r d; do [ -n "$d" ] && { rt "$d" || failed="$failed $d"; }; done
+  [ -z "$failed" ] && echo "all SUCCEEDED" || echo "FAILED:$failed"; }
+# 窓の日付 $1〜$2 を 1 行 1 件で出す
+days() { local d=$1; while [[ ! "$d" > "$2" ]]; do echo "$d"; d=$(date -u -d "$d + 1 day" +%F); done; }
+```
+
+### 確認（prod の apply の後）
+
+prod の plan の目安: create 7（テーブル 3、テーブル IAM 3、DTS 1）、update / delete 0。
+
+```sh
+bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json \
+  | jq -c '.[] | select(.displayName == "optionchan atm-hourly") | {displayName, dataSourceId, schedule, disabled: (.disabled // false)}'
+bq show --transfer_config --format=json "$(tc atm-hourly $L)" | jq -r '.ownerInfo.email // "" | split("@")[0]'   # sa-sq-dts
+for t in atm_iv atm_option_price atm_target_price; do
+  bq show --format=json $P:optionchan_tokyo.$t | jq -c '{id: .tableReference.tableId, timePartitioning, clustering, n: .numRows}'
+  bq get-iam-policy --format=json $P:optionchan_tokyo.$t | jq -c '[.bindings[]? | {role, m: [.members[] | split("@")[0]]}]'
+done   # MONTH・started_at、["last_trading_day"]、[{"role":"roles/bigquery.dataEditor","m":["serviceAccount:sa-sq-dts"]}]
+```
+
+DTS は作成直後に 1 回自動で実行される（`run_time` は作成時刻。窓はその日の 07:00 JST までの 1 日分）。`SUCCEEDED` になったか「日次の確認」の実行の状態で見る。失敗したら「失敗を受けたとき」。トランザクション（`BEGIN TRANSACTION`）を含むスクリプトが DTS で通らない場合は、`atm_hourly.sql` の `BEGIN TRANSACTION;` / `COMMIT TRANSACTION;` の 2 行を消す PR を出す（MERGE は 1 文ずつ原子的。途中で失敗しても再実行で直る）。
+
+**デプロイ前の日を埋める**: 新系の最初の窓（2026-10-13 07:00 JST〜）からデプロイの前日の窓までを「再実行・バックフィル」の複数日の手順で作る。
+
+### 日次の確認
+
+毎朝 07:50 以降。件数・要約だけを #49（並行稼働中は #11）に記録する。
+
+```sh
+bq ls --transfer_run --run_attempt=LATEST --max_results=3 --format=json "$(tc atm-hourly $L)" | jq -c '.[] | {runTime, state}'
+q --location=$L --format=pretty '
+SELECT DATE(TIMESTAMP_SUB(started_at, INTERVAL 7 HOUR), "Asia/Tokyo") AS window_date, tbl, COUNT(*) AS bars,
+  COUNT(DISTINCT FORMAT("%t|%t", last_trading_day, started_at)) AS keys, COUNTIF(open IS NULL) AS null_bars
+FROM (SELECT "atm_iv" AS tbl, * FROM optionchan_tokyo.atm_iv UNION ALL SELECT "atm_option_price", * FROM optionchan_tokyo.atm_option_price
+      UNION ALL SELECT "atm_target_price", * FROM optionchan_tokyo.atm_target_price)
+WHERE started_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 7 DAY)
+GROUP BY window_date, tbl ORDER BY window_date DESC, tbl'   # 同じ窓の 3 表の bars が同じ、bars = keys（キーの重複 0）
+```
+
+`window_date` は窓の日付（JST の日中立会の日）。営業日の 1 日は 限月 2 × 約 21 時間 = 約 40 行。休場日・週末の窓は行が無い（実行は `SUCCEEDED`）。前日の窓の行が無い営業日は、実行が無かったか失敗している（実行が無いことは M2 では通知されない）。
+
+### 失敗を受けたとき（M2 の `bigquery_dts_config`）
+
+「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき」のログの見方で、`config_id` が `atm-hourly` のものを見る。
+
+| メッセージ | 意味 | 対応 |
+|---|---|---|
+| `atm_hourly: win_end ... is in the future` | 手動実行の `run_time` が未来の窓 | `run_time` を直して再実行 |
+| `Transaction ...` / `Could not serialize access ...` | 同じ表への別の DML（移行・手動の再実行）と重なった | 重なった作業が終わってから「再実行」。トランザクションなので 3 表とも書かれていない |
+| `Access Denied` / `Permission ...` | `sa-sq-dts` の 3 表の付与（`infra/prod/sq.tf` の `sq_atm_ohlc_editor`）か `optionchan_tokyo` の読み取り | plan で付与の差分を見る |
+| その他（クォータ・内部エラー） | BigQuery / DTS の障害 | 翌日の実行で戻るか見る。前日分は「再実行」 |
+
+### 再実行・バックフィル
+
+本番の 3 表への書き込みなので、実行は所有者が行う。同じ窓を何度流しても結果は同じ（窓の中を置き換える）。窓の日付 W（JST の日中立会の日）の分は `run_time` を W の UTC の 22:40（JST の W+1 日 07:40）にする。
+
+```sh
+# 1 日（終わるまで待つ）
+rt 2026-10-14
+# 複数日（窓の日付 W1〜W2）。1 日ずつ順に流し、全日が SUCCEEDED であることを確かめる
+days <W1> <W2> | rdays          # 最後に all SUCCEEDED。FAILED: の日は、原因を見てから rt <日付> でやり直す
+bq ls --transfer_run --run_attempt=LATEST --max_results=20 --format=json "$(tc atm-hourly $L)" | jq -c '.[] | {runTime, state}'
+```
+
+**バックフィルは 1 日ずつ順に実行する**（`bq mk --transfer_run --start_time --end_time` でまとめて作らない）。3 表は月のパーティションなので、近い日の MERGE が並行に走るとトランザクションが衝突して片方が失敗しうる（失敗した日はロールバックされ、ERROR で M2 も鳴る）。流し終えたら全日が `SUCCEEDED` かを確かめ、失敗した日は再実行する。毎朝の定期実行（07:40）と重ならない時間に行う。
+
+作り直すとき: 再処理ジョブ（「再処理ジョブ（#34）」）・回収で前の日の最新版が変わったとき、#12 の移行の後（新系の取りこぼしが旧系の行で埋まった日）、#14 の補い（「過去データの移行（#12）」の「E 以降の取りこぼしを補う」）の後。データの無い窓（#12 の前の新系の稼働前の日）を流しても何も変わらない（ATM の行が無い窓は何もしない）。
+
+定期実行は前日の窓 1 日分だけを作る。07:40 より後に前日以前の窓の最新版が変わったこと（毎時の回収は直近 6 時間分なので通常は起きない。再処理・回収の遅れ）は、完了記録の `finished_at` がその窓の翌朝 07:40 より後の実行がある窓の日付で見つけ、その日を `rt` で作り直す:
+
+```sh
+q --location=$L --format=csv '
+SELECT DISTINCT FORMAT_DATE("%F", DATE(TIMESTAMP_SUB(snapshot_at, INTERVAL 7 HOUR), "Asia/Tokyo")) AS window_date
+FROM optionchan_tokyo.ingest_runs
+WHERE snapshot_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
+  AND finished_at > TIMESTAMP(DATETIME(DATE_ADD(DATE(TIMESTAMP_SUB(snapshot_at, INTERVAL 7 HOUR), "Asia/Tokyo"), INTERVAL 1 DAY), TIME "07:40:00"), "Asia/Tokyo")
+ORDER BY window_date' | tail -n +2 | rdays   # 行が無ければ何もしない
+```
+
+### 旧系との突き合わせ
+
+**旧系の同値の確認**（target.md 3.2「過去 30 日分で現行と同値」。US、30 日 約 0.5GB）。範囲は UTC の正時:
+
+```sh
+ro legacy_check | qr '2026-09-12 00:00:00+00' '2026-10-13 00:00:00+00' --location=US --format=json > $W/legacy-check.json
+jq -c '.[-1][] | {tbl, recomputed, legacy_keys, match, late, differ, legacy_only, recomputed_only, legacy_dup_keys, legacy_conflict_keys}' $W/legacy-check.json
+# differ・legacy_only・recomputed_only が 0。late は UTC 23 時台（旧系の集計の時点で未着だった行の分）
+```
+
+2026-10-13 の実行（2026-09-12〜10-13 00:00 UTC）: 3 表とも `differ`・`legacy_only`・`recomputed_only` 0、`match` 887 / 888 / 887、`late` 39 / 38 / 39。旧系を止める前（#14）にもう一度流して記録する。
+
+**並行稼働中の日の新旧**（旧 3 表 ↔ 新系の 3 表）。旧系は窓の日付の翌日 00:01 UTC に前日（UTC の日）分を作るので、UTC の日 U の比較は U+1 日の 00:10 UTC 以降、新系の窓を作った後に行う。1 日ずつ（JSON 約 20KB。コマンドの引数の上限 128KB を超えないように）:
+
+```sh
+U=2026-10-14   # UTC の日
+s="$U 00:00:00+00"; e="$(date -u -d "$U + 1 day" +%F) 00:00:00+00"
+bars=$(ro export optionchan | qr "$s" "$e" --location=US --format=json | jq -r '.[0].bars')
+[ "$bars" != null ] && ro compare | qr "$s" "$e" --parameter="legacy_bars:STRING:$bars" --location=$L --format=json > $W/compare-$U.json
+jq -c '.[-1][] | {tbl, legacy_keys, new_keys, match, differ, legacy_only, new_only, legacy_dup_keys, conflict_keys, max_abs_diff}' $W/compare-$U.json
+```
+
+- `legacy_only` / `new_only`: 片方にだけある 1 時間足。新系の取りこぼし（その時間の `legacy_compare_daily` の `legacy_only_snapshots`）・旧系の 23 時台の欠け・新系だけの時間（保存条件の差）で説明できるかを見る
+- `differ`: 新旧はスナップショットの版が違うことがある（#40 の「版の差」。ATM の行の iv・価格も 1 分の中で変わる）ので、0 にはならない。`max_abs_diff` と `samples` を見て、版の差で説明できない大きな違い（時間全体がずれている等）が無いことを確かめる
+- 結果（件数・`max_abs_diff`）を #49 にコメントする（全文は貼らない）
+
+### 過去分の移行（#12 の後）
+
+旧 3 表のうち、`started_at` が C（新系の最初のスナップショット 2026-10-12 23:39 UTC を含む窓の始まり = **2026-10-12 22:00 UTC**）より前の行を、新系の 3 表へ移す。C 以降は定期クエリが作る。**「過去データの移行（#12）」の 5. の後、6. の後片付け（一時データセット `optionchan_import` の表を消す）の前に行う**（#12 のデータセットコピーで旧 `atm_*` も運ばれている）。1 つの端末で上から順に。旧 3 表は 1 表 約 4MB なので、クエリ量の上限の変更は要らない。
+
+- 同じ中身の重複は 1 行にする。中身の違う重複のキー（旧 `atm_target_price` の 2019-07-01 の 44 キー。片方は option の価格の値）は移さない（下の 4. で作り直す）
+- 新系に既にあるキーは上書きしない（流し直しても増えない）。値は旧系のまま（旧系の 23 時台の欠け・2019〜2020 年の一部の表だけ欠けた日もそのまま。直すなら 4. と同じ手動実行でその日を作り直す）
+
+```sh
+C='2026-10-12 22:00:00+00'; S0='2018-01-01 00:00:00+00'
+# 1. コピーの検証: US の旧 3 表と一時データセットの同じ範囲が一致
+ro fingerprint optionchan | qr "$S0" "$C" --location=US --format=json > $W/ohlc-fp-us.json
+ro fingerprint optionchan_import | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-fp-import.json
+diff <(jq -S . $W/ohlc-fp-us.json) <(jq -S . $W/ohlc-fp-import.json) && echo MATCH   # MATCH でなければ止める
+# 2. 移行（3 表に書く。結果は表ごとの inserted・skipped_existing・conflict_keys・dup_rows_collapsed）
+ro import | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-import.json; jq -c '.[-1][]' $W/ohlc-import.json
+#    もう一度流して inserted が 0（冪等）
+ro import | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-import-again.json; jq -c '.[-1][] | {tbl, inserted}' $W/ohlc-import-again.json
+# 3. 移行の検証: 新系の fp_clean_* = 旧系の fp_clean_*、新系の rows_ = keys = 旧系の keys − conflict_keys、新系の conflict_keys 0
+ro fingerprint optionchan_tokyo | qr "$S0" "$C" --location=$L --format=json > $W/ohlc-fp-tokyo.json
+jq -c '.[] | {tbl, keys, conflict_keys, fp_clean_xor, fp_clean_sum}' $W/ohlc-fp-us.json
+jq -c '.[] | {tbl, rows_, keys, conflict_keys, fp_clean_xor, fp_clean_sum}' $W/ohlc-fp-tokyo.json
+# 4. 作り直し（1 日ずつ順に。全日が SUCCEEDED であること）
+#  4a. 中身の違う重複のキーがある窓の日付（移さなかったキー。窓は JST 07:00 区切りなので、UTC 23 時台のキーは翌日の窓に入る）。
+#      一時データセットから出す。2026-10-13 の旧系では 2019-07-01 と 2019-07-02 の 2 日
+qr "$S0" "$C" --location=$L --format=csv '
+SELECT DISTINCT FORMAT_DATE("%F", DATE(TIMESTAMP_SUB(started_at, INTERVAL 7 HOUR), "Asia/Tokyo")) AS window_date
+FROM (
+  SELECT started_at FROM optionchan_import.atm_iv WHERE started_at >= @start_at AND started_at < @end_at
+  GROUP BY last_trading_day, time_frame, started_at HAVING COUNT(DISTINCT TO_JSON_STRING(STRUCT(open, high, low, close))) > 1
+  UNION ALL
+  SELECT started_at FROM optionchan_import.atm_option_price WHERE started_at >= @start_at AND started_at < @end_at
+  GROUP BY last_trading_day, time_frame, started_at HAVING COUNT(DISTINCT TO_JSON_STRING(STRUCT(open, high, low, close))) > 1
+  UNION ALL
+  SELECT started_at FROM optionchan_import.atm_target_price WHERE started_at >= @start_at AND started_at < @end_at
+  GROUP BY last_trading_day, time_frame, started_at HAVING COUNT(DISTINCT TO_JSON_STRING(STRUCT(open, high, low, close))) > 1
+)
+ORDER BY window_date' | tail -n +2 > $W/ohlc-conflict-days.txt
+cat $W/ohlc-conflict-days.txt
+rdays < $W/ohlc-conflict-days.txt          # all SUCCEEDED（その窓の移行済みの行も再計算で置き換わる）
+#  4b. C 以降の窓（窓の日付 2026-10-13 〜 E の前日（金曜）。#12 で新系の取りこぼしが旧系の行で埋まった）
+days 2026-10-13 <E の前日（金曜）> | rdays   # all SUCCEEDED
+#  4c. 確認: 作り直した窓ごとに 3 表のキーの数が同じで、キーの重複が無い（4a の日付と 4b の範囲）
+for d in $(cat $W/ohlc-conflict-days.txt); do
+  q --location=$L --format=csv --parameter="d:DATE:$d" '
+  SELECT @d AS window_date, tbl, COUNT(*) AS bars, COUNT(DISTINCT FORMAT("%t|%t", last_trading_day, started_at)) AS keys
+  FROM (SELECT "atm_iv" AS tbl, * FROM optionchan_tokyo.atm_iv UNION ALL SELECT "atm_option_price", * FROM optionchan_tokyo.atm_option_price
+        UNION ALL SELECT "atm_target_price", * FROM optionchan_tokyo.atm_target_price)
+  WHERE started_at >= TIMESTAMP(DATETIME(@d, TIME "07:00:00"), "Asia/Tokyo")
+    AND started_at < TIMESTAMP(DATETIME(DATE_ADD(@d, INTERVAL 1 DAY), TIME "07:00:00"), "Asia/Tokyo")
+  GROUP BY tbl ORDER BY tbl' | tail -n +2
+done   # 日ごとに 3 表の bars が同じ、bars = keys
+#    4b の範囲は「日次の確認」のクエリの INTERVAL 7 DAY を範囲に合わせて広げて同じことを見る
+```
+
+- 2. の `skipped_existing` は、移行の前に C より前の窓を手動実行していなければ 0
+- 結果は件数・要約だけを #49 にコメントする（フィンガープリントの値は貼らない。一致したかどうかだけ）
+- 切り戻し（移行行だけを消す。C より前は移行行だけ）: `qr "$S0" "$C" --location=$L 'DELETE FROM optionchan_tokyo.<表> WHERE started_at >= @start_at AND started_at < @end_at'` を 3 表で。4a で作り直した窓（2019-07-01・2019-07-02）の 1 時間足も消える
+
+### 停止・削除
+
+- 一時停止: `infra/prod/sq.tf` の `atm_hourly` に `disabled = true` を足す PR（急ぐときはコンソールで無効 → 同じ PR）
+- 全部を戻す（この Issue の revert）: 3 表の `deletion_protection = false` の PR → revert の PR（delete 7）。旧系の `insert_ohlc` は動いたままなので、旧ビューアーには影響しない
+- 旧系の停止（#14）: `insert_ohlc` と Scheduler `create_timeframe` を止める前に、「旧系の同値の確認」を直近 30 日でもう一度流して記録する。止めた後は新系の 3 表だけになる（旧 3 表は #15 で消すまで残る）
 
 ## 取引カレンダーの更新
 

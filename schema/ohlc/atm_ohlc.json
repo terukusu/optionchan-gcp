@@ -1,0 +1,44 @@
+[
+ {
+   "description": "始値（その 1 時間で created_at が最も早い NULL でない値）",
+   "name": "open",
+   "type": "FLOAT",
+   "mode": "NULLABLE"
+ },
+ {
+   "description": "高値",
+   "name": "high",
+   "type": "FLOAT",
+   "mode": "NULLABLE"
+ },
+ {
+   "description": "安値",
+   "name": "low",
+   "type": "FLOAT",
+   "mode": "NULLABLE"
+ },
+ {
+   "description": "終値（その 1 時間で created_at が最も遅い NULL でない値）",
+   "name": "close",
+   "type": "FLOAT",
+   "mode": "NULLABLE"
+ },
+ {
+   "description": "最終取引日",
+   "name": "last_trading_day",
+   "type": "DATE",
+   "mode": "REQUIRED"
+ },
+ {
+   "description": "時間枠（秒数）",
+   "name": "time_frame",
+   "type": "INTEGER",
+   "mode": "REQUIRED"
+ },
+ {
+   "description": "開始時刻（UTC の正時 = JST の正時）",
+   "name": "started_at",
+   "type": "TIMESTAMP",
+   "mode": "REQUIRED"
+ }
+]
