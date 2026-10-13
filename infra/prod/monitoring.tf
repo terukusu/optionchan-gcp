@@ -24,8 +24,22 @@ data "google_monitoring_notification_channel" "email" {
   type    = "email"
 }
 
+# ログ一致の条件（conditionMatchedLog）をその場で更新すると、API が「Recompilation of log match condition failed during update」
+# でポリシーを無効にする（2026-10-14 に確認。#40・#63 の更新で M2 ingest が無効のままになっていた）。作成は通るので、
+# ログ一致の条件が変わったら作り直す（create_before_destroy で新しいポリシーを作ってから古いものを消す）。
+resource "terraform_data" "log_match_conditions" {
+  for_each = local.alert_policies
+
+  input = jsonencode([for c in each.value.conditions : try(c.conditionMatchedLog, null)])
+}
+
 resource "google_monitoring_alert_policy" "this" {
   for_each = local.alert_policies
+
+  lifecycle {
+    create_before_destroy = true
+    replace_triggered_by  = [terraform_data.log_match_conditions[each.key]]
+  }
 
   project               = var.project_id
   display_name          = each.value.displayName

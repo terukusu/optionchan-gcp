@@ -78,6 +78,15 @@ def test_policy_common(name, prefix):
     rest = headings[start + 1:]
     end = next((i for i, h in enumerate(rest) if h.startswith('## ')), len(rest))
     assert f'### {subsection}' in rest[:end], (name, section, subsection)
+    # displayName の上限は 100 文字。ログ一致の条件は Logging の通知ルールとしても作られ、その名前は
+    # ポリシーと条件の displayName をつないだものになるらしく、合わせて 100 文字を超えると作成が 400
+    # （`display_name` must not be more than 100 characters）、更新は「Recompilation of log match condition failed」
+    # でポリシーが無効になる（2026-10-14。35 + 80 文字で失敗、35 + 46 文字で成功）。余裕を見て合計 95 文字以内にする
+    assert len(policy['displayName']) <= 100
+    for c in policy['conditions']:
+        assert len(c['displayName']) <= 100, (name, c['displayName'])
+        if 'conditionMatchedLog' in c:
+            assert len(policy['displayName']) + len(c['displayName']) <= 95, (name, c['displayName'])
 
 
 def test_m1_liveness(m1):
