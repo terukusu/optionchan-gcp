@@ -1,0 +1,214 @@
+[
+  {
+    "name": "compare_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "窓の日付（JST。窓 [前日 07:00, 当日 07:00) の開始日 = 日中立会の日付）"
+  },
+  {
+    "name": "window_start",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "窓の開始（含む。JST の 07:00）"
+  },
+  {
+    "name": "window_end",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "窓の終了（含まない）"
+  },
+  {
+    "name": "copy_complete",
+    "type": "BOOLEAN",
+    "mode": "REQUIRED",
+    "description": "コピーの 3 テーブルの行数が stage の件数（staged_window）と一致したか。false の日は比較が当てにならない（定期クエリは記録の後に失敗する）"
+  },
+  {
+    "name": "legacy_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "旧系のスナップショット数（旧 3 テーブルの created_at の和集合）"
+  },
+  {
+    "name": "new_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "新系のスナップショット数（latest_runs）"
+  },
+  {
+    "name": "both_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "両方にある created_at の数"
+  },
+  {
+    "name": "new_only_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "新系にだけある created_at の数（保存条件の差。説明済み）"
+  },
+  {
+    "name": "legacy_only_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "旧系にだけある created_at の数（新系の取りこぼし。説明できない差分）"
+  },
+  {
+    "name": "legacy_dup_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "旧系の created_at の重複（spot か future が 2 行以上）。比較から外す"
+  },
+  {
+    "name": "legacy_partial_snapshots",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "旧系の 3 テーブルのどれかに無い created_at。比較から外す"
+  },
+  {
+    "name": "spot_compared",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "比べた spot の行数（一致を含む）"
+  },
+  {
+    "name": "spot_version",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "spot で新系の直前か直後のスナップショットと一致した行数（版の差。説明済み）"
+  },
+  {
+    "name": "spot_new_stale",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "spot で新系の T が直前と同じ中身で、旧系だけ新しい版の行数（新系の版の遅れ。説明済み）"
+  },
+  {
+    "name": "spot_unexplained",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "spot の説明できない違い"
+  },
+  {
+    "name": "future_compared",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "比べた future の行数（一致を含む）"
+  },
+  {
+    "name": "future_version",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "future で新系の直前か直後と一致した行数（限月の年の補完を許す。説明済み）"
+  },
+  {
+    "name": "future_contract_year",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "future で限月だけが 旧 = 新 + 1 年 の行数（旧パーサーの限月の年の補完。説明済み）"
+  },
+  {
+    "name": "future_new_stale",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "future で新系の T が直前と同じ中身で、旧系だけ新しい版の行数（説明済み）"
+  },
+  {
+    "name": "future_unexplained",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "future の説明できない違い"
+  },
+  {
+    "name": "option_compared",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "比べた option のキーの数（旧と新のキーの和集合、一致を含む）"
+  },
+  {
+    "name": "option_version",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "option で全列が新系の直前か直後と一致したキー、または新系の T にだけあり直前か直後に無いキーの数（版の差。説明済み）"
+  },
+  {
+    "name": "option_quote_only",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "option で約定の列（price・price_time・diff・diff_rate・volume・positions・quotation・quotation_date と iv・ギリシャ指標）が新系の T・直前・直後のどれかと一致し、気配と表示の列（bid・ask とその数量・IV、is_atm）だけが違うキーの数（1 分の中の版の差。説明済み）"
+  },
+  {
+    "name": "option_quotation_year",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "option で清算日（quotation_date）だけが ±1 年違うキーの数（旧パーサーの年の補完。説明済み）"
+  },
+  {
+    "name": "option_page2",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "option で新系の 2 限月ページの更新時刻が 1 限月と違うスナップショットの 2 限月のキーの数（説明済み）"
+  },
+  {
+    "name": "option_unexplained",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "option の説明できない違い（約定の列がどの候補とも合わない行、キーの有無）"
+  },
+  {
+    "name": "unexplained",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "説明できない差分の合計（legacy_only_snapshots + spot / future / option の unexplained）。#11 の AC 5 はこれが 0 の日を数える"
+  },
+  {
+    "name": "unexplained_samples",
+    "type": "RECORD",
+    "mode": "REPEATED",
+    "description": "説明できない差分の例（先頭 20 件）",
+    "fields": [
+      {
+        "name": "kind",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "legacy_only / spot / future / option"
+      },
+      {
+        "name": "created_at",
+        "type": "TIMESTAMP",
+        "mode": "NULLABLE",
+        "description": "旧系の created_at"
+      },
+      {
+        "name": "detail",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "option はキー（type target_price last_trading_day）"
+      }
+    ]
+  },
+  {
+    "name": "legacy_condition_candidates",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "#11 AC 6: 新系のスナップショットのうち先物の price_time（時:分）が直前の新系スナップショットから変わったものの数（旧系の保存条件を満たす）"
+  },
+  {
+    "name": "legacy_condition_missed",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "#11 AC 6: そのうち旧系に無いものの数"
+  },
+  {
+    "name": "fail_on_unexplained",
+    "type": "BOOLEAN",
+    "mode": "REQUIRED",
+    "description": "この実行で説明できない差分を ERROR にする設定だったか（infra/prod/sq.tf の legacy_compare_fail_on_unexplained）"
+  },
+  {
+    "name": "computed_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "比べた時刻"
+  }
+]
