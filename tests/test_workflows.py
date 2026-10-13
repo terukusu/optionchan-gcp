@@ -125,3 +125,25 @@ def test_no_plan_artifacts():
     for path in WORKFLOW_FILES:
         for uses in iter_uses(load(path)):
             assert not uses.startswith('actions/upload-artifact@'), uses
+
+
+def test_apply_deploys_images_by_digest():
+    """#33 / #53: Cloud Run には digest でだけデプロイする（ingest・viewer の両方を apply の前に確かめる）"""
+    deploy = load(os.path.join(WORKFLOWS_DIR, 'deploy.yml'))
+    steps = deploy['jobs']['apply']['steps']
+    apply_step = next(s for s in steps if s.get('name') == 'terraform apply（prod）')
+    assert {'TF_VAR_ingest_image', 'TF_VAR_viewer_image'} <= set(apply_step['env'])
+    assert 'for v in TF_VAR_ingest_image TF_VAR_viewer_image' in apply_step['run']
+    assert '*@sha256:*' in apply_step['run']
+    # ビルドは GCP の認証より前
+    names = [s.get('name') or s.get('uses', '') for s in steps]
+    auth = next(i for i, n in enumerate(names) if n.startswith('google-github-actions/auth@'))
+    for name in ('イメージのビルド（ingest、未作成のときだけ）', 'イメージのビルド（viewer、未作成のときだけ）'):
+        assert names.index(name) < auth, name
+
+
+def test_plan_passes_both_images():
+    for path, job in (('ci.yml', 'terraform-plan'), ('deploy.yml', 'plan')):
+        steps = load(os.path.join(WORKFLOWS_DIR, path))['jobs'][job]['steps']
+        plan_step = next(s for s in steps if s.get('name') == 'terraform plan（prod）')
+        assert {'TF_VAR_ingest_image', 'TF_VAR_viewer_image'} <= set(plan_step['env']), path

@@ -10,7 +10,7 @@ variable "region" {
   default     = "asia-northeast1"
 }
 
-# 取り込みのイメージ（#33）。CI が .github/scripts/ingest-image.sh resolve で求めて TF_VAR_ingest_image で渡す。
+# 取り込みのイメージ（#33）。CI が .github/scripts/image.sh ingest resolve で求めて TF_VAR_ingest_image で渡す。
 # plan では Artifact Registry に未作成のタグ参照も許す（初回・入力の変更時）。apply job は digest であることを確かめてから apply する
 variable "ingest_image" {
   description = "Cloud Run ingest のイメージ（<repo>/ingest@sha256:<digest> か <repo>/ingest:src-<20hex>）"
@@ -19,6 +19,17 @@ variable "ingest_image" {
   validation {
     condition     = can(regex("^asia-northeast1-docker\\.pkg\\.dev/[a-z0-9-]+/optionchan/ingest(@sha256:[0-9a-f]{64}|:src-[0-9a-f]{20})$", var.ingest_image))
     error_message = "ingest_image は asia-northeast1-docker.pkg.dev/<project>/optionchan/ingest の digest 参照か src-<20hex> のタグ参照で指定する。"
+  }
+}
+
+# ビューアーのイメージ（#53）。ingest_image と同じく CI が .github/scripts/image.sh viewer resolve で求めて TF_VAR_viewer_image で渡す
+variable "viewer_image" {
+  description = "Cloud Run viewer のイメージ（<repo>/viewer@sha256:<digest> か <repo>/viewer:src-<20hex>）"
+  type        = string
+
+  validation {
+    condition     = can(regex("^asia-northeast1-docker\\.pkg\\.dev/[a-z0-9-]+/optionchan/viewer(@sha256:[0-9a-f]{64}|:src-[0-9a-f]{20})$", var.viewer_image))
+    error_message = "viewer_image は asia-northeast1-docker.pkg.dev/<project>/optionchan/viewer の digest 参照か src-<20hex> のタグ参照で指定する。"
   }
 }
 

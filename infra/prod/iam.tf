@@ -23,3 +23,12 @@ resource "google_cloud_run_v2_service_iam_member" "scheduler_invoker" {
   role     = "roles/run.invoker"
   member   = "serviceAccount:${local.sa_scheduler}"
 }
+
+# ビューアー（#53）の読み取り。optionchan_tokyo だけで、旧データセット optionchan には付けない。
+# クエリのジョブを作る bigquery.jobUser はプロジェクト単位なので infra/bootstrap/viewer.tf
+resource "google_bigquery_dataset_iam_member" "viewer_reader" {
+  project    = var.project_id
+  dataset_id = google_bigquery_dataset.tokyo.dataset_id
+  role       = "roles/bigquery.dataViewer"
+  member     = "serviceAccount:${local.sa_viewer}"
+}

@@ -25,7 +25,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * 毎時 0 分に取りこぼし（生 HTML はあるが完了記録 `ingest_runs` が無いもの）を回収し、07:00 に前日分を照合する。期間を指定した作り直しは Cloud Run ジョブ `reprocess`（手動、#34）。手順は docs/runbook.md の「回収と照合」「再処理ジョブ」
 
 * apps/viewer
-  * 新しいビューアー（#13 / #52。Python 3.13・uv・Flask。Cloud Run への反映と IAP は #13 の 13b）。ページ `/` `/smile` `/atm` `/atm_iv` と CSV の API `/smile_data` `/atm_data` `/atm_iv_data?d=&n=` は現行（appengine/ + HTTP 関数）と同じ URL・同じ CSV の形式で、BigQuery の新系（`optionchan_tokyo` の最新版のテーブル関数と 1 時間足 `atm_iv`）を直接読む
+  * 新しいビューアー（#13 / #52。Python 3.13・uv・Flask）。Cloud Run `viewer`（asia-northeast1）に IAP（Cloud Run への直接設定）の後ろでデプロイする（#53）。アプリに認証は無いので、IAP なし・`allUsers` で公開しない。デプロイ・オーナーの手作業（OAuth クライアント）・確認は docs/runbook.md の「ビューアー（#13）」。ページ `/` `/smile` `/atm` `/atm_iv` と CSV の API `/smile_data` `/atm_data` `/atm_iv_data?d=&n=` は現行（appengine/ + HTTP 関数）と同じ URL・同じ CSV の形式で、BigQuery の新系（`optionchan_tokyo` の最新版のテーブル関数と 1 時間足 `atm_iv`）を直接読む
   * 設定は環境変数: `GCP_PROJECT`（必須）、`BQ_DATASET`（既定 `optionchan_tokyo`）、`BQ_LOCATION`（既定 `asia-northeast1`）、`MAX_BYTES_BILLED`（既定 1 GiB）。SQL は `src/optionchan_viewer/sql/` にだけ置き、値はクエリパラメータで渡す
   * Chart.js 等のブラウザ用ライブラリは `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
 
@@ -49,7 +49,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * `tests/test_sql_bq.py` は定期クエリの SQL を BigQuery で固定値の入力に対して動かす検査と、実テーブルの dry run（CI では動かさない。`OPTIONCHAN_BQ_TEST=1 .venv/bin/python -m pytest -q tests/test_sql_bq.py`。gcloud の構成は環境変数で渡す）。`tests/test_legacy_import_bq.py`（#12）・`tests/test_ohlc_bq.py`（#49）も同じ
 
 * infra
-  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込みの SA・生 HTML のバケットと権限。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo` とテーブル関数・Cloud Run / Scheduler `ingest`・Cloud Run ジョブ `reprocess`・定期クエリ（DTS）。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
+  * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込み・ビューアーの SA・生 HTML のバケットと権限、IAP のアクセス許可。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo` とテーブル関数・Cloud Run / Scheduler `ingest`・Cloud Run ジョブ `reprocess`・定期クエリ（DTS）・Cloud Run `viewer`（IAP）。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
 
 * .github/workflows
   * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）

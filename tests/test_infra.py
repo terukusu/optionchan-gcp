@@ -38,6 +38,7 @@ def test_cloud_run_exists():
     names = [name for name, _ in RUN_BLOCKS]
     assert any('google_cloud_run_v2_service.ingest' in name for name in names)
     assert any('google_cloud_run_v2_job.reprocess' in name for name in names)
+    assert any('google_cloud_run_v2_service.viewer' in name for name in names)
 
 
 @pytest.mark.parametrize('name,body', RUN_BLOCKS, ids=[n for n, _ in RUN_BLOCKS])
@@ -99,3 +100,59 @@ def test_legacy_dataset_access_is_table_level_read_only():
                 assert 'google_service_account.sq.member' in body
                 assert 'toset(["spot_price", "future_price", "option_price"])' in body
     assert found == [('bootstrap/sq.tf', 'google_bigquery_table_iam_member', 'sq_legacy_reader')]
+
+
+# ---- ビューアー（Cloud Run viewer + IAP、#53） ----
+
+def test_viewer_is_behind_iap():
+    """アプリに認証が無いので、IAP を外したり IAM の検査を無効にしたりしない"""
+    body = dict(RUN_BLOCKS)['prod/viewer.tf:google_cloud_run_v2_service.viewer']
+    assert re.search(r'^\s*iap_enabled\s*=\s*true$', body, re.M)
+    assert re.search(r'^\s*invoker_iam_disabled\s*=\s*false$', body, re.M)
+    assert re.search(r'^\s*service_account\s*=\s*local\.sa_viewer$', body, re.M)
+    assert re.search(r'^\s*image\s*=\s*var\.viewer_image$', body, re.M)
+    tf = dict(all_tf())['prod/viewer.tf']
+    assert 'sa_viewer = "sa-viewer@${var.project_id}.iam.gserviceaccount.com"' in tf
+
+
+def test_viewer_invoker_is_iap_agent_only():
+    tf = dict(all_tf())['prod/viewer.tf']
+    members = re.findall(r'^\s*member\s*=\s*(.+)$', tf, re.M)
+    assert members == ['"serviceAccount:service-${data.google_project.this.number}@gcp-sa-iap.iam.gserviceaccount.com"']
+
+
+def code_only(text):
+    return '\n'.join(line for line in text.splitlines() if not line.lstrip().startswith('#'))
+
+
+def test_no_public_members():
+    """allUsers / allAuthenticatedUsers をどの付与にも使わない（コメント・validation の文言は除く）"""
+    for path, text in all_tf():
+        code = code_only(text)
+        assert not re.search(r'^\s*members?\s*=.*all(Authenticated)?Users', code, re.M), path
+        assert not re.search(r'"all(Authenticated)?Users"', code), path
+
+
+def test_iap_access_only_in_bootstrap():
+    """IAP のアクセス許可は roles/iap.admin が要るので所有者の bootstrap だけ（sa-tf-apply に iap.admin を付けない）。
+    OAuth のシークレットを state に入れない（google_iap_settings・client_secret を使わない）"""
+    found = []
+    for path, text in all_tf():
+        code = code_only(text)
+        assert 'roles/iap.admin' not in code, path
+        assert 'google_iap_settings' not in text and 'client_secret' not in text, path
+        for m in re.finditer(r'^resource\s+"(google_iap_[^"]+)"\s+"([^"]+)"', text, re.M):
+            found.append((path, m.group(1), m.group(2)))
+    assert found == [('bootstrap/viewer.tf', 'google_iap_web_cloud_run_service_iam_member', 'viewer_access')]
+    tf = dict(all_tf())['bootstrap/viewer.tf']
+    assert 'for_each = toset(var.viewer_iap_members)' in tf
+    assert 'role                   = "roles/iap.httpsResourceAccessor"' in tf
+
+
+def test_viewer_iap_members_has_no_default():
+    """既定値があると、tfvars を置き忘れた apply で付与が消える"""
+    tf = dict(all_tf())['bootstrap/variables.tf']
+    m = re.search(r'^variable\s+"viewer_iap_members"\s*\{(.*?)^\}', tf, re.M | re.S)
+    assert m
+    assert 'default' not in m.group(1)
+    assert 'validation' in m.group(1)

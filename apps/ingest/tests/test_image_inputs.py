@@ -1,4 +1,4 @@
-"""イメージのタグの入力（.github/scripts/ingest-image.sh）の検査（#33 AC 3）。
+"""イメージのタグの入力（.github/scripts/image.sh ingest）の検査（#33 AC 3）。
 
 タグは入力パスの git のハッシュから決まる。イメージに入るものが入力から漏れると、中身が変わったのに
 タグが同じ（= Artifact Registry の古いイメージのまま）になるので、.dockerignore・Dockerfile と突き合わせる。
@@ -11,7 +11,7 @@ import subprocess
 import pytest
 from conftest import REPO_ROOT
 
-SCRIPT = REPO_ROOT / ".github" / "scripts" / "ingest-image.sh"
+SCRIPT = REPO_ROOT / ".github" / "scripts" / "image.sh"
 DOCKERFILE = REPO_ROOT / "apps" / "ingest" / "Dockerfile"
 DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 # イメージの中身には入らないがビルドを決めるもの（スクリプト側だけにある）
@@ -19,7 +19,7 @@ BUILD_ONLY = {"apps/ingest/Dockerfile", ".dockerignore"}
 
 
 def script_paths():
-    out = subprocess.run(["bash", str(SCRIPT), "paths"], check=True, capture_output=True, text=True).stdout
+    out = subprocess.run(["bash", str(SCRIPT), "ingest", "paths"], check=True, capture_output=True, text=True).stdout
     return [line for line in out.splitlines() if line]
 
 
@@ -73,7 +73,7 @@ def test_dockerfile_copies_only_inputs():
 @pytest.mark.skipif(shutil.which("git") is None, reason="git が無い")
 def test_tag_is_deterministic():
     def tag():
-        cmd = ["bash", str(SCRIPT), "tag"]
+        cmd = ["bash", str(SCRIPT), "ingest", "tag"]
         return subprocess.run(cmd, check=True, capture_output=True, text=True, cwd=REPO_ROOT).stdout.strip()
 
     first = tag()

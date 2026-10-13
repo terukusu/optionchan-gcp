@@ -497,8 +497,8 @@ GCP のリソースを Terraform で管理する（#10。設計は `docs/archite
 
 | ルート | 中身 | apply する人 | state | state を読める主体 |
 |---|---|---|---|---|
-| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限。取り込み用の SA `sa-ingest` / `sa-scheduler`、生 HTML のバケット `optionchan-222710-raw`、それらへの付与（プロジェクト単位・バケット単位・SA 単位。#33）。定期クエリの SA `sa-sq-dts`・旧 `optionchan` の 3 テーブルの読み取り・DTS 用のカスタムロール（#40） | 所有者がローカルから（CI は fmt / validate だけ） | `gs://optionchan-222710-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
-| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2、BigQuery `optionchan_tokyo` とテーブル 4 つ、Cloud Run `ingest`、Scheduler `ingest`、それらへの付与（データセット単位・サービス単位。#33）。定期クエリ（DTS）4 本・作業用データセット 2 つ・結果のテーブル 2 つ（#40） | CI（deploy workflow、Environment `prod` の承認後） | `gs://optionchan-222710-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
+| `infra/bootstrap` | API 有効化、tfstate バケット 2 つ、WIF プール `github` / プロバイダ `github-actions`、SA `sa-tf-plan` / `sa-tf-apply` と権限。取り込み用の SA `sa-ingest` / `sa-scheduler`、生 HTML のバケット `optionchan-222710-raw`、それらへの付与（プロジェクト単位・バケット単位・SA 単位。#33）。定期クエリの SA `sa-sq-dts`・旧 `optionchan` の 3 テーブルの読み取り・DTS 用のカスタムロール（#40）。ビューアーの SA `sa-viewer`・`bigquery.jobUser`・IAP のアクセス許可（`viewer_iap_members`、#53） | 所有者がローカルから（CI は fmt / validate だけ） | `gs://optionchan-222710-tfstate-bootstrap/bootstrap/` | 所有者（+ Editor を持つデフォルト SA。#15 で外す） |
+| `infra/prod` | Artifact Registry `optionchan`、監視アラート M1・M2、BigQuery `optionchan_tokyo` とテーブル 4 つ、Cloud Run `ingest`、Scheduler `ingest`、それらへの付与（データセット単位・サービス単位。#33）。定期クエリ（DTS）4 本・作業用データセット 2 つ・結果のテーブル 2 つ（#40）。Cloud Run `viewer`（IAP）・IAP のサービスエージェントの `run.invoker`・`sa-viewer` の `dataViewer`（#53） | CI（deploy workflow、Environment `prod` の承認後） | `gs://optionchan-222710-tfstate/prod/` | `sa-tf-plan`（読み取り）、`sa-tf-apply`（読み書き）、所有者（+ 同上） |
 
 予算・クエリ量上限は Terraform 管理外（「コスト」）。state には通知チャネルのメールアドレスなどが入るので、state・plan の全文・ログをリポジトリ・Issue・PR に貼らない。CI も plan の全文は出さず、アドレスと操作だけを要約する。
 
@@ -519,7 +519,7 @@ jq -n --argjson id "$ENV_ID" '{environment_ids: [$id], state: "approved", commen
 
 差分 0 の確認や再実行は `gh workflow run deploy.yml --ref master`（Environment `prod` は `master` からしか使えない）。
 
-取り込みのイメージ（#33）: タグは `src-<20 桁>` で、イメージの入力（`apps/ingest` の Dockerfile・`pyproject.toml`・`uv.lock`・`src/`、`config/trading_calendar.toml`、`schema/tokyo/`、`.dockerignore`）の git のハッシュから `.github/scripts/ingest-image.sh tag` が決める（テスト・ドキュメントの変更ではタグが変わらない）。plan はそのタグが Artifact Registry にあれば digest、無ければタグ参照を `ingest_image` に渡す。無いときは Cloud Run に差分が出るので `apply` job が動き、承認後に **GCP の認証より前に**ビルド・検査（import できる、`auth.txt`・`functions/`・テストが無い）してから `sa-tf-apply` で push し、digest で apply する。タグは不変（`immutable_tags`）。
+Cloud Run のイメージ（取り込み `ingest` #33、ビューアー `viewer` #53）: タグは `src-<20 桁>` で、イメージの入力の git のハッシュから `.github/scripts/image.sh <ingest|viewer> tag` が決める（テスト・ドキュメントの変更ではタグが変わらない）。入力は ingest が `apps/ingest` の Dockerfile・`pyproject.toml`・`uv.lock`・`src/`、`config/trading_calendar.toml`、`schema/tokyo/`、`.dockerignore`（context はリポジトリ直下）、viewer が `apps/viewer` の Dockerfile・`.dockerignore`・`pyproject.toml`・`uv.lock`・`package.json`・`package-lock.json`・`src/`（context は `apps/viewer`）。plan はそのタグが Artifact Registry にあれば digest、無ければタグ参照を `ingest_image` / `viewer_image` に渡す。無いときは Cloud Run に差分が出るので `apply` job が動き、承認後に **GCP の認証より前に**ビルド・検査（ingest: import できる、`auth.txt`・`functions/`・テストが無い。viewer: `.github/scripts/viewer-image-check.sh`）してから `sa-tf-apply` で push し、digest で apply する。タグは不変（`immutable_tags`）。
 
 ### 共通の変数
 
@@ -551,6 +551,10 @@ gcloud storage buckets update gs://$P-tfstate-bootstrap --versioning
 # 2. GitHub の数値 ID（コード・tfvars に置かない）
 export TF_VAR_github_repository_id=$(gh api $R --jq .id)
 export TF_VAR_github_owner_id=$(gh api $R --jq .owner.id)
+#    ビューアーの IAP のアクセス許可（#53、必須の変数）は infra/bootstrap/local.auto.tfvars（gitignore 済み。コミットしない）に置く。
+#    無ければ「No value for required variable」で止まる。サービス viewer の作成前は []、後は ["user:<メール>"]（「ビューアー（#13）」の手順）。
+#    付与済みなのにファイルを無くしたときは [] で作り直さない（付与が消える）。gcloud iap web get-iam-policy で今の値を見て書き直す
+ls infra/bootstrap/local.auto.tfvars   # 無ければ「No such file」。上の注意に従って作る
 
 # 3. plan → 要約を見てから apply
 $TF -chdir=infra/bootstrap init -input=false
@@ -681,20 +685,32 @@ gh workflow run deploy.yml --ref master   # plan が差分なし、apply は ski
 
 WIF・GCP・GitHub Actions の障害で CI が動かないときは、所有者の資格情報でローカルから行う（state のロックは apply が取る）。
 
-取り込みのイメージは `TF_VAR_ingest_image` で渡す（必須）。Artifact Registry に無ければ（`exists=false`）、apply の前にローカルでビルド・push して digest を得る。
+イメージは `TF_VAR_ingest_image` / `TF_VAR_viewer_image` で渡す（必須）。Artifact Registry に無ければ（`exists=false`）、apply の前にローカルでビルド・検査・push して digest を得る。
 
 ```sh
-.github/scripts/ingest-image.sh resolve   # tag= / image= / exists=
-eval "$(.github/scripts/ingest-image.sh resolve | sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p')"
+img() {  # $1 = ingest / viewer。IMG_tag / IMG_image / IMG_exists を設定する
+  eval "$(.github/scripts/image.sh "$1" resolve | sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p')"
+}
+img ingest
 if [ "$IMG_exists" = false ]; then   # ビルド・検査は apply job と同じ。HEAD をコミット済みの状態で行う（タグは HEAD から決まる）
-  test -z "$(git status --porcelain -- apps/ingest .dockerignore)" || { echo "未コミットの変更がある。タグと中身がずれるのでビルドしない"; exit 1; }
+  test -z "$(git status --porcelain -- apps/ingest config schema/tokyo .dockerignore)" || { echo "未コミットの変更がある。タグと中身がずれるのでビルドしない"; exit 1; }
   docker build -f apps/ingest/Dockerfile -t ingest:build .
   docker run --rm ingest:build python -c 'import optionchan_ingest.app'
   gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet
   docker tag ingest:build "$IMG_image" && docker push "$IMG_image"
-  eval "$(.github/scripts/ingest-image.sh resolve | sed -n 's/^\(tag\|image\|exists\)=/IMG_\1=/p')"
+  img ingest
 fi
 export TF_VAR_ingest_image=$IMG_image   # @sha256: であること
+img viewer
+if [ "$IMG_exists" = false ]; then
+  test -z "$(git status --porcelain -- apps/viewer)" || { echo "未コミットの変更がある。タグと中身がずれるのでビルドしない"; exit 1; }
+  docker build -t viewer:build apps/viewer
+  .github/scripts/viewer-image-check.sh viewer:build
+  gcloud auth configure-docker asia-northeast1-docker.pkg.dev --quiet
+  docker tag viewer:build "$IMG_image" && docker push "$IMG_image"
+  img viewer
+fi
+export TF_VAR_viewer_image=$IMG_image   # @sha256: であること
 
 $TF -chdir=infra/prod init -input=false
 $TF -chdir=infra/prod plan -input=false -no-color -out=p.tfplan > <scratch>/p-plan.log   # 要約は上の jq で見る
@@ -1764,6 +1780,132 @@ done   # 日ごとに 3 表の bars が同じ、bars = keys
 - 一時停止: `infra/prod/sq.tf` の `atm_hourly` に `disabled = true` を足す PR（急ぐときはコンソールで無効 → 同じ PR）
 - 全部を戻す（この Issue の revert）: 3 表の `deletion_protection = false` の PR → revert の PR（delete 7）。旧系の `insert_ohlc` は動いたままなので、旧ビューアーには影響しない
 - 旧系の停止（#14）: `insert_ohlc` と Scheduler `create_timeframe` を止める前に、「旧系の同値の確認」を直近 30 日でもう一度流して記録する。止めた後は新系の 3 表だけになる（旧 3 表は #15 で消すまで残る）
+
+## ビューアー（#13）
+
+新しいビューアー（`apps/viewer`、#52）を Cloud Run `viewer` に IAP（Cloud Run への直接設定。ロードバランサ不要・追加費用なし）の後ろでデプロイする（#53）。旧ビューアー（App Engine + 旧 HTTP 関数）とは独立していて、旧ビューアーには触れない。
+
+**IAP なしで公開しない。** アプリには認証も回数制限も無い（共通パスワードもやめた）。IAP を外す（`--no-iap`）、`allUsers` / `allAuthenticatedUsers` に `run.invoker` を付ける、`invoker_iam_disabled = true` にする、のどれかをすると、URL を知っている誰でも BigQuery のクエリを回せて課金が増える（1 クエリの上限 1 GiB はあっても回数は制限されない）。`tests/test_infra.py` が IAP の有効・invoker・`allUsers` の不在を検査する。アプリ側での IAP の JWT の検証はしていない（invoker を IAP のサービスエージェントだけにすることで直接の呼び出しを防ぐ）。
+
+| リソース | 設定 | 定義 |
+|---|---|---|
+| Cloud Run `viewer`（asia-northeast1） | IAP 有効、ingress all（run.app の URL に IAP が掛かる）、IAM の検査あり、第1世代、CPU 1・512Mi・リクエスト中だけ CPU、同時実行 8、0〜2 インスタンス、60 秒、`sa-viewer`、digest 指定、環境変数 `GCP_PROJECT` / `BQ_DATASET` / `BQ_LOCATION` | `infra/prod/viewer.tf` |
+| `run.invoker` | IAP のサービスエージェント（`service-<番号>@gcp-sa-iap.iam.gserviceaccount.com`）だけ | `infra/prod/viewer.tf` |
+| IAP のアクセス許可 | サービス単位の `roles/iap.httpsResourceAccessor` = `viewer_iap_members`（`infra/bootstrap/local.auto.tfvars`。コミットしない） | `infra/bootstrap/viewer.tf` |
+| IAP の OAuth クライアント | 組織の無いプロジェクトでは Google 管理の OAuth クライアントが使えないので、所有者が作って asia-northeast1 の Cloud Run の単位に設定する（シークレットは Terraform・リポジトリに入れない） | 手作業（下の手順 2〜4） |
+| 権限 | `sa-viewer`: `optionchan_tokyo` の `dataViewer`（データセット単位）、プロジェクトの `bigquery.jobUser`。旧 `optionchan` には何も付けない | `infra/prod/iam.tf`、`infra/bootstrap/viewer.tf` |
+
+プロジェクト単位で `roles/iap.httpsResourceAccessor` を持つプリンシパル（App Engine の IAP 用に付けたもの等）は、継承で `viewer` にも入れる。サービス単位の一覧（下の確認）には出ないので、`gcloud projects get-iam-policy $P` でも見る。
+
+### 変数
+
+「Terraform」の「共通の変数」に加えて設定する。`U`（サービスの URL）はプロジェクト番号由来の文字列を含むので Issue・PR に貼らない。
+
+```sh
+L=asia-northeast1
+U=$(gcloud run services describe viewer --region=$L --project=$P --format='value(status.url)')   # 手順 5 の後
+```
+
+### 初回のデプロイ（所有者の手順）
+
+PR のマージ後、deploy の `apply` job を承認する前に手順 1〜4 を行う（`apply` job は承認まで待つ）。順番が大事: IAP のサービスエージェントが無いと invoker の付与が失敗し、サービスが無いと IAP のアクセス許可を付けられない。
+
+1. **bootstrap（1 回目）とサービスエージェント**: `infra/bootstrap/local.auto.tfvars` に `viewer_iap_members = []` を書き、master で「bootstrap の初回 apply」の手順 2〜4 を行う。手順 3 の要約の目安: create 4（SA `sa-viewer`、プロジェクト IAM 1（`sa-viewer` の `bigquery.jobUser`）、SA IAM 1（`sa-tf-apply` の `serviceAccountUser`）、API `iap.googleapis.com` 1（有効化済み。宣言のみ））、update / delete / replace 0。続けて IAP のサービスエージェントを作る（既にあれば何もしない）:
+
+   ```sh
+   gcloud beta services identity create --service=iap.googleapis.com --project=$P > /dev/null
+   ```
+
+2. **OAuth 同意画面の確認（コンソール）**: Google Cloud コンソール →「Google Auth Platform」（「API とサービス」→「OAuth 同意画面」からも行ける）。
+   1. 「ブランディング」が未作成なら「開始」→ アプリ名（例 `optionchan viewer`）とサポートメールを入れる → 対象は **外部（External）** → 連絡先を入れて作成。既にある（旧ビューアーの App Engine の IAP 用）なら変えない
+   2. 「対象（Audience）」でユーザーの種類が **外部** であることを見る。公開ステータスが「テスト中」なら「テストユーザー」に、`viewer_iap_members` に入れる予定のアカウントを足す（足さないとログインで拒否される）。IAP が求めるのはメールアドレス等の基本の範囲だけなので「アプリを公開」にしてもよい
+3. **OAuth クライアントの作成（コンソール）**: 「Google Auth Platform」→「クライアント」→「クライアントを作成」。組織の無いプロジェクトでは Google 管理の OAuth クライアントが使えず、API でも作れないので、ここだけは画面で行う。
+   1. アプリケーションの種類 **ウェブ アプリケーション**、名前（例 `optionchan-viewer-iap`）→「作成」
+   2. 表示されたクライアント ID とシークレットを控える（次の手順で使うだけ。Issue・PR・チャット・リポジトリに貼らない。JSON をダウンロードしたら手順 4 の後に消す）
+   3. 作ったクライアントを開き、「承認済みのリダイレクト URI」に `https://iap.googleapis.com/v1/oauth/clientIds/<クライアント ID>:handleRedirect` を足して「保存」
+4. **IAP に設定（端末）**: asia-northeast1 の Cloud Run（`--resource-type=cloud-run --region`）の単位で設定する。プロジェクト単位にしないのは旧ビューアー（App Engine の IAP）に影響させないため、サービス単位にしないのはサービスの作成（手順 5）より前に済ませるため（組織の無いプロジェクトで IAP を初めて有効にするときは、先に OAuth クライアントを設定しておくことが公式の推奨）。値は画面に出さず、一時ファイルはリポジトリの外に作ってすぐ消す。
+
+   ```sh
+   F=$(mktemp); chmod 600 "$F"
+   read -r -p 'クライアント ID: ' CID; read -r -s -p 'シークレット: ' CSEC; echo
+   printf 'accessSettings:\n  oauthSettings:\n    clientId: %s\n    clientSecret: %s\n' "$CID" "$CSEC" > "$F"
+   gcloud iap settings set "$F" --project=$P --resource-type=cloud-run --region=$L > /dev/null; echo $?   # 0
+   rm -f "$F"; unset CID CSEC
+   gcloud iap settings get --project=$P --resource-type=cloud-run --region=$L \
+     --format='value(accessSettings.oauthSettings.clientId)' | grep -c .   # 1（設定済み。ID は表示しない）
+   ```
+
+   リージョンの単位で失敗したら、手順 5 の後に `--region=$L --service=viewer`（サービス単位）で同じことを行う（その間はブラウザで開くと IAP のエラーになるだけ）。
+5. **prod の apply（CI）**: deploy の `apply` job を承認する。plan の要約の目安: create 3（`google_cloud_run_v2_service.viewer`、`google_cloud_run_v2_service_iam_member.viewer_iap_invoker`、`google_bigquery_dataset_iam_member.viewer_reader`）、update / delete / replace 0、「イメージ viewer: … は未作成」。apply job が viewer のイメージをビルド・検査・push してから digest で apply する
+6. **bootstrap（2 回目）**: `infra/bootstrap/local.auto.tfvars` を `viewer_iap_members = ["user:<自分のメール>"]` にして、「bootstrap の初回 apply」の手順 2〜4。要約の目安: create 1（`google_iap_web_cloud_run_service_iam_member.viewer_access["user:…"]`）、update / delete / replace 0。要約はメールを含むので貼らない
+7. **確認**: 「変数」の `U` を設定し、下の「確認」をすべて行って、結果（件数・pass / fail だけ）を Issue にコメントする
+
+代替（手作業が少ないが既定にしない）: 手順 2〜4 の代わりに、手順 5 の後でコンソールの Cloud Run → `viewer` →「セキュリティ」→ IAP の「ポリシーを編集」→「IAP で構成」→「認証情報を自動生成」でも OAuth クライアントが作られる。ただしこれは **プロジェクト単位** の設定になり、旧ビューアー（App Engine の IAP）に影響するかを確かめていない。使ったら旧ビューアーにログインできることも確かめる。
+
+手順 5 の apply が IAP の有効化で失敗したとき（組織の無いプロジェクトで「最初はコンソールで」と警告されることがある）: 手順 4 の `gcloud iap settings get` が 1 であることを確かめてから `gh workflow run deploy.yml --ref master` でやり直す。それでも失敗するなら、最後の手段として OAuth クライアントをプロジェクト単位で設定する（`gcloud iap settings set <設定ファイル> --project=$P`。旧 App Engine の IAP はアプリ側の設定にクライアントを持っているので影響は小さい）か、コンソールでサービスの IAP を有効にする（Terraform の `iap_enabled = true` と一致するので state とはずれない）。どちらも行ったことを Issue に残す。
+
+### 確認
+
+構成（v2 API の JSON をそのまま見る）:
+
+```sh
+curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  https://run.googleapis.com/v2/projects/$P/locations/$L/services/viewer \
+  | jq -c '{iap: .iapEnabled, ingress, invoker_check_disabled: (.invokerIamDisabled // false), sa: (.template.serviceAccount | split("@")[0]),
+            min: (.template.scaling.minInstanceCount // 0), max: .template.scaling.maxInstanceCount,
+            digest: (.template.containers[0].image | test("@sha256:[0-9a-f]{64}$")), envs: [.template.containers[0].env[].name]}'
+# true、INGRESS_TRAFFIC_ALL、false、sa-viewer、0、2、true、[GCP_PROJECT,BQ_DATASET,BQ_LOCATION]
+```
+
+権限:
+
+```sh
+# run.invoker は IAP のサービスエージェントだけ。allUsers / allAuthenticatedUsers が無い
+gcloud run services get-iam-policy viewer --region=$L --project=$P --format=json \
+  | jq -c '[.bindings[] | {role, m: [.members[] | sub("[0-9]+"; "<num>")]}]'
+# [{"role":"roles/run.invoker","m":["serviceAccount:service-<num>@gcp-sa-iap.iam.gserviceaccount.com"]}]
+# IAP のアクセス許可（サービス単位）が viewer_iap_members と同じ（メールは表示しない）
+diff <(gcloud iap web get-iam-policy --resource-type=cloud-run --region=$L --service=viewer --project=$P --format=json \
+         | jq -r '.bindings[]? | select(.role == "roles/iap.httpsResourceAccessor") | .members[]' | sort) \
+     <(sed -n 's/^viewer_iap_members *= *//p' infra/bootstrap/local.auto.tfvars | jq -r '.[]' | sort) > /dev/null && echo 'iap members ok'
+# sa-viewer: プロジェクトは bigquery.jobUser だけ、optionchan_tokyo は READER（dataViewer）、旧 optionchan には無い
+gcloud projects get-iam-policy $P --format=json | jq -c '[.bindings[] | select(any(.members[]; startswith("serviceAccount:sa-viewer@"))) | .role]'
+# ["roles/bigquery.jobUser"]
+for d in optionchan_tokyo optionchan; do
+  bq show --format=json $P:$d | jq -c --arg d $d '{d: $d, r: [.access[] | select((.userByEmail // "") | startswith("sa-viewer@")) | .role]}'
+done   # optionchan_tokyo は ["READER"]（か roles/bigquery.dataViewer）、optionchan は []
+```
+
+外からの呼び出し（未認証）が通らないこと:
+
+```sh
+curl -s -o /dev/null -w '%{http_code}\n' "$U/smile_data"   # 200 でない（IAP のログインへの 302 等）
+```
+
+ブラウザ（所有者のアカウント）: `$U/`・`$U/smile`・`$U/atm`・`$U/atm_iv` を開き、`/atm_iv` は日数と限月（`d`・`n`）を変えて 2 通り以上 Update する。チャートが描かれ、開発者ツールのコンソールに CSP の違反（`Refused to …`）が出ないこと。新しいビューアーは新系（`optionchan_tokyo`）の T0 以降のデータだけを表示する（過去分の移行 #12 の前は短い。不具合ではない）。
+
+ログ（デプロイ・ブラウザ確認の後 1 時間）:
+
+```sh
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND severity>=ERROR' \
+  --project=$P --freshness=1h --limit=20 --format='value(timestamp,severity,jsonPayload.message)'   # 0 件
+```
+
+### 更新
+
+アプリ（`apps/viewer`）の変更は PR → マージ → deploy の `apply` job の承認で反映される（イメージのタグが変われば plan に `viewer` の update が出る）。ユーザーの追加・削除は `local.auto.tfvars` を直して bootstrap の手順 2〜4（`allUsers` 等は validation で拒否される）。
+
+### 切り戻し・撤去
+
+| 段階 | 手段 | 影響 |
+|---|---|---|
+| 緊急に閉じる | `gcloud run services remove-iam-policy-binding viewer --region=$L --project=$P --role=roles/run.invoker --member=serviceAccount:service-$(gcloud projects describe $P --format='value(projectNumber)')@gcp-sa-iap.iam.gserviceaccount.com`（IAP を通っても 403 になる）。次の apply で戻るので、続けて下の撤去か修正の PR を出す | 新しいビューアーが開けなくなるだけ。旧ビューアー・取り込みは影響なし |
+| イメージを前の版に戻す | 原因のコミットを revert する PR（「新しい取り込み（ingest）」の R2 と同じ） | 1 回の apply で新しいリビジョン |
+| 撤去 | `infra/prod/viewer.tf` と `viewer_reader` を消す PR（plan: delete 3。`deletion_protection = false`）→ `local.auto.tfvars` を `[]` にして bootstrap を apply（delete 1）→ 必要なら `infra/bootstrap/viewer.tf` を消す PR と bootstrap の apply（SA は `deletion_policy = "PREVENT"` なので state から外すだけ。消すなら gcloud で）→ コンソールで OAuth クライアントを削除 | 旧ビューアーはそのまま使える |
+
+### コスト
+
+Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、利用者 1 人ならほぼ 0 円。IAP（Cloud Run への直接設定）は追加費用なし。BigQuery は 1 ページの表示で 1〜2 クエリ（各 `maximum_bytes_billed` 1 GiB、最小課金 10 MiB）。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。
 
 ## 取引カレンダーの更新
 
