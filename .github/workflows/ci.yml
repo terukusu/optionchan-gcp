@@ -71,6 +71,23 @@ jobs:
         working-directory: apps/ingest
         run: uv run --locked pytest -q
 
+      # 新しいビューアー（apps/viewer、#52）。ingest と同じ流儀（Python 3.13・uv.lock）。JS は構文だけをランナーの node で検査する
+      - name: viewer の依存のインストール
+        working-directory: apps/viewer
+        env:
+          UV_PYTHON_DOWNLOADS: never
+        run: uv sync --locked --python 3.13
+      - name: viewer の ruff
+        working-directory: apps/viewer
+        run: uv run --locked ruff check
+      - name: viewer の pytest
+        working-directory: apps/viewer
+        run: uv run --locked pytest -q
+      - name: viewer の JS の構文
+        working-directory: apps/viewer
+        run: |
+          for f in src/optionchan_viewer/static/*.js; do node --check "$f"; done
+
   # イメージのビルド確認（push しない・認証なし。必須 check にはしない）
   ingest-image:
     runs-on: ubuntu-latest
@@ -87,6 +104,31 @@ jobs:
           found=$(docker run --rm --entrypoint sh ingest:ci -c \
             'find / -xdev \( -name auth.txt -o -name auth.json -o -path /app/functions -o -path /app/tests -o -name .git \) 2>/dev/null || true' | wc -l)
           test "$found" -eq 0
+
+  # ビューアーのイメージのビルド確認（#52。push しない・認証なし。必須 check にはしない）
+  viewer-image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: docker build
+        run: docker build -t viewer:ci apps/viewer
+      - name: イメージの中身の確認
+        run: |
+          docker run --rm -e GCP_PROJECT=example-project viewer:ci python -c 'import optionchan_viewer.app'
+          pkg=$(docker run --rm viewer:ci python -c 'import optionchan_viewer, os; print(os.path.dirname(optionchan_viewer.__file__))')
+          # auth.txt・.git・テスト・node_modules がイメージに入っていないこと
+          found=$(docker run --rm --entrypoint sh viewer:ci -c \
+            'find / -xdev \( -name auth.txt -o -name auth.json -o -name .git -o -name node_modules -o -path "*/optionchan_viewer/tests" \) 2>/dev/null || true' | wc -l)
+          test "$found" -eq 0
+          # テンプレートが CDN（外部の script）を参照しないこと
+          cdn=$(docker run --rm --entrypoint sh viewer:ci -c \
+            "grep -rlE '<script[^>]*src=\"(https?:)?//' $pkg/templates || true" | wc -l)
+          test "$cdn" -eq 0
+          # 同梱したブラウザ用ライブラリ（package-lock.json から作ったもの）が 4 つあること
+          n=$(docker run --rm --entrypoint sh viewer:ci -c "ls $pkg/static/vendor/*.js" | wc -l)
+          test "$n" -eq 4
 
   terraform-plan:
     runs-on: ubuntu-latest

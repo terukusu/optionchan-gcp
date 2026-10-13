@@ -24,6 +24,11 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * 取引時間中は分の頭から 8 秒まで待ってから JPX を取得する（#38。ローカルでも実時刻で待つ。`INGEST_FETCH_AT_SECOND=0` で待たない）
   * 毎時 0 分に取りこぼし（生 HTML はあるが完了記録 `ingest_runs` が無いもの）を回収し、07:00 に前日分を照合する。期間を指定した作り直しは Cloud Run ジョブ `reprocess`（手動、#34）。手順は docs/runbook.md の「回収と照合」「再処理ジョブ」
 
+* apps/viewer
+  * 新しいビューアー（#13 / #52。Python 3.13・uv・Flask。Cloud Run への反映と IAP は #13 の 13b）。ページ `/` `/smile` `/atm` `/atm_iv` と CSV の API `/smile_data` `/atm_data` `/atm_iv_data?d=&n=` は現行（appengine/ + HTTP 関数）と同じ URL・同じ CSV の形式で、BigQuery の新系（`optionchan_tokyo` の最新版のテーブル関数と 1 時間足 `atm_iv`）を直接読む
+  * 設定は環境変数: `GCP_PROJECT`（必須）、`BQ_DATASET`（既定 `optionchan_tokyo`）、`BQ_LOCATION`（既定 `asia-northeast1`）、`MAX_BYTES_BILLED`（既定 1 GiB）。SQL は `src/optionchan_viewer/sql/` にだけ置き、値はクエリパラメータで渡す
+  * Chart.js 等のブラウザ用ライブラリは `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
+
 * config
   * 取引カレンダー（`trading_calendar.toml`）。更新手順は docs/runbook.md の「取引カレンダーの更新」
 
@@ -47,7 +52,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * Terraform。`bootstrap`（tfstate・WIF・CI 用 SA、取り込みの SA・生 HTML のバケットと権限。所有者が手で apply）と `prod`（Artifact Registry・監視アラート・BigQuery `optionchan_tokyo` とテーブル関数・Cloud Run / Scheduler `ingest`・Cloud Run ジョブ `reprocess`・定期クエリ（DTS）。CI が承認後に apply）。手順は docs/runbook.md の「Terraform」
 
 * .github/workflows
-  * `ci.yml`（PR で pytest（`apps/ingest` を含む）・terraform plan・取り込みのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
+  * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
 
 ## テストの実行
 Python 3.11 の venv を作り、リポジトリ直下で実行する。
@@ -69,6 +74,25 @@ uv run --locked pytest -q
 # イメージ（ビルド context はリポジトリ直下。.dockerignore は許可リスト方式）
 docker build -f apps/ingest/Dockerfile -t ingest:local ../..
 docker run --rm -p 127.0.0.1:8080:8080 -e INGEST_DRY_RUN=1 ingest:local  # POST / で 1 回取り込む（時間外は 204）
+```
+
+`apps/viewer` も同じく uv で動かす。ブラウザ用ライブラリは npm（`package-lock.json`）から入れる。
+
+```bash
+cd apps/viewer
+uv sync --locked --python 3.13
+uv run --locked ruff check
+uv run --locked pytest -q
+
+# ローカルで起動（BigQuery は読み取りだけ。認証はアプリケーションのデフォルト認証情報）
+npm ci --ignore-scripts && npm run vendor
+GCP_PROJECT=<project-id> uv run --locked flask --app 'optionchan_viewer.app:create_app()' run
+
+# 新旧の SQL の同値・実テーブルの dry run（BigQuery の認証が要る。CI では動かさない）
+OPTIONCHAN_BQ_TEST=1 OPTIONCHAN_BQ_PROJECT=<project-id> uv run --locked pytest -q tests/test_sql_bq.py
+
+# イメージ（ビルド context は apps/viewer。.dockerignore は許可リスト方式）
+docker build -t viewer:local .
 ```
 
 PR では GitHub Actions（`.github/workflows/ci.yml`）が同じテストと `terraform plan` を回し、plan の要約（アドレスと操作だけ）を PR にコメントする。

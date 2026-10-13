@@ -273,3 +273,6 @@ apply.log
 gha-creds-*.json
 # 上の venv 用の [Ss]cripts に当たるので戻す（CI の共用スクリプト。#33）
 !.github/scripts/
+# ビューアー（#52）: npm の node_modules と、ビルド時に生成するブラウザ用ライブラリ（package-lock.json から作る）
+apps/viewer/node_modules/
+apps/viewer/src/optionchan_viewer/static/vendor/
