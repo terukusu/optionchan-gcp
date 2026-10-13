@@ -26,8 +26,9 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 
 * apps/viewer
   * 新しいビューアー（#13 / #52。Python 3.13・uv・Flask）。Cloud Run `viewer`（asia-northeast1）に IAP（Cloud Run への直接設定）の後ろでデプロイする（#53）。アプリに認証は無いので、IAP なし・`allUsers` で公開しない。デプロイ・オーナーの手作業（OAuth クライアント）・確認は docs/runbook.md の「ビューアー（#13）」。ページ `/` `/smile` `/atm_iv` と CSV の API `/smile_data` `/atm_iv_data?d=&n=` は現行（appengine/ + HTTP 関数）と同じ URL・同じ CSV の形式で（旧型の ATM 推移 `/atm`・`/atm_data` は移さない。#58）、BigQuery の新系（`optionchan_tokyo` の最新版のテーブル関数と 1 時間足 `atm_iv`）を直接読む
+  * `/atm_iv` は足（1分・5分・15分・1時間・日足）を切り替えられるローソク足（#68）。データは `/atm_iv_bars?tf=&d=&n=`（`tf` は `1m` `5m` `15m` `1h` `1d`、`d` は日数で分足 1〜3・1 時間足と日足 1〜100、CSV は `/atm_iv_data` と同じ列で値の無い足を除く）。分足は最新版の ATM の put から 1 分足を作り（5・15 分足はアプリで束ねる）、1 時間足・日足は `/atm_iv_data` と同じ 1 時間足から。日足は取引日（夜間は次の取引日。休業日は取引カレンダー `trading_calendar_latest`）ごと
   * 設定は環境変数: `GCP_PROJECT`（必須）、`BQ_DATASET`（既定 `optionchan_tokyo`）、`BQ_LOCATION`（既定 `asia-northeast1`）、`MAX_BYTES_BILLED`（既定 1 GiB）。SQL は `src/optionchan_viewer/sql/` にだけ置き、値はクエリパラメータで渡す
-  * Chart.js 等のブラウザ用ライブラリは `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
+  * ブラウザ用ライブラリ（Chart.js（`/smile`）・TradingView Lightweight Charts（`/atm_iv`））は `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
 
 * config
   * 取引カレンダー（`trading_calendar.toml`。取引時間と、休業日の予備）。休業日は JPX から自動で取り込む（docs/runbook.md の「取引カレンダー（#63）」）

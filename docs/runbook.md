@@ -1931,7 +1931,7 @@ done   # optionchan_tokyo は ["READER"]（か roles/bigquery.dataViewer）、op
 curl -s -o /dev/null -w '%{http_code}\n' "$U/smile_data"   # 200 でない（IAP のログインへの 302 等）
 ```
 
-ブラウザ（所有者のアカウント）: `$U/`・`$U/smile`・`$U/atm_iv` を開き（旧型の ATM 推移 `/atm` は #58 で削除した）、`/atm_iv` は日数と限月（`d`・`n`）を変えて 2 通り以上 Update する。チャートが描かれ、開発者ツールのコンソールに CSP の違反（`Refused to …`）が出ないこと。新しいビューアーは新系（`optionchan_tokyo`）の T0 以降のデータだけを表示する（過去分の移行 #12 の前は短い。不具合ではない）。
+ブラウザ（所有者のアカウント）: `$U/`・`$U/smile`・`$U/atm_iv` を開き（旧型の ATM 推移 `/atm` は #58 で削除した）、`/atm_iv`（#68。Update ボタンは無く、選ぶとすぐ読み直す）は足（1分・5分・15分・1時間・日足）を順に切り替え、限月を 0 → 1 に変え（足の選択は保たれる）、ドラッグ・ホイール（スマートフォンはスワイプ・ピンチ）で動かしてもネットワークに `/atm_iv_bars` の要求が出ないこと、カーソルの位置の足の時刻（JST）と OHLC がチャートの上に出ることを見る。2 限月目の iv が全部空の時間帯は「データがありません」になる（エラーではない）。チャートが描かれ、開発者ツールのコンソールに CSP の違反（`Refused to …`）が出ないこと。新しいビューアーは新系（`optionchan_tokyo`）の T0 以降のデータだけを表示する（過去分の移行 #12 の前は短い。不具合ではない）。
 
 ログ（デプロイ・ブラウザ確認の後 1 時間）:
 
@@ -1954,7 +1954,7 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 
 ### コスト
 
-Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、利用者 1 人ならほぼ 0 円。IAP（Cloud Run への直接設定）は追加費用なし。BigQuery は 1 ページの表示で 1〜2 クエリ（各 `maximum_bytes_billed` 1 GiB、最小課金 10 MiB）。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。
+Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、利用者 1 人ならほぼ 0 円。IAP（Cloud Run への直接設定）は追加費用なし。BigQuery は 1 ページの表示で 1〜3 クエリ（各 `maximum_bytes_billed` 1 GiB、最小課金 10 MiB）。`/atm_iv` の分足（`/atm_iv_bars?tf=1m|5m|15m`）は生データを読むので 1 回 最大 約 350 MiB（期間 3 日。1 日なら 約 175 MiB）、1 時間足・日足は `/atm_iv_data` と同じ（補う分 最大 3 日）。同じ選択はページ内で使い回すが、足・限月を何十回も切り替えると数 GiB になる。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。
 
 ## 旧系の停止（#14、5a）
 

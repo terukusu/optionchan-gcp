@@ -1,60 +1,48 @@
 <!DOCTYPE html>
 <html lang="ja">
-	<head>
-        <meta http-equiv="Pragma" content="no-cache">
-        <meta http-equiv="Cache-Control" content="no-cache">
-        <meta http-equiv="Expires" content="0">
-        <meta charset="UTF-8">
-		<title>ATM IVの推移</title>
-        <script src="/static/vendor/luxon.min.js"></script>
-		<script src="/static/vendor/chart.umd.min.js"></script>
-		<script src="/static/vendor/chartjs-adapter-luxon.umd.min.js"></script>
-		<script src="/static/vendor/chartjs-chart-financial.min.js"></script>
-        <link rel="stylesheet" href="/static/viewer.css">
-	</head>
-	<body>
-        <a href="/">トップへ</a><br />
-        <div class="chart-area-70">
-            <canvas id="chartCanvas"></canvas>
-        </div><br />
-        <div id="message"></div>
-        <div id="loading">
-          <img src="/static/loading.gif" />
-        </div>
-		<div id="control">
-			Bar Type:
-			<select id="type">
-				<option value="candlestick" selected>Candlestick</option>
-				<option value="ohlc">OHLC</option>
-			</select>
-			Color Scheme:
-			<select id="color-scheme">
-				<option value="muted" selected>Muted</option>
-				<option value="neon">Neon</option>
-			</select>
-			Border:
-			<select id="border">
-				<option value="true">Yes</option>
-				<option value="false" selected>No</option>
-			</select>
-			Days:
-			<select id="days">
-				<option value="10">10</option>
-				<option value="15">15</option>
-				<option value="20" selected>20</option>
-				<option value="25">25</option>
-				<option value="30">30</option>
-				<option value="40">40</option>
-				<option value="50">50</option>
-				<option value="60">60</option>
-			</select>
-			nMonth:
-			<select id="nmonth">
-				<option value="0" selected>0</option>
-				<option value="1">1</option>
-			</select>
-			<button id="update">Update</button>
-		</div>
-		<script src="/static/atm_iv.js"></script>
-	</body>
+<head>
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Cache-Control" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ATM IVの推移</title>
+    <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+    <script src="/static/atm_iv.js" defer></script>
+    <link rel="stylesheet" href="/static/viewer.css">
+</head>
+<body>
+<a href="/">トップへ</a>
+<h1 class="chart-title">ATMオプションIV推移</h1>
+<div id="control">
+    <label>足
+        <select id="tf">
+            <option value="1m">1分</option>
+            <option value="5m">5分</option>
+            <option value="15m">15分</option>
+            <option value="1h" selected>1時間</option>
+            <option value="1d">日足</option>
+        </select>
+    </label>
+    <label>期間
+        <select id="days"></select>
+    </label>
+    <label>限月
+        <select id="nmonth">
+            <option value="0" selected>0</option>
+            <option value="1">1</option>
+        </select>
+    </label>
+</div>
+<div id="legend" class="chart-legend"></div>
+<div id="chart" class="chart-box"></div>
+<div id="message"></div>
+<div id="loading">
+    <img src="/static/loading.gif" alt="読み込み中">
+</div>
+<p class="attribution">
+    チャート: <a id="attribution-link" rel="noopener noreferrer" target="_blank">TradingView Lightweight Charts™</a>
+    Copyright (c) 2025 TradingView, Inc.
+</p>
+</body>
 </html>

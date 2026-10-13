@@ -1,21 +1,23 @@
 """SQL の静的検査（#52 AC 4）。
 
 - SQL は sql/*.sql にだけ置く（Python で組み立てない）。名前は ${project}・${dataset}、値は @パラメータだけ
-- 読むのは最新版のテーブル関数（*_latest・latest_runs）と 1 時間足 atm_iv だけ（生テーブルを直接読まない）。期間で絞る
+- 読むのは最新版のテーブル関数（*_latest・latest_runs）と 1 時間足 atm_iv・取引カレンダーの最新版
+  trading_calendar_latest（#68）だけ（生テーブルを直接読まない）。期間で絞る
 - 書き込み・DDL をしない
 """
 
 import re
 
 import pytest
-from conftest import PKG_DIR
+from conftest import PKG_DIR, REPO_ROOT
 
 from optionchan_viewer import bq
 
 SQL_DIR = PKG_DIR / "sql"
 SQL = {p.stem: p.read_text(encoding="utf-8") for p in SQL_DIR.glob("*.sql")}
 ALLOWED_FUNCS = {"latest_runs", "option_price_latest"}
-ALLOWED_TABLES = {"atm_iv"}
+# 表 → 期間で絞る列
+ALLOWED_TABLES = {"atm_iv": "started_at", "trading_calendar_latest": "calendar_date"}
 
 
 def body(text):
@@ -56,7 +58,8 @@ def test_reads_only_latest_and_hourly(name):
         else:
             assert table in ALLOWED_TABLES, (name, table)
             assert args is None
-            assert re.match(r"\s*WHERE started_at >= @\w+ AND started_at < @\w+", following), (name, following)
+            col = ALLOWED_TABLES[table]
+            assert re.match(rf"\s*WHERE {col} >= @\w+ AND {col} < @\w+", following), (name, following)
 
 
 @pytest.mark.parametrize("name", sorted(SQL))
@@ -75,3 +78,25 @@ def test_atm_iv_uses_hourly_bars_and_put():
     # N3: 1 時間足・補った足のどちらも d 日の下端で絞る
     cond = r"WHERE last_trading_day = \(SELECT last_trading_day FROM month\) AND started_at >= @days_start\n"
     assert len(re.findall(cond, text)) == 2
+
+
+def test_atm_iv_minute_same_rules_as_hourly():
+    # #68: 1 分足は ATM の put、限月は atm_iv.sql と同じ規則、OHLC は atm_hourly.sql の bars の iv の 4 式と同じ
+    text = SQL["atm_iv_minute"]
+    assert re.search(r"\n\s*WHERE is_atm AND type = 2\n", text)
+    assert "SAFE_OFFSET(@n)" in text and "WHERE last_trading_day >= @today" in text
+    assert "TIMESTAMP_TRUNC(created_at, MINUTE) AS started_at" in text
+    hourly = (REPO_ROOT / "sql" / "ohlc" / "atm_hourly.sql").read_text(encoding="utf-8")
+    for expr in ("ARRAY_AGG(iv IGNORE NULLS ORDER BY created_at, target_price, iv)[SAFE_OFFSET(0)] AS ",
+                 "MAX(iv) AS ", "MIN(iv) AS ",
+                 "ARRAY_AGG(iv IGNORE NULLS ORDER BY created_at DESC, target_price DESC, iv DESC)[SAFE_OFFSET(0)] AS "):
+        assert expr in hourly and expr in text, expr
+    # 値段・行使価格の列は読まない（スキャン量）
+    assert not re.search(r"\bprice\b", body(text))
+    assert "ORDER BY started_at" in text
+
+
+def test_trading_holidays_reads_latest_calendar():
+    text = body(SQL["trading_holidays"])
+    assert "`${project}.${dataset}.trading_calendar_latest`" in text
+    assert "AND NOT is_trading_day" in text
