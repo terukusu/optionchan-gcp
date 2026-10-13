@@ -11,7 +11,12 @@
 5. spot_price → future_price → option_price → ingest_runs の順に Storage Write API で追記（失敗は write_failed）
 6. 予定時刻（無ければ実時刻）が JST の毎時 0 分なら、応答の前に同じ期限の残りで取りこぼしを回収し、
    07:00 は日次の照合もする
-   （recovery.py、#34。時間外の 0 分は回収用のクライアントだけを作る。回収の結果・失敗は応答を変えない）
+   （recovery.py、#34。時間外の 0 分は回収用のクライアントだけを作る。回収の結果・失敗は応答を変えない）。
+   続けて取引カレンダーの最新版を読み直す（#63。失敗しても前の値のまま）
+7. 予定時刻が settings.CALENDAR_SYNC_AT（06:40 JST）なら、同じ期限の残りで取引カレンダーを JPX から取り込む
+   （calendar_sync.py、#63。結果・失敗は応答を変えない）
+取引カレンダーはインスタンスの最初のリクエストで BigQuery の最新版を読む（読めなければイメージの TOML）。
+読んだ時間の分だけ、そのリクエストの期限を短くする。
 全体の期限は settings.REQUEST_DEADLINE_SECONDS。各呼び出しのタイムアウトは残り時間で頭打ちにし、
 超えたら deadline_exceeded
 """
@@ -27,7 +32,7 @@ from typing import Any
 
 from flask import Flask, Response, request
 
-from . import PARSER_VERSION, recovery, settings
+from . import PARSER_VERSION, calendar_sync, recovery, settings
 from .calendar import Calendar, Session, load_calendar, session_at
 from .io_bq import WriteFailed
 from .io_gcs import AlreadyExists, RawObject, StorageFailed
@@ -67,6 +72,10 @@ class Deps:
     # (start_offset, end_offset, timeout=) 生 HTML の一覧。失敗は StorageFailed。
     # jpx_unavailable が続いているかの判定（#42）に使う。None なら判定しない（dry-run・時間外）
     list_raw: Callable[..., list[RawObject]] | None = None
+    # カレンダーの出所（calendar_sync.SOURCE_*）。"image"（BigQuery の版を読めない・使えずに TOML）なら 09:00 に ERROR、
+    # "image_newer"（TOML の方が新しいので意図して TOML）なら WARNING。
+    # None なら見ない（dry-run・テスト）
+    calendar_source: str | None = None
 
 
 @dataclass
@@ -86,11 +95,16 @@ def fetch_wait_seconds(now: datetime, at_second: float) -> float:
     return max(0.0, at_second - second_of_minute(now))
 
 
-def _calendar_notice(now: datetime, calendar: Calendar, common: dict) -> None:
-    """取引カレンダーの期限の通知。毎分ではなく 1 日 1 回（settings.CALENDAR_NOTICE_AT の分のリクエスト）だけ出す"""
+def _calendar_notice(now: datetime, calendar: Calendar, common: dict, source: str | None = None) -> None:
+    """取引カレンダーの期限・出所の通知。毎分ではなく 1 日 1 回（settings.CALENDAR_NOTICE_AT の分）だけ出す"""
     local = now.astimezone(JST)
     if (local.hour, local.minute) != settings.CALENDAR_NOTICE_AT:
         return
+    if source == calendar_sync.SOURCE_IMAGE:
+        # BigQuery の最新版を読めていない・使えない。イメージの TOML で判定している
+        log("ERROR", "calendar_fallback", failure="calendar_fallback", covered_until=calendar.covered_until, **common)
+    elif source == calendar_sync.SOURCE_IMAGE_NEWER:
+        log("WARNING", "calendar_fallback", reason="image_newer", covered_until=calendar.covered_until, **common)
     days_left = calendar.days_left(now)
     if days_left < 0:
         log(
@@ -186,7 +200,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         extra = _unavailable_stale(now, session, deps, deadline, detail, common)
         return done("WARNING", "jpx_unavailable", 200, failure="jpx_unavailable", detail=detail, **extra)
 
-    _calendar_notice(now, deps.calendar, common)
+    _calendar_notice(now, deps.calendar, common, deps.calendar_source)
 
     session = session_at(now, deps.calendar)
     if session is None:
@@ -291,23 +305,51 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
 # --- 本番の依存（取引時間中の初回のリクエストで作り、以降は使い回す） ---
 
 _cfg: settings.Settings | None = None
-_calendar: Calendar | None = None
+_holder: calendar_sync.CalendarHolder | None = None
 _deps: Deps | None = None
+_calendar_query = None
+_sync_deps: calendar_sync.SyncDeps | None = None
 
 
-def _config() -> tuple[settings.Settings, Calendar]:
-    global _cfg, _calendar
+def _config() -> tuple[settings.Settings, calendar_sync.CalendarHolder]:
+    """設定と取引カレンダー（最初はイメージの TOML。BigQuery の最新版は _ensure_calendar で読む）"""
+    global _cfg, _holder
     if _cfg is None:
-        _cfg = settings.Settings.from_env()
-        _calendar = load_calendar(_cfg.calendar_path)
-    return _cfg, _calendar
+        cfg = settings.Settings.from_env()
+        base = load_calendar(cfg.calendar_path)
+        _holder = calendar_sync.CalendarHolder(base, None if cfg.dry_run else _load_latest_calendar)
+        _cfg = cfg
+    return _cfg, _holder
+
+
+def _load_latest_calendar(timeout: float):
+    """最新版のビューを読む（クライアントは初回に作る。作成も期限つきのスレッドの中で行う）"""
+    global _calendar_query
+    cfg = _cfg
+    if _calendar_query is None:
+        from .io_bq import BigQueryQuery
+
+        _calendar_query = BigQueryQuery(cfg.project, cfg.dataset, cfg.bq_location)
+    return calendar_sync.load_latest(_calendar_query, cfg.project, cfg.dataset, timeout)
+
+
+def _ensure_calendar(holder: calendar_sync.CalendarHolder, common: dict, now: datetime) -> float:
+    """インスタンスの最初のリクエスト（読めていなければ再試行の時刻の後の次のリクエスト）で最新版を読む。
+    かかった秒数を返す（そのリクエストの期限から引く）"""
+    if not holder.due():
+        return 0.0
+    start = time.monotonic()
+    limit = settings.CALENDAR_LOAD_TIMEOUT_SECONDS + settings.MIN_REMAINING_SECONDS
+    holder.refresh(Deadline(limit, time.monotonic), common, "startup", now)
+    return time.monotonic() - start
 
 
 def _real_deps() -> Deps:
     global _deps
     if _deps is not None:
         return _deps
-    cfg, calendar = _config()
+    cfg, holder = _config()
+    calendar = holder.current  # リクエストごとに ingest() が最新の値で置き換える
 
     from . import io_jpx
 
@@ -404,14 +446,20 @@ app = Flask(__name__)
 def ingest() -> Response:
     now = _now()
     schedule_time = request.headers.get("X-CloudScheduler-ScheduleTime")
+    common = {"schedule_time": schedule_time}
     try:
-        _, calendar = _config()
+        _, holder = _config()
+        spent = _ensure_calendar(holder, common, now)
+        calendar = holder.current
+        source = holder.source if holder.remote else None
         if session_at(now, calendar) is None:
             # 時間外の高速経路: クライアントを作らない
-            deps = Deps(calendar, "", _forbidden, _forbidden, _forbidden, _forbidden)
+            deps = Deps(calendar, "", _forbidden, _forbidden, _forbidden, _forbidden, calendar_source=source)
         else:
             deps = _real_deps()
-        deadline = Deadline(settings.REQUEST_DEADLINE_SECONDS, deps.monotonic)
+            deps.calendar = calendar
+            deps.calendar_source = source
+        deadline = Deadline(settings.REQUEST_DEADLINE_SECONDS - spent, deps.monotonic)
         result = handle(now, deps, schedule_time, deadline=deadline)
     except Exception as e:  # 想定外。ERROR を出して 500
         log("ERROR", "unexpected", failure="unexpected", detail=f"{type(e).__name__}: {e}", schedule_time=schedule_time)
@@ -420,7 +468,11 @@ def ingest() -> Response:
     # 毎時 0 分（JST）だけ、通常の処理の後に同じ期限の残りで回収（07:00 は照合も）。応答は handle の結果のまま
     at = recovery.trigger_time(schedule_time, now)
     if recovery.is_recovery_minute(at):
-        _hourly(now, at, deadline, {"schedule_time": schedule_time})
+        _hourly(now, at, deadline, common)
+        holder.refresh(deadline, common, "hourly", now)
+    # 取引カレンダーの取り込み（06:40 JST）
+    if calendar_sync.is_sync_time(at):
+        _calendar_sync(now, deadline, common)
 
     if result.status == 204:
         return Response(status=204)
@@ -441,6 +493,36 @@ def _hourly(now: datetime, at: datetime, deadline: Deadline, common: dict) -> No
             detail=f"{type(e).__name__}: {e}",
             **common,
         )
+
+
+def _calendar_sync(now: datetime, deadline: Deadline, common: dict) -> None:
+    """取引カレンダーの取り込み。例外を外に出さない（通常の取り込みの応答は変えない）。期限は同じリクエストの残り"""
+    try:
+        cfg, holder = _config()
+        if cfg.dry_run:
+            log("INFO", "calendar_sync_skipped", reason="dry_run", **common)
+            return
+        result = calendar_sync.run_sync(now, _real_sync_deps(), deadline, common)
+        if result.outcome == "updated":
+            holder.apply(result.loaded, common, "sync", now)
+    except Exception as e:
+        log(
+            "ERROR",
+            "calendar_sync_failed",
+            failure="calendar_sync_failed",
+            stage="unexpected",
+            detail=f"{type(e).__name__}: {e}",
+            **common,
+        )
+
+
+def _real_sync_deps() -> calendar_sync.SyncDeps:
+    global _sync_deps
+    if _sync_deps is None:
+        cfg, holder = _config()
+        _, writer = _clients(cfg)
+        _sync_deps = calendar_sync.make_real_deps(cfg, holder.base, writer=writer)
+    return _sync_deps
 
 
 def _forbidden(*args, **kwargs):

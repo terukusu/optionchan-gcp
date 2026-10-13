@@ -1,7 +1,12 @@
-"""取引カレンダー（config/trading_calendar.toml）の読み込みとセッションの判定（純粋関数）。"""
+"""取引カレンダーの読み込みとセッションの判定（純粋関数）。
+
+取引時間・grace・no_night_session_before はイメージの config/trading_calendar.toml。
+休業日（closed_dates）と covered_until は BigQuery の最新版（#63、calendar_sync.py）で置き換え、
+読めないときは TOML の値を使う（with_closed_dates）。
+"""
 
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
@@ -82,6 +87,20 @@ def load_calendar(path: str | Path) -> Calendar:
         night_close=_parse_time(sessions["night_close"]),
         grace=timedelta(minutes=int(data["grace_minutes"])),
     )
+
+
+def with_closed_dates(cal: Calendar, closed_dates, covered_until: date) -> Calendar:
+    """休業日と covered_until だけを置き換えたカレンダー（取引時間などはそのまま）"""
+    return replace(cal, closed_dates=frozenset(closed_dates), covered_until=covered_until)
+
+
+def sessions_of(cal: Calendar) -> dict[str, time]:
+    return {
+        "day_open": cal.day_open,
+        "day_close": cal.day_close,
+        "night_open": cal.night_open,
+        "night_close": cal.night_close,
+    }
 
 
 def _jst(now: datetime) -> datetime:

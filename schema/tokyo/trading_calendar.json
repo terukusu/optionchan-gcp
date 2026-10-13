@@ -1,0 +1,74 @@
+[
+  {
+    "name": "version_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "版の作成時刻（取り込みの時刻）。版の識別子。最新版は version_at が最大の版（ビュー trading_calendar_latest）"
+  },
+  {
+    "name": "calendar_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "業務規程上の休業日に当たる平日（国民の祝日・休日と、年末年始の 12/31・1/1・1/2・1/3）。土日の行は無い。1 版の中で一意"
+  },
+  {
+    "name": "is_trading_day",
+    "type": "BOOLEAN",
+    "mode": "REQUIRED",
+    "description": "true = 祝日取引を実施する（取引日）、false = 休業。取引日は土日と is_trading_day = false の日を除いた日"
+  },
+  {
+    "name": "status",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "confirmed（JPX の表の「確定」。1/1 の規則の行も confirmed）/ planned（「予定」）"
+  },
+  {
+    "name": "day_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "national_holiday（国民の祝日・休日。振替休日・国民の休日・1/1 を含む）/ year_end（年末年始の休業日 12/31・1/2・1/3）"
+  },
+  {
+    "name": "name",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "JPX の表の名称（例: 勤労感謝の日、年末休業日。注記の参照は除く）。1/1 は「元日」"
+  },
+  {
+    "name": "note",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "実施有無の欄が参照する JPX の注記の本文（例: BCP テストのため祝日取引を実施しない）。無ければ NULL"
+  },
+  {
+    "name": "source",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "jpx_table（JPX「祝日取引」の祝日取引実施日の表）/ rule（平日の 1/1。表に載らないので規則で足す）"
+  },
+  {
+    "name": "covered_until",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "版の値（全行で同じ）。確定の最終日（確定の最後の行を含む半期の末日）。これより後の行は予定"
+  },
+  {
+    "name": "listed_until",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "版の値（全行で同じ）。JPX の表の最終年の 12/31。これより後の平日は未知（休業日が載っていない）"
+  },
+  {
+    "name": "content_hash",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "版の値（全行で同じ）。版の内容（version_at・accepted・content_hash を除く）の SHA-256（16 進）。変化の検知と、読み手が行の欠け・重複を検知する照合に使う"
+  },
+  {
+    "name": "accepted",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "版の値（全行で同じ）。auto（検証を通った）/ override（前の版との差分の検証を手動の --accept で越えた）"
+  }
+]

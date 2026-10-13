@@ -1137,7 +1137,8 @@ gcloud logging read "$F" --project $P --freshness=2h --limit=200 \
 | `recovery_item_failed` | 回収の 1 件の想定外の例外 | その件は次の 0 分に再試行される。続くなら `object` の生 HTML とコードを見る |
 | `raw_unrecovered` | 07:00 の照合で未回収あり | 「回収と照合」の「`raw_unrecovered` を受けたとき」 |
 | `reconcile_failed` | 照合の一覧・クエリの失敗 | 回収も失敗している（`recovery_failed` は通知しない）可能性が高い。`recovery_failed` のログの `stage` を見て、権限（`bigquery.jobUser`）・BigQuery のステータスを確認する。直ったら翌朝の照合か「再処理ジョブ」の `--only-missing --dry-run` で確かめる |
-| `calendar_outdated` | 取引カレンダーの期限切れ（09:00 に 1 回） | 「取引カレンダーの更新」 |
+| `calendar_outdated` / `calendar_fallback` / `calendar_load_rejected` | 取引カレンダーの期限切れ・BigQuery の版を使えていない（09:00 に 1 回）・ingest が版を使わなかった（壊れている・不自然） | 「取引カレンダー（#63）」の「ERROR を受けたとき」 |
+| `calendar_sync_failed` / `calendar_sync_rejected` / `calendar_sessions_changed`（サービス ingest の 06:40、ジョブ `calendar-sync`） | 取引カレンダーの取り込みの失敗・検証で拒否・取引時間の変更（前のカレンダーのまま） | 「取引カレンダー（#63）」の「ERROR を受けたとき」 |
 | `unexpected` | 想定外の例外（500） | ログの `detail` を見て Issue にする |
 | `reprocess_failed` / `reprocess_item_failed`（`cloud_run_job`） | 再処理ジョブの失敗 | 「再処理ジョブ」の終了コードの説明 |
 | `bigquery_dts_config`（`jsonPayload.message` が `quality:`・`legacy_compare:` など） | 定期クエリの失敗（品質チェックの違反・新旧の説明できない差分・コピーの遅れ・権限） | 「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき」 |
@@ -2143,24 +2144,101 @@ GitHub secret `TF_ALERT_POLICY_IDS` に消したポリシー（`m1`・`m2`）の
 | 旧ビューアーだけ（閲覧に旧画面が要る） | App Engine を `SERVING`、HTTP 関数 3 つに `allUsers` | 旧データセットは止めた時点までしか無い（取り込みは止まったまま）。公開を戻している間は、予算アラートの備え（#21）だけになる。用が済んだらまた止める |
 | 旧系の取り込みだけ | App Engine を `SERVING`（連携している Datastore を `download_jpx` が使うため）、Scheduler を `resume`、`legacy_stopped = false` の PR | 旧ビューアーは止めたままでよい |
 
-## 取引カレンダーの更新
+## 取引カレンダー（#63）
 
-新しい取り込み（`apps/ingest`、#32）が時間外・休場日の判定に使う `config/trading_calendar.toml` の更新。JPX は毎年 2 月に翌年の祝日取引の実施日（予定）を、6 月と 12 月に翌年の上半期・下半期の実施日（確定）を公表する。**年 2 回（6 月・12 月の公表後）**、確定分まで `covered_until` を延ばす。
+新しい取り込み（`apps/ingest`）が時間外・休場日の判定に使う休業日の一覧を、JPX「祝日取引」の祝日取引実施日の表（https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html ）から**自動で**取り込む。JPX は毎年 2 月に翌年の予定を、6 月と 12 月に翌年の上半期・下半期の確定を公表する。手で TOML を直す運用は無い（`config/trading_calendar.toml` は取引時間の設定と、BigQuery を読めないときの予備）。
 
-- 出典: 大阪取引所「祝日取引」の祝日取引実施日の表（https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html ）
-- `covered_until` の 14 日前から 1 日 1 回（09:00 JST のリクエスト）WARNING `calendar_expiring` を出し、過ぎたら同じく 1 日 1 回 ERROR `calendar_outdated` を出す（新系の M2 で通知。11d）。通知が来たらこの手順で更新する
-- `covered_until` を過ぎても取り込みは止めない。`closed_dates` に書いた日（「予定」の日を含む）は休み、書いていない平日は取引日として扱う（未知の休業日にも JPX を取りに行くだけで、データは増えない）。期限切れの間は休業日を判定できないので鮮度判定（`stale`）をしない
+- **取り込み**: 毎日 06:40 JST の ingest のリクエスト（時間外。Scheduler は足さない）で、通常の処理の後に同じ期限の残りで行う（`apps/ingest/src/optionchan_ingest/calendar_sync.py`）。ページを取得・解析し、内容が最新版と同じなら INFO `calendar_checked` で終わる。変わっていれば内閣府の祝日 CSV（https://www8.cao.go.jp/chosei/shukujitsu/syukujitsu.csv ）も取得して検証し、通れば `optionchan_tokyo.trading_calendar` に新しい版を追記して NOTICE `calendar_updated`（今日以降の休業日の追加 `added_closed`・削除 `removed_closed`、`covered_until` の新旧）を出す
+- **ingest の読み方**: インスタンスの最初のリクエストと毎時 0 分にビュー `trading_calendar_latest` を読む。読めない・版が無いなら、前に読めた版（無ければイメージの TOML）のまま（WARNING `calendar_load_failed`）。一度も読めていなければ 5 分後（`CALENDAR_RETRY_SECONDS`）以降の次のリクエストで読み直す。TOML の `covered_until` の方が新しければ TOML を使う（WARNING `calendar_source_conflict`）
+- **ingest 側の検査（多層防御）**: 次の版は使わずに今の値のまま、ERROR `calendar_load_rejected`（同じ版・同じ理由では 1 回）: `content_hash` が再計算と合わない（行の欠け・同じ `version_at` の重複・書き換え）、その他の不正な値、今日から 14 日以内に今の値（前の版か TOML）に無い休業日が増える（`accepted = override` の版は確認済みなので見ない）、1 年の休業平日が 25 を超える
+- **09:00 の出所の通知**: BigQuery の版を読めない・使えずに TOML で判定していれば ERROR `calendar_fallback`。TOML の方が新しく意図して TOML を使っているなら WARNING `calendar_fallback`（`reason=image_newer`）
+- **期限**: `covered_until`（確定の最終日）の 14 日前から 09:00 に WARNING `calendar_expiring`、過ぎたら ERROR `calendar_outdated`（従来どおり）。自動化の後は「確定の公表を取り込めていない」ことの最後の検知になる。過ぎても取り込みは止めない（書いていない平日は取引日として扱う。期限切れの間は鮮度判定をしない）
+- 列・最新版の選び方・SQ 日の繰り上げへの使い方（読み手の契約）は `docs/architecture/target.md` 3.2「取引カレンダー（#63）」
 
-手順:
+### 検証のルール
 
-1. 年末年始の休業日 **12/31・1/1・1/2・1/3**（業務規程の休業日。祝日取引の表に無い日もある）のうち**平日のもの**と、公表の表で「実施しない」日（BCP テスト等）のうち平日のものを `closed_dates` に足す（土日は書かない）。平日の祝日で「実施する」日は書かない（取引日として扱う）。「予定」の日も書いてよい（`covered_until` より後でも使われる）
-2. 大発会の前夜など、直前の夜間セッションが無い取引日が公表されたら `no_night_session_before` に足す（2025-12-30 の大納会は夜間を実施したので、通常は空）
-3. `covered_until` を確定分の最終日に延ばす（予定の日だけで延ばさない）
-4. テストを通して PR を出す。キーは `[sessions]` の表より前に書く（後に書くと `[sessions]` に入り、読み込み時にエラーになる）
+どれか 1 つでも当たれば書かずに ERROR `calendar_sync_rejected`（`problems` に `rule: 詳細`）。ingest は前のカレンダーのまま。
+
+| rule | 内容 | `--accept` で越えられるか |
+|---|---|---|
+| （解析の失敗。`calendar_sync_failed` の `stage=parse`） | 見出し「祝日取引実施日」・表の見出し（実施有無・確定/予定）・日付・曜日・実施有無・確定/予定の形が違う、確定の行が無い | 不可（パーサーを直す） |
+| `years_mismatch` / `current_year_missing` / `row_count` / `duplicate` / `weekend` / `status_order` | 表の前の文の年と表の年が違う、今年が無い（12 月は翌年があればよい。今年の残りは前の版から引き継ぐ）、1 年の行数が 10〜25 でない、同じ日付、土日の行、予定の後に確定 | 不可 |
+| `year_end_missing` / `year_end_held` / `jan1_held` | 平日の 12/31・1/2・1/3 が表に無い、12/31・1/2 が「実施する」、1/1 が「実施する」 | 不可 |
+| `not_holiday` / `holiday_missing` / `not_year_end` | 祝日 CSV に無い日が祝日として載っている、CSV の平日の祝日（1/1 を除く）が表に無い | 不可 |
+| `unverified_confirmed` | 祝日 CSV にまだ無い年に「確定」の行がある（予定だけなら照合を飛ばして受け入れ、WARNING `calendar_unverified_year`） | 可 |
+| `past_changed` | 過去日の休業/取引日が変わる | 可 |
+| `covered_until_regressed` / `listed_until_regressed` | 確定の最終日・掲載範囲が後退する | 可 |
+| `confirmed_changed` | 今日以降の確定の日が消える・予定に戻る・実施有無が変わる | 可 |
+| `too_many_changes` | 前の版の掲載範囲の中で、今日以降の休業日の追加・削除が 4 件以上（翌年分の追加は数えない） | 可 |
+| `closes_soon` | 今日から 14 日以内の日が新しく休業日になる（誤りなら取引日を取りこぼす。取引日に変わる向きは受け入れる。ingest 側の検査と同じ日数） | 可 |
+
+- 版が無いとき（初回）は、イメージの TOML を前の版として差分を見る（過去日は TOML に書かないので見ない）
+- 取引時間の表が TOML の `[sessions]` と違えば ERROR `calendar_sessions_changed`（休業日の更新は止めない。取引時間は自動で変えない）
+- 1/1 は表に載らない（注1）ので、平日なら規則で休業の行を足す（`source = rule`）。表から消えた過去年の行は前の版から引き継ぐ
+
+### デプロイ後（初回）
+
+apply の後、手動のジョブで最初の版を書く（翌朝 06:40 を待ってもよい）:
+
+```sh
+gcloud run jobs execute calendar-sync --region $L --project $P --wait --args=--dry-run
+gcloud run jobs execute calendar-sync --region $L --project $P --wait
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT calendar_date, is_trading_day, status, day_type, name, covered_until, version_at
+FROM `optionchan_tokyo.trading_calendar_latest` WHERE NOT is_trading_day ORDER BY calendar_date'
+# 今日以降の休業日・covered_until が config/trading_calendar.toml と一致すること
+gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ingest" AND jsonPayload.event=("calendar_loaded" OR "calendar_load_failed" OR "calendar_load_rejected")' \
+  --project $P --freshness=2h --limit 5 --format='value(timestamp,jsonPayload.event,jsonPayload.version_at,jsonPayload.detail)'
+```
+
+### ERROR を受けたとき
+
+| event | 対応 |
+|---|---|
+| `calendar_sync_failed`（`stage`） | `load`: ビューを読めない（権限・BigQuery の障害）。`fetch_page` / `fetch_holidays`: JPX・内閣府のサイトの障害（翌日に再試行される。続くなら URL の変更を疑う）。`parse` / `parse_holidays`: 形の変更。ページを開いて `jpx_calendar.py` の解析を直す PR（fixture `apps/ingest/tests/fixtures/holiday_trading.html` も必要部分だけ差し替える）。`write`: 書き込みの失敗（翌日に再試行）。`deadline`: 期限切れ（翌日に再試行。急ぐなら手動のジョブ）。`unexpected`: `detail` を見て Issue にする |
+| `calendar_sync_rejected` | `problems` を読み、JPX のページと見比べる。ページが正しく（例: BCP テストで近い祝日を休みにする公表）、`overridable` が true なら、`--dry-run` で `added_closed` / `removed_closed` を確かめてから `--accept` で受け入れる。false ならページかパーサーの問題（パーサーを直すか、ページが直るのを待つ）。受け入れるまで ingest は前のカレンダーのまま（新しい休業日にも JPX を取りに行くだけで、取りこぼしは無い） |
+| `calendar_sessions_changed` | 取引時間の変更。JPX の公表を確かめ、`config/trading_calendar.toml` の `[sessions]` と鮮度のしきい値・Scheduler 前提（target.md 3.1）を見直す PR |
+| `calendar_fallback`（09:00） | ingest が BigQuery の版を使えていない。直前の `calendar_load_failed` / `calendar_load_rejected` の `detail` を見る（権限・ビューの有無・版の不正）。版が無いなら上の「デプロイ後（初回）」 |
+| `calendar_load_rejected` | `detail` が `data:`（`content_hash` の不一致・重複など）なら下の「版・ビューが壊れたとき」。`closes_soon` なら近い休業日が増える版（JPX のページで確かめ、正しければ `--accept` で取り込み直すと `override` の版になり ingest も使う）。`too_many_closed` はページか解析の誤り |
+| `calendar_outdated` / WARNING `calendar_expiring` | 確定の公表（6 月・12 月）を取り込めていない。`calendar_sync_*` の ERROR が出ていないか、ページに確定が出ているかを見る。手動のジョブを `--dry-run` で実行して結果を見る |
+
+```sh
+# 手動の取り込み（理由は 200 文字まで。ログに残る）
+gcloud run jobs execute calendar-sync --region $L --project $P --wait --args=--dry-run
+gcloud run jobs execute calendar-sync --region $L --project $P --wait '--args=--accept=JPX の公表（BCP テスト）を確認'
+# 結果
+gcloud logging read 'jsonPayload.event:"calendar_" AND (resource.labels.job_name="calendar-sync" OR resource.labels.service_name="ingest")' \
+  --project $P --freshness=1d --limit 20 --format=json \
+  | jq -c '.[] | {t: .timestamp, e: .jsonPayload.event, stage: .jsonPayload.stage, problems: .jsonPayload.problems, added: .jsonPayload.added_closed, removed: .jsonPayload.removed_closed, covered_until: .jsonPayload.covered_until}'
+```
+
+ジョブの終了コード: 0 = 更新・変化なし・dry-run、1 = 失敗・拒否、2 = 引数の誤り。間違った版を受け入れたときは、正しいページで `--accept` を付けて取り込み直す（新しい版が最新版になる。古い版は履歴として残る）。**緊急回避**（ページが直らない・すぐ止めたい）: `config/trading_calendar.toml` を正しい `closed_dates` にし、`covered_until` を最新版より後の日にした PR をデプロイすると、ingest は TOML を使う（WARNING `calendar_source_conflict`）。直ったら TOML の `covered_until` を戻す。
+
+### 版・ビューが壊れたとき
+
+- **同じ `version_at` の重複・行の欠け**（`calendar_load_rejected` の `detail` が `data: content_hash が合わない` など。手動のジョブと 06:40 が同時に書いた等）: ingest は前の値（無ければ TOML）のままなので急がない。新しい版を書けば最新版が置き換わる。取り込みも前の版を読めずに `calendar_sync_failed`（`stage=load`）になるので、`--accept` を付けて手動のジョブを実行する（壊れた前の版を無視し、TOML を基準に検証して新しい版を書く。WARNING `calendar_previous_ignored`）:
+
+```sh
+gcloud run jobs execute calendar-sync --region $L --project $P --wait --args=--dry-run,--accept=壊れた版の復旧
+gcloud run jobs execute calendar-sync --region $L --project $P --wait --args=--accept=壊れた版の復旧
+# 壊れた版を履歴から消すとき（任意。書いてから 30 分ほどは DML で消せないことがある）
+bq query --location=$L --use_legacy_sql=false 'SELECT version_at, COUNT(*) rows, COUNT(DISTINCT content_hash) hashes FROM `optionchan_tokyo.trading_calendar` GROUP BY version_at ORDER BY version_at DESC LIMIT 5'
+bq query --location=$L --use_legacy_sql=false 'DELETE FROM `optionchan_tokyo.trading_calendar` WHERE version_at = TIMESTAMP("<壊れた版の version_at>")'
+```
+
+- **ビューが消えた・定義が変わった**: ingest・取り込みは `calendar_load_failed` / `calendar_sync_failed`（`stage=load`）になり、前の値か TOML で動き続ける。ビューは Terraform（`infra/prod/calendar.tf`）が持つので、deploy workflow を再実行するか、次の PR の apply で作り直される（plan に `trading_calendar_latest` の create / update が出る）。テーブル `trading_calendar` が消えたときはタイムトラベル（7 日）で戻す（`bq cp optionchan_tokyo.trading_calendar@<ミリ秒> optionchan_tokyo.trading_calendar`）か、apply で作り直して手動のジョブで最初の版を書く
+
+### TOML（`config/trading_calendar.toml`）
+
+- ingest が読むのは取引時間（`[sessions]`）・`grace_minutes`・`no_night_session_before` と、BigQuery の版を読めないときの予備の `closed_dates` / `covered_until`
+- 別リポジトリのシミュレーターが TOML の raw URL を同期しているので、**シミュレーターが BigQuery の版を読むようになる（縦切り 2）まで**、休業日が変わったら TOML も合わせる。最新版から生成できる（JPX にはアクセスしない。コメント・他のキーはそのまま、`covered_until` と今日以降の `closed_dates` だけ置き換える）:
 
 ```bash
 cd apps/ingest
-uv run --locked pytest -q tests/test_calendar.py
+GCP_PROJECT=$P uv run --locked python -m optionchan_ingest.calendar_sync --print-toml > /tmp/trading_calendar.toml
+diff ../../config/trading_calendar.toml /tmp/trading_calendar.toml   # 差分を見て、コメント（確定の時期など）を直して PR
+uv run --locked pytest -q tests/test_calendar.py tests/test_jpx_calendar.py
 ```
 
-境界ケース（年末年始・祝日取引を実施しない日）のテストを足すときは `apps/ingest/tests/test_calendar.py` の `CASES` に追加する。
+- **廃止の条件**: シミュレーターの縦切り 2 が済み、かつ 2027-06 の確定の公表（2027 年下半期）を自動で取り込めたこと。廃止しても `[sessions]` などの設定は残し、`closed_dates` / `covered_until` だけを消す（BigQuery を読めないときは書いていない平日を取引日として扱う）。消すときは `apps/ingest/src/optionchan_ingest/calendar.py` の `load_calendar` のキーの検査（`_TOP_KEYS`）と `Calendar` の予備の値の扱い（`CalendarHolder` の TOML との比較、`--print-toml`）も直す（直さないと読み込みでエラーになる）
+- `no_night_session_before`（直前の夜間セッションが無い取引日）は JPX の表に無いので、公表されたら従来どおり TOML に足す（通常は空）
