@@ -1,13 +1,17 @@
 # 監視アラート（旧系 m1・m2 は #9、新しい取り込みの ingest_m1・ingest_m2 は #35）。
 # 定義の正は monitoring/*.json（tests/test_monitoring.py で検査）。
-# ここでは JSON のキーを camelCase → snake_case に写すだけで、値は変えない（例外は下の enabled の連動だけ）。
+# ここでは JSON のキーを camelCase → snake_case に写すだけで、値は変えない（例外は下の enabled の連動と、legacy_stopped で旧系の 2 本を作らないことだけ）。
 locals {
-  alert_policies = {
-    m1        = jsondecode(file("${path.module}/../../monitoring/m1-liveness.json"))
-    m2        = jsondecode(file("${path.module}/../../monitoring/m2-errors.json"))
+  # 旧系（Cloud Functions の取り込み）向け。旧系を止めたら（var.legacy_stopped = true）消す（#14）
+  legacy_alert_policies = {
+    m1 = jsondecode(file("${path.module}/../../monitoring/m1-liveness.json"))
+    m2 = jsondecode(file("${path.module}/../../monitoring/m2-errors.json"))
+  }
+
+  alert_policies = merge({ for k, v in local.legacy_alert_policies : k => v if !var.legacy_stopped }, {
     ingest_m1 = jsondecode(file("${path.module}/../../monitoring/ingest-m1-liveness.json"))
     ingest_m2 = jsondecode(file("${path.module}/../../monitoring/ingest-m2-errors.json"))
-  }
+  })
 
   # Scheduler ingest を止めている間（var.ingest_paused = true）は無効にするポリシー（止めると必ず鳴るため）
   paused_with_ingest = ["ingest_m1"]

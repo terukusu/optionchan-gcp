@@ -200,7 +200,7 @@ gcloud alpha services quota delete \
 
 ## 監視アラート
 
-現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。#10 で Terraform（`infra/prod/monitoring.tf`）に取り込んだ。定義の正は `monitoring/*.json`（`tests/test_monitoring.py` で検査）で、Terraform は JSON を読んで組み立てる。変更は JSON を直して PR を出し、マージ後に deploy workflow が承認つきで反映する（「Terraform」節）。gcloud で直接変えると次の plan で差分になる。旧系の削除（#14）で消す。新しい取り込みのアラート 2 本（#35）は「新しい取り込みの監視（#35）」節にまとめた（同じ `monitoring.tf` が作る）。
+現行構成の取り込み停止・失敗を検知する Cloud Monitoring のアラートポリシー 2 本（#9）。指標は Cloud Functions 組み込みの `cloudfunctions.googleapis.com/function/execution_count`（無料）で、ログ指標は作らない。通知先は既存のメール通知チャネル 1 件。#10 で Terraform（`infra/prod/monitoring.tf`）に取り込んだ。定義の正は `monitoring/*.json`（`tests/test_monitoring.py` で検査）で、Terraform は JSON を読んで組み立てる。変更は JSON を直して PR を出し、マージ後に deploy workflow が承認つきで反映する（「Terraform」節）。gcloud で直接変えると次の plan で差分になる。旧系の停止（#14）で消す（`legacy_stopped`、「旧系の停止（#14、5a）」）。新しい取り込みのアラート 2 本（#35）は「新しい取り込みの監視（#35）」節にまとめた（同じ `monitoring.tf` が作る）。
 
 | 表示名 | 条件 | 拾うもの | 定義 |
 |---|---|---|---|
@@ -329,7 +329,7 @@ gcloud monitoring policies update "$ID" --enabled --project=$P
 
 ### 削除（切り戻し・#14）
 
-Terraform で管理しているので、`infra/prod/monitoring.tf` の `alert_policies` から消す（2 本とも消すなら `monitoring.tf` ごと消す）PR を出し、承認後の apply で削除する（`deletion_policy` は既定の `DELETE`）。gcloud で直接消すと、次の plan で create になる。
+Terraform で管理しているので、`infra/prod/variables.tf` の `legacy_stopped` の既定値を `true` にする PR を出し、承認後の apply で削除する（同じ apply で新旧の突き合わせの DTS 3 本も無効になる。旧系を止めるときの手順は「旧系の停止（#14、5a）」）。`false` に戻す PR で同じ定義から作り直せる。gcloud で直接消すと、次の plan で create になる。
 
 Terraform が使えないときは「試験発報」の削除と同じループで、表示名を `optionchan: M1 生存（download_jpx の起動が 15 分無い）` と `optionchan: M2 エラー（取り込み関数の失敗）` にして消し、`terraform state rm 'google_monitoring_alert_policy.this["m1"]'`（m2 も）で state から外す。別サーバー用の既存ポリシーは表示名が `optionchan: ` で始まらないので対象にならない。新系の 2 本（`ingest_m1` / `ingest_m2`）は残す。
 
@@ -1372,7 +1372,7 @@ done   # 合計の billed が 3 GiB 以下
 ### 停止・削除
 
 - 一時停止: `infra/prod/sq.tf` の該当の DTS に `disabled = true` を足す PR。急ぐときはコンソール（BigQuery → データ転送）で無効にし、続けて同じ PR を出す（出さないと次の apply で有効に戻る）
-- 旧系の停止（#14）で突き合わせを消す（その前に、新系の取りこぼしを旧系の値で補う。「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。作業用データセットを使う）: `legacy-*` の DTS 3 本・作業用データセット 2 つ・`legacy_compare_daily` の付与を消し、`legacy_compare_daily` は `deletion_protection = false` の PR を先に出してから消す（結果は先に #11 に記録する）。bootstrap の旧テーブルの読み取り 3 件を外す（revert + 所有者の apply）。品質チェックは残す
+- 旧系の停止（#14）で突き合わせを止める（その前に、新系の取りこぼしを旧系の値で補う。「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。作業用データセットを使う）: `legacy_stopped = true` の PR で `legacy-*` の DTS 3 本を無効にする（「旧系の停止（#14、5a）」）。旧系を消す #24 で、`legacy-*` の DTS 3 本・作業用データセット 2 つ・その付与を消し、bootstrap の旧テーブルの読み取り 3 件を外す（所有者の apply）。`legacy_compare_daily`（#11 の判定の記録）と品質チェックは残す
 - 全部を戻す（この Issue の revert）: prod は delete 13 と M2 の update 1（結果のテーブルは先に `deletion_protection = false`）、bootstrap は revert + 所有者の apply（`sa-sq-dts` は `deletion_policy = "PREVENT"` なので state から外すだけになる）。旧系の取り込みには影響しない
 
 ## 過去データの移行（#12）
@@ -1942,6 +1942,206 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 ### コスト
 
 Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、利用者 1 人ならほぼ 0 円。IAP（Cloud Run への直接設定）は追加費用なし。BigQuery は 1 ページの表示で 1〜2 クエリ（各 `maximum_bytes_billed` 1 GiB、最小課金 10 MiB）。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。
+
+## 旧系の停止（#14、5a）
+
+旧系（Cloud Functions 第1世代・Pub/Sub・Cloud Scheduler・Datastore・App Engine）を**戻せる形で**止め、2 週間様子を見る（target.md 6 章 5a）。消すのは #24（5b、不可逆）。**#11 の合格・#12 の移行・#13 の完了（#54 の見比べ）の後に、所有者が行う**。
+
+| 対象（2026-10-14 の棚卸し） | 5a でやること | 手段 | 戻し方 |
+|---|---|---|---|
+| Scheduler `minutely_task`（毎分、→ Pub/Sub `minutely_task` → `download_jpx`）・`create_timeframe`（毎日 00:01 UTC、→ `create_timeframe` → `insert_ohlc`）。asia-northeast1 | 一時停止（`pause`） | gcloud | `resume` |
+| HTTP 関数 `smile_data` / `atm_data` / `atm_iv_data`（us-east1、python37、`allUsers` に `cloudfunctions.invoker`） | `allUsers` の invoker を外す | gcloud | `add-iam-policy-binding` で同じ付与 |
+| App Engine（asia-northeast1、`default` サービスの 2019-07-03 のバージョンに 100%、IAP 有効。旧ビューアー） | アプリを無効化（`servingStatus = USER_DISABLED`）。データ API が閉じると表示できないので一緒に止める。**連携している Datastore（`databaseType = CLOUD_DATASTORE_COMPATIBILITY`、`appEngineIntegrationMode = ENABLED`）の読み書きも止まる**（公式: "If you disable your App Engine app, you also disable access to the Datastore mode database linked to that app"）。Datastore を使うのは `download_jpx`（前回の先物の時刻）と `smile_data` で、どちらも先に止めるので影響しない。反映は最大 1 時間 | REST API（gcloud にフラグが無い）かコンソール | `SERVING` に戻す |
+| 旧系向けアラート `optionchan: M1 生存（download_jpx の起動が 15 分無い）`・`optionchan: M2 エラー（取り込み関数の失敗）` | 削除（Scheduler を止めると M1 が必ず鳴る。2027-09-01 のアラート課金の前に旧系向けを 0 にする。EPIC 終了条件 5） | Terraform（`legacy_stopped = true`） | `legacy_stopped = false` の PR で同じ定義（`monitoring/*.json`）から作り直す |
+| 新旧の突き合わせの DTS `legacy-stage` / `legacy-copy` / `legacy-compare`（#40） | 無効化（旧系の行が来なくなる。品質チェック `quality-daily` と 1 時間足 `atm-hourly` は動かし続ける） | Terraform（同じ PR） | 同上で有効に戻る |
+| 共通パスワード（`auth.txt`）を読む旧コード（`appengine/main.py`・`functions_py/atm_iv/main.py`・`functions/main.py` の `smile_data` / `atm_data`。EPIC 終了条件 7） | リポジトリから消す（本番には影響しない。デプロイ済みの関数・アプリは変わらない） | PR | revert（git の履歴に残る） |
+
+**5a でやらないこと（#24・#15）**: 関数 6 つ（`download_jpx` / `load_jpx_into_bq` は python311、他の 4 つは python37）・Pub/Sub のトピック 3 つ（`minutely_task` / `create_timeframe` / `minutely15_task`。`minutely15_task` は購読も Scheduler も無い）と購読 2 つ・Scheduler 2 ジョブ・Datastore（kind `optionchan` の 1 エンティティ）・GCS `optionchan`（中継）の削除は #24。旧系向けの Terraform の定義（`legacy_stopped`・`legacy-*` の DTS・作業用データセット 2 つ・`sa-sq-dts` の旧テーブルの読み取り 3 件（bootstrap）・`monitoring/m1-liveness.json`・`m2-errors.json`・`monitoring/backtest.py` の旧系分）も、戻す必要が無くなる #24 で消す。旧 SA `optionchan`（鍵 2 本は #23 で無効化済み。`bigquery.admin`・`datastore.owner`・`storage.objectAdmin`）とデフォルト SA（App Engine・Compute）の Editor、プロジェクト単位の `iap.httpsResourceAccessor`、旧データセット `optionchan`・`jikken`、App Engine の旧バージョン（30）、ソース zip のバケットは #15。`legacy_compare_daily`（#11 の判定の記録）は消さない（`deletion_protection`）。
+
+**どのアカウントで**: Scheduler・関数の IAM・App Engine の変更は本番の変更なので所有者が行う。Terraform の変更は PR → マージ → deploy の `apply` job の承認（「Terraform」の「流れ」）。
+
+### 変数
+
+「Terraform」の「共通の変数」（`P`・`REPO`・`R`）、「新しい取り込み（ingest）」の `L`、「日次の品質チェックと新旧の突き合わせ（#40）」の `tc` に加えて:
+
+```sh
+OLD_REGION=us-east1
+OLD_JOBS="minutely_task create_timeframe"
+HTTP_FNS="smile_data atm_data atm_iv_data"
+W=<スクラッチのディレクトリ>   # 停止前後の記録を置く（リポジトリ・Issue に貼らない）
+# App Engine の servingStatus を見る / 変える（gcloud app update に servingStatus のフラグが無いので Admin API を直接呼ぶ）
+app_status() { curl -s -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://appengine.googleapis.com/v1/apps/$P" | jq -r '.servingStatus // .error.message'; }
+app_set() { curl -s -X PATCH -H "Authorization: Bearer $(gcloud auth print-access-token)" -H 'Content-Type: application/json' \
+  "https://appengine.googleapis.com/v1/apps/$P?updateMask=servingStatus" -d "{\"servingStatus\":\"$1\"}" \
+  | jq -c '{done: (.done // false), error: .error.message}'; }
+# 旧系の状態の要約（停止前・停止後・戻した後に同じものを取って比べる）
+legacy_state() {
+  for j in $OLD_JOBS; do echo "scheduler $j $(gcloud scheduler jobs describe $j --location=$L --project=$P --format='value(state)')"; done
+  for f in $HTTP_FNS; do echo "invoker $f $(gcloud functions get-iam-policy $f --region=$OLD_REGION --project=$P --format=json \
+    | jq -c '[.bindings[]? | select(.role == "roles/cloudfunctions.invoker") | .members[]]')"; done
+  echo "app $(app_status)"
+  gcloud monitoring policies list --project=$P --format='value(displayName,enabled)' | grep '^optionchan: ' | sort
+  for loc in $L us; do bq ls --transfer_config --transfer_location=$loc --project_id=$P --format=json \
+    | jq -r '.[] | "dts \(.displayName) disabled=\(.disabled // false)"'; done | sort
+}
+```
+
+### 事前確認
+
+すべて満たしてから始める。満たさないものがあれば止めない。
+
+1. Issue: #11（並行稼働の合格）・#12（過去データの移行）・#49（1 時間足の過去分）・#54（新旧ビューアーの 1 週間の見比べ）・#13 が closed
+
+   ```sh
+   for i in 11 12 49 54 13; do echo "#$i $(gh issue view $i --json state -q .state)"; done   # すべて CLOSED
+   ```
+
+2. 新系が正常: 直近 7 日の `quality_daily` の `violations` が 0、`legacy_compare_daily` の `unexplained` が 0（「日次の品質チェックと新旧の突き合わせ（#40）」の「日次の確認」）。新系の M1・M2 が有効で、直近 24 時間に通知が無い。`infra/prod/variables.tf` の `ingest_paused` が `false`
+3. 新ビューアーで代替できる: `/smile`・`/atm_iv`（`d`・`n` を変えて）が新ビューアーで表示でき、旧ビューアーでしか見られないもの（旧型 `/atm` は #58 で廃止済み）が無いことを所有者が確かめる
+4. 旧 HTTP 関数を旧ビューアー以外から呼んでいるものが無い（直近 7 日の実行数。所有者の閲覧の分だけのはず。想定外に多ければ止める前に呼び出し元を調べる）
+
+   ```sh
+   gcloud logging read 'resource.type="cloud_function" AND resource.labels.region="'$OLD_REGION'" AND textPayload:"Function execution started"
+     AND resource.labels.function_name=("smile_data" OR "atm_data" OR "atm_iv_data")' \
+     --project=$P --freshness=7d --format='value(resource.labels.function_name)' | sort | uniq -c
+   ```
+
+5. 日程: **土曜 13:00 JST 以降**に始め、日曜のうちに終える（「過去データの移行（#12）」の「いつ行うか」と同じ理由。旧系・新系とも書き込みが無く、legacy-stage / legacy-copy の手動実行が毎朝の定期実行と重ならない）。土曜 07:30 の突き合わせで金曜分の記録があること
+
+### 停止の手順
+
+上から順に。1 つの端末で。
+
+1. 停止前の記録: `legacy_state > $W/legacy-before.txt; curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/" > $W/app-before.txt`（旧 URL は IAP のログインへのリダイレクトで 302 のはず。scheduler 2 行が `ENABLED`、invoker 3 行が `["allUsers"]`、app が `SERVING`、アラート 4 本、DTS 5 本がすべて `disabled=false`）
+2. 新系の取りこぼしを補う: 「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。E から金曜の窓までで `legacy_compare_daily` の `legacy_only_snapshots` が 1 以上の日すべて。**Terraform の apply（手順 4）の前に行う**（DTS を無効にすると legacy-stage / legacy-copy の手動実行ができない）。補った日の 1 時間足も作り直す
+3. 1 時間足の旧系の同値の確認を直近 30 日でもう一度流し、件数を #49 に記録する（「1 時間足（#49）」の「旧系との突き合わせ」。`insert_ohlc` を止める前の最後の記録）
+4. Terraform: `infra/prod/variables.tf` の `legacy_stopped` の既定値を `true` にする PR を出す。PR の plan の要約が **update 3**（`google_bigquery_data_transfer_config.legacy_stage` / `legacy_copy` / `legacy_compare` の `disabled`）と **delete 2**（`google_monitoring_alert_policy.this["m1"]` / `["m2"]`）だけであることを見てマージし、deploy の `apply` job を承認する。**Scheduler より先に**行う（先に Scheduler を止めると旧系の M1 が 35 分前後で鳴る）
+5. Scheduler を止める（取り込みの入口。`download_jpx` → GCS → `load_jpx_into_bq` と `insert_ohlc` が動かなくなる）
+
+   ```sh
+   for j in $OLD_JOBS; do gcloud scheduler jobs pause $j --location=$L --project=$P; done
+   ```
+
+6. HTTP 関数の公開を外す（旧ビューアーのデータ API。共通パスワードを知っていても呼べなくなる）
+
+   ```sh
+   for f in $HTTP_FNS; do
+     gcloud functions remove-iam-policy-binding $f --region=$OLD_REGION --project=$P \
+       --member=allUsers --role=roles/cloudfunctions.invoker --format='value(etag)' >/dev/null && echo "removed $f"
+   done
+   ```
+
+7. App Engine を無効化する（旧ビューアー）。`servingStatus` は数分で `USER_DISABLED` になるが、配信が完全に止まるまで**最大 1 時間**かかる（その間は旧 URL が応答することがある。手順 10 で 1 時間後に確かめる）。連携している Datastore の読み書きも止まる（上の表）ので、必ず手順 5 の Scheduler の停止の後に行う
+
+   ```sh
+   app_set USER_DISABLED   # done が false でも受け付け済み。数分おきに app_status を見る
+   app_status              # USER_DISABLED
+   ```
+
+8. 旧コードの削除の PR（EPIC 終了条件 7）: `appengine/`、`functions_py/atm_iv/`、`functions/main.py` の `smile_data`・`atm_data`・`check_auth` と `auth.txt` の読み込み、`memo.txt` の該当のデプロイ手順。`download_jpx` / `load_jpx_into_bq`（`functions/main.py` の残り）・`functions_py/timeframe/`（`insert_ohlc`）のコードは #24 まで残す（切り戻しで再開する関数の記録）。plan の差分は 0。判定は `grep -rlE "open\(['\"]auth\.txt" --include=*.py apps functions functions_py appengine` が 0 件（`apps/viewer/tests/test_image.py` は「イメージに auth.txt が無い」ことの検査で文字列を含むので、EPIC の測定コマンドの `grep -rl auth.txt` には当たる。この検査は数えない）
+9. 停止後の記録: `legacy_state > $W/legacy-after.txt; diff $W/legacy-before.txt $W/legacy-after.txt`。差分が次のとおりであること
+
+   - scheduler 2 行が `PAUSED`、invoker 3 行が `[]`、app が `USER_DISABLED`
+   - アラートは `optionchan: M1 ingest ...`・`optionchan: M2 ingest ...` の 2 本だけ（どちらも `True`）
+   - DTS は `legacy-stage` / `legacy-copy` / `legacy-compare` が `disabled=true`、`quality-daily` / `atm-hourly` が `disabled=false`
+   - 新系は変わっていない: `gcloud scheduler jobs describe ingest --location=$L --project=$P --format='value(state)'` が `ENABLED`（`legacy_state` の対象外なので別に見る）
+
+10. 呼び出しが止まったこと（手順 5 の 5 分後以降）と、関数が公開されていないこと:
+
+    ```sh
+    gcloud logging read 'resource.type="cloud_function" AND resource.labels.region="'$OLD_REGION'" AND textPayload:"Function execution started"' \
+      --project=$P --freshness=5m --format='value(resource.labels.function_name)' | grep -c .   # 0
+    for f in $HTTP_FNS; do
+      u=$(gcloud functions describe $f --region=$OLD_REGION --project=$P --format='value(httpsTrigger.url)')
+      echo "$f $(curl -s -o /dev/null -w '%{http_code}' "$u")"   # 403
+    done
+    # 新系の ingest が毎分動き続けていること（直近 5 分の 2xx。時間外も 204 で数える）
+    gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="ingest" AND httpRequest.status>=200 AND httpRequest.status<300' \
+      --project=$P --freshness=5m --format='value(timestamp)' | grep -c .   # 4〜5
+    # 手順 7 の 1 時間後: 旧 URL が配信されないこと（手順 1 の記録（302）と違い、200・302 でない）
+    curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/"; cat $W/app-before.txt
+    ```
+
+    新系の ingest の 2xx が 0 なら、新系の M1 より先に「新しい取り込み（ingest）」の手順で原因を見る（旧系の停止とは独立しているはずなので、旧系を戻す前に新系を調べる）
+
+11. 結果を #14 にコメントする（停止した日時（分まで）と、手順 9・10 の要約。`diff` の全文・URL は貼らない）
+
+### 停止後の確認（2 週間）
+
+止めた日から **2 週間（10 営業日以上）**。毎朝 07:45 以降に見て、要約を #14 に記録する（週 1 回まとめてよい。異常はその日に）。
+
+- 新系の取り込み: 「日次の品質チェックと新旧の突き合わせ（#40）」の「日次の確認」の `quality_daily`（`violations` が 0、取引日の `snapshots` が止める前の同じ曜日と同程度）。legacy-compare は止めているので、その結果は増えない（実行の状態も見なくてよい）
+- 新系のアラート: 新系の M1・M2 の通知が来たら、「新しい取り込みの監視（#35）」の手順で原因を調べ、**誤報**（アラートの定義の誤り）か **実障害**か、取りこぼしが残ったか（07:00 の照合の `raw_unrecovered`）を記録する
+- 旧系が止まったまま: `legacy_state` が手順 9 と同じ（誰かが戻していない）、手順 10 の実行数が `--freshness=1d` で 0
+- 課金（止めてから 3 日以上たってから。反映は 1 日ほど遅れる）: 旧系のサービスの日ごとの費用が止めた翌日から 0
+
+  ```sh
+  bq query --project_id=$P --use_legacy_sql=false '
+  SELECT DATE(usage_start_time, "Asia/Tokyo") AS d, service.description AS service, ROUND(SUM(cost), 2) AS cost
+  FROM `'"$P"'.PaymentInfo.gcp_billing_export_v1_*`
+  WHERE project.id = "'"$P"'" AND usage_start_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 14 DAY)
+    AND service.description IN ("Cloud Functions", "App Engine", "Cloud Pub/Sub", "Cloud Datastore", "Cloud Firestore", "Cloud Scheduler")
+  GROUP BY d, service HAVING cost > 0 ORDER BY d, service'
+  ```
+
+  Cloud Scheduler はジョブ数で課金されるので、一時停止中のジョブが数えられて 0 にならないことがある（請求先アカウントの無料枠 3 ジョブの中なら 0。削除は #24）。GCS `optionchan` の保存料金は中身が 3 日で消えるので 0 に近づく
+
+### #24 に進む判断
+
+次をすべて満たしたら #14 を閉じ、#24（不可逆）に進む。#24 の前に所有者の確認を取る（関数・Pub/Sub・Datastore は消すと戻せず、python37 の関数は再デプロイもできない）。
+
+1. 止めてから 2 週間（10 営業日以上）たち、その間に切り戻していない
+2. 新系の M1・M2 の誤報が 0、新系の取りこぼし（07:00 の照合で回収できずに残ったもの）が 0（target.md 6 章 5a の完了判定）。実障害で鳴った場合は、原因と対応が #14 に記録され、旧系を戻す必要が無かったこと
+3. 2 週間の `quality_daily` の `violations` がすべて 0
+4. 旧系の関数の実行が 0、App Engine が `USER_DISABLED`、Scheduler 2 ジョブが `PAUSED` のまま
+5. 課金エクスポートで Cloud Functions・App Engine の日ごとの費用が止めた翌日から 0
+6. 旧ビューアーが無くて困ったことが無い（所有者）
+7. EPIC 終了条件 5（旧系向けアラート 0 本）・7（`allUsers` の付いた関数 0、`auth.txt` を読むコード 0）を満たしている（下の「EPIC の終了条件の判定」）
+
+### EPIC の終了条件の判定（#14 の担当分）
+
+```sh
+# 5: 旧系向けアラート 0 本、新系向けが 2 本以下（2027-09-01 の時点でも同じであること）
+gcloud monitoring policies list --project=$P --format='value(displayName,enabled)' | grep '^optionchan: '   # ingest の 2 本だけ
+# 7: allUsers / allAuthenticatedUsers の付いた関数・Cloud Run サービスが 0
+for f in $(gcloud functions list --project=$P --format='value(name.basename())'); do
+  r=$(gcloud functions list --project=$P --filter="name~/$f\$" --format='value(name.segment(3))')
+  gcloud functions get-iam-policy $f --region=$r --project=$P --format=json | jq -r --arg f $f '.bindings[]?.members[] | select(test("^all")) | $f'
+done | grep -c .   # 0
+for s in $(gcloud run services list --project=$P --format='value(metadata.name)'); do
+  gcloud run services get-iam-policy $s --region=$L --project=$P --format=json | jq -r --arg s $s '.bindings[]?.members[] | select(test("^all")) | $s'
+done | grep -c .   # 0
+# 7: auth.txt を読むコード 0（手順 8 の判定）
+grep -rlE "open\(['\"]auth\.txt" --include=*.py apps functions functions_py appengine | grep -c .   # 0
+```
+
+### 切り戻し
+
+戻すのは新系に問題が見つかり、旧系の取り込み・旧ビューアーをもう一度使う必要があるとき。止めていた間の旧系のデータは戻らない（JPX のページは今の値だけ）。その間は新系のデータだけになる。
+
+**全部を戻す**（下の順。App Engine を先に戻すのは、無効化中は連携している Datastore の読み書きも止まり、`download_jpx`（前回の先物の時刻を読み書きする）が失敗するため。`SERVING` に戻してから Datastore が使えるまで時間がかかることがあるので、Scheduler の再開の後に `download_jpx` の実行とエラーを見る）:
+
+```sh
+app_set SERVING; sleep 60; app_status   # SERVING
+for f in $HTTP_FNS; do
+  gcloud functions add-iam-policy-binding $f --region=$OLD_REGION --project=$P \
+    --member=allUsers --role=roles/cloudfunctions.invoker --format='value(etag)' >/dev/null && echo "added $f"
+done
+for j in $OLD_JOBS; do gcloud scheduler jobs resume $j --location=$L --project=$P; done
+# 5 分後: download_jpx の実行が再開していること（取引時間外も毎分起動する）
+gcloud logging read 'resource.type="cloud_function" AND resource.labels.function_name="download_jpx" AND textPayload:"Function execution started"' \
+  --project=$P --freshness=5m --format='value(timestamp)' | grep -c .   # 1 以上
+```
+
+GitHub secret `TF_ALERT_POLICY_IDS` に消したポリシー（`m1`・`m2`）の ID が残っていれば、PR の前に消す（`gh secret delete TF_ALERT_POLICY_IDS --repo $REPO`。残っていると作り直した後の import が古い ID を探す）。続けて `legacy_stopped` の既定値を `false` に戻す PR（plan は create 2（`m1`・`m2`）と update 3（DTS の `disabled`））。**Scheduler の再開と download_jpx の実行を確かめてから**承認する（先に作ると旧系の M1 が鳴る）。作成後に旧系の M1 が鳴ったら、上の download_jpx の実行数を見る。legacy-compare は再開の翌朝から動き、止めていた間の日は旧系の行が無いので `legacy_snapshots = 0`（営業日に数えない）。最後に `legacy_state` が手順 1 の記録と同じになることを `diff` で見る。手順 8 の旧コードの削除は戻さなくてよい（デプロイ済みの関数・アプリは変わっていない）。
+
+**一部だけ戻す**:
+
+| 戻すもの | 手順 | 注意 |
+|---|---|---|
+| 旧ビューアーだけ（閲覧に旧画面が要る） | App Engine を `SERVING`、HTTP 関数 3 つに `allUsers` | 旧データセットは止めた時点までしか無い（取り込みは止まったまま）。公開を戻している間は、予算アラートの備え（#21）だけになる。用が済んだらまた止める |
+| 旧系の取り込みだけ | App Engine を `SERVING`（連携している Datastore を `download_jpx` が使うため）、Scheduler を `resume`、`legacy_stopped = false` の PR | 旧ビューアーは止めたままでよい |
 
 ## 取引カレンダーの更新
 

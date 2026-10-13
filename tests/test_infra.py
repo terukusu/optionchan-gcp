@@ -156,3 +156,41 @@ def test_viewer_iap_members_has_no_default():
     assert m
     assert 'default' not in m.group(1)
     assert 'validation' in m.group(1)
+
+
+# ---- 旧系の停止（#14、target.md 6 章 5a） ----
+
+LEGACY_DTS = {'legacy_stage', 'legacy_copy', 'legacy_compare'}
+
+
+def test_legacy_stopped_defaults_to_false():
+    """既定のままなら旧系に触れない（plan 差分 0）。止める・戻すは既定値を変える PR で行う"""
+    tf = dict(all_tf())['prod/variables.tf']
+    m = re.search(r'^variable\s+"legacy_stopped"\s*\{(.*?)^\}', tf, re.M | re.S)
+    assert m
+    assert re.search(r'^\s*type\s*=\s*bool$', m.group(1), re.M)
+    assert re.search(r'^\s*default\s*=\s*false$', m.group(1), re.M)
+
+
+def test_legacy_stopped_disables_only_legacy_dts():
+    """legacy_stopped で無効にするのは新旧の突き合わせの 3 本だけ（品質チェックと 1 時間足は動かし続ける）"""
+    for name, body in DTS_BLOCKS.items():
+        short = name.rsplit('.', 1)[1]
+        has = re.search(r'^\s*disabled\s*=\s*var\.legacy_stopped$', body, re.M)
+        if short in LEGACY_DTS:
+            assert has, name
+        else:
+            assert 'disabled' not in body, name
+
+
+def test_legacy_stopped_removes_only_legacy_alerts():
+    """legacy_stopped で消すアラートは旧系の m1・m2 だけ（新系の ingest_m1・ingest_m2 は残す）"""
+    tf = dict(all_tf())['prod/monitoring.tf']
+    m = re.search(r'^\s*legacy_alert_policies\s*=\s*\{(.*?)^\s*\}', tf, re.M | re.S)
+    assert m
+    assert re.findall(r'^\s*(\w+)\s*=', m.group(1), re.M) == ['m1', 'm2']
+    assert ('alert_policies = merge({ for k, v in local.legacy_alert_policies : k => v if !var.legacy_stopped }, {'
+            in tf)
+    # 取り込みの import は作るポリシーだけに絞る（消したポリシーの ID が secret に残っていても plan が通る）
+    imports = dict(all_tf())['prod/imports.tf']
+    assert 'if contains(keys(local.alert_policies), k)' in imports

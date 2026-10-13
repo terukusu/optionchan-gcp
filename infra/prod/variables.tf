@@ -40,3 +40,13 @@ variable "ingest_paused" {
   type        = bool
   default     = false
 }
+
+# 旧系の停止（#14、target.md 6 章 5a）。true にする PR の apply で、旧系向けのアラート m1・m2 を消し（monitoring/ の JSON から
+# 作り直せる）、新旧の突き合わせの DTS 3 本（legacy-stage / legacy-copy / legacy-compare）を無効にする。旧系の Scheduler・関数の公開・
+# App Engine は Terraform 管理外なので、同じ日に gcloud で止める（runbook「旧系の停止（#14、5a）」）。false に戻す PR で元どおり作り直す。
+# 旧系を消す（#24）ときに、この変数と旧系向けの定義をまとめて消す
+variable "legacy_stopped" {
+  description = "true で旧系向けのアラート（m1・m2）を消し、新旧の突き合わせの DTS（legacy-*）を無効にする"
+  type        = bool
+  default     = false
+}
