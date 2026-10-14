@@ -22,10 +22,28 @@ def smile_rows():
     ]
 
 
+def snapshot_rows():
+    """sql/smile_snapshot.sql の行（#79）。1 限月の ATM は put の 25000、2 限月は ATM なし"""
+    def r(month, typ, strike, **kw):
+        base = {"month": month, "type": typ, "target_price": strike,
+                "last_trading_day": date(2026, 11, 12) if month == 1 else date(2026, 12, 10), "is_atm": False,
+                "iv": None, "price": None, "price_time": None, "bid_iv": None, "ask_iv": None, "bid": None, "ask": None}
+        return base | kw
+
+    return [
+        r(1, 2, 24875, bid_iv=19.0, ask_iv=20.0, bid=140, ask=150),
+        r(1, 1, 25000, iv=18.25, price=300, price_time=1760335100, bid_iv=18.0, ask_iv=0.0, bid=295, ask=305),
+        r(1, 2, 25000, iv=18.5, price=260, price_time=1760335140, bid_iv=18.25, ask_iv=18.75, bid=255, ask=265,
+          is_atm=True),
+        r(2, 1, 25000, iv=17.0, price=600, bid_iv=16.5, ask_iv=17.5),
+    ]
+
+
 def ok_results():
     return {
         "latest_snapshot": [{"snapshot_at": SNAP}],
         "smile": smile_rows(),
+        "smile_snapshot": snapshot_rows(),
         "atm_iv_meta": [{"last_started_at": datetime(2026, 10, 12, 21, tzinfo=UTC)}],
         "atm_iv": [{"open": 18.0, "high": 19.0, "low": 17.5, "close": 18.5,
                     "started_at": datetime(2026, 10, 12, 21, tzinfo=UTC)}],
@@ -182,7 +200,7 @@ def test_today_is_jst():
 
 
 @pytest.mark.parametrize("path", ["/", "/smile", "/atm_iv", "/smile_data", "/atm_iv_data?d=0", "/static/smile.js",
-                                  "/static/viewer.css", "/nonexistent"])
+                                  "/static/viewer.css", "/nonexistent", "/smile_snapshot", "/smile_snapshot?at=abc"])
 def test_security_headers(make, path):
     # N2: すべての応答（ページ・CSV・400・静的ファイル・404）に付ける
     client, _ = make()
@@ -204,6 +222,119 @@ def test_d_with_trailing_newline_is_bad_request(make):
     client, runner = make()
     assert client.get("/atm_iv_data?d=7%0A").status_code == 400
     assert runner.calls == []
+
+
+# ---- /smile_snapshot（#79） ----
+
+SEC = timedelta(seconds=1)
+
+
+def test_smile_snapshot_latest(make):
+    client, runner = make()
+    res = client.get("/smile_snapshot")
+    assert res.status_code == 200
+    assert res.headers["Content-Type"] == "text/csv; charset=utf-8"
+    assert res.headers["Cache-Control"] == "no-cache"
+    lines = res.get_data(as_text=True).split("\n")
+    # メタ行: スナップショットの UNIX 秒, 1 限月の最終取引日, ATM, 2 限月の最終取引日, ATM（2 限月は ATM なし）
+    assert lines[0] == f"{int(SNAP.timestamp())},2026-11-12,25000,2026-12-10,"
+    # month,type,target_price,iv,price,price_time,bid_iv,ask_iv,bid,ask,mid_iv,otm（ask_iv の 0 は空・mid なし）
+    assert lines[1:-1] == [
+        "1,2,24875,,,,19.0,20.0,140,150,19.5,1",
+        "1,1,25000,18.25,300,1760335100,18.0,,295,305,,1",
+        "1,2,25000,18.5,260,1760335140,18.25,18.75,255,265,18.5,0",
+        "2,1,25000,17.0,600,,16.5,17.5,,,17.0,0",
+    ]
+    assert lines[-1] == ""
+    # at なし = now。探す範囲は [now − 14 日, now]（latest_runs は [start, end) なので end は +1 秒）
+    assert runner.calls == [
+        ("latest_snapshot", {"start_at": NOW - timedelta(days=14), "end_at": NOW + SEC}),
+        ("smile_snapshot", {"start_at": SNAP, "end_at": SNAP + SEC}),
+    ]
+
+
+def test_smile_snapshot_at(make):
+    client, runner = make()
+    at = datetime(2026, 10, 9, 21, 0, tzinfo=UTC)
+    assert client.get(f"/smile_snapshot?at={int(at.timestamp())}").status_code == 200
+    # at ちょうどのスナップショットを含む: [at − 14 日, at + 1 秒)
+    assert runner.calls[0] == ("latest_snapshot", {"start_at": at - timedelta(days=14), "end_at": at + SEC})
+    assert runner.calls[1] == ("smile_snapshot", {"start_at": SNAP, "end_at": SNAP + SEC})
+    assert all(type(v) is datetime for _, p in runner.calls for v in p.values())
+
+
+@pytest.mark.parametrize("ahead", [timedelta(seconds=1), timedelta(days=1), timedelta(days=3650)])
+def test_smile_snapshot_future_at_is_now(make, ahead):
+    # 未来の at は 400 にせず now に縮める（探す範囲の終わりが now）
+    client, runner = make()
+    res = client.get(f"/smile_snapshot?at={int((NOW + ahead).timestamp())}")
+    assert res.status_code == 200
+    assert runner.calls[0][1] == {"start_at": NOW - timedelta(days=14), "end_at": NOW + SEC}
+
+
+@pytest.mark.parametrize("at", ["1262304000", "01262304000", "1760000000"])
+def test_parse_at_accepts(at):
+    assert api.parse_at(at, NOW) == datetime.fromtimestamp(int(at), UTC)
+
+
+def test_parse_at_default_is_now():
+    assert api.parse_at(None, NOW) == NOW
+
+
+@pytest.mark.parametrize("query", [
+    "at=-1", "at=1.5", "at=abc", "at=", "at=123456789012", "at=1760000000%0A", "at=%201760000000", "at=1e9",
+    "at=1262303999", "at=0", "at=0x10", "at=1760000000;DROP",
+])
+def test_smile_snapshot_bad_request(make, query, capsys):
+    client, runner = make()
+    res = client.get(f"/smile_snapshot?{query}")
+    assert res.status_code == 400
+    # BigQuery を呼ばない。入力値を応答・ログに出さない
+    assert runner.calls == []
+    assert res.get_data(as_text=True) == "bad request\n"
+    out = capsys.readouterr().out
+    record = json.loads(out.strip().splitlines()[-1])
+    assert record["event"] == "bad_request" and record["endpoint"] == "smile_snapshot" and record["param"] == "at"
+    value = query.split("=", 1)[1]
+    if value:
+        assert value not in out
+
+
+@pytest.mark.parametrize("name", ["latest_snapshot", "smile_snapshot"])
+def test_smile_snapshot_query_error_is_500(make, capsys, name):
+    results = ok_results()
+    results[name] = RuntimeError("secret detail: project 123456789012 user@example.com")
+    client, _ = make(results)
+    res = client.get("/smile_snapshot")
+    assert res.status_code == 500
+    assert res.get_data(as_text=True) == "internal error\n"
+    out = capsys.readouterr().out
+    record = json.loads(out.strip().splitlines()[-1])
+    assert record["event"] == "query_failed" and record["endpoint"] == "smile_snapshot"
+    assert record["error_type"] == "RuntimeError"
+    assert "secret" not in out and "123456789012" not in out
+
+
+def test_smile_snapshot_no_snapshot_is_empty_200(make):
+    # データなしは 5xx でない: 200 で本文が空（画面は「データがありません」）
+    results = ok_results()
+    results["latest_snapshot"] = [{"snapshot_at": None}]
+    client, runner = make(results)
+    res = client.get("/smile_snapshot?at=1760000000")
+    assert res.status_code == 200 and res.get_data(as_text=True) == ""
+    assert [name for name, _ in runner.calls] == ["latest_snapshot"]
+
+
+def test_smile_snapshot_one_month_only(make):
+    # 限月が 1 つだけのスナップショット: SQL が 1 限月・2 限月に同じ行を返す（smile.sql と同じ割り当て）
+    results = ok_results()
+    one = [r for r in snapshot_rows() if r["month"] == 1]
+    results["smile_snapshot"] = one + [r | {"month": 2} for r in one]
+    client, _ = make(results)
+    lines = client.get("/smile_snapshot").get_data(as_text=True).split("\n")
+    assert lines[0] == f"{int(SNAP.timestamp())},2026-11-12,25000,2026-11-12,25000"
+    body = lines[1:-1]
+    assert [line[2:] for line in body if line.startswith("1,")] == [line[2:] for line in body if line.startswith("2,")]
 
 
 # ---- /atm_iv_bars（#68） ----

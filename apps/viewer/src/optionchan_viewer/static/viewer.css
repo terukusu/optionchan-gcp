@@ -1,20 +1,10 @@
 /* ビューアーの共通スタイル（CSP で inline の style を許さないため、テンプレートから移した） */
-#loading {
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    transform: translate(-50%, -50%);
-}
 #message {
     color: #c00;
 }
-.chart-area {
-    width: 100%;
-    height: 100%;
-}
-.chart-area canvas {
-    width: 100%;
-    height: auto;
+/* /smile の情報の表示（データなし・気配なし。エラーではない。smile.js が classList で切り替える） */
+#message.note-info {
+    color: #555;
 }
 /* /atm_iv（#68。Lightweight Charts は autoSize で枠の大きさに合わせるので、高さを CSS で与える） */
 .chart-title {
@@ -135,5 +125,95 @@
 }
 .attribution {
     font-size: 0.75em;
+    color: #666;
+}
+/* /smile（#79。Chart.js 4 を canvas に描き、拡大縮小・スクロールは smile.js が pointer events で行う） */
+.snapshot-time {
+    font-size: 0.85em;
+    font-weight: normal;
+    margin-left: 0.5em;
+}
+.smile-control .control-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3em 0.6em;
+    margin: 0.3em 0;
+}
+.smile-control label {
+    white-space: nowrap;
+}
+.smile-legend,
+.smile-cursor {
+    margin: 0.3em 0;
+    font-size: 0.85em;
+    overflow-wrap: anywhere;
+}
+.smile-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.2em 1em;
+    min-height: 1.4em;
+}
+.legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3em;
+}
+.smile-cursor {
+    min-height: 3em;
+    font-family: monospace;
+}
+.cursor-row {
+    margin: 0.1em 0;
+}
+.cursor-label {
+    font-weight: bold;
+    margin-right: 0.5em;
+}
+.cursor-field {
+    margin-right: 0.8em;
+    white-space: nowrap;
+}
+/* 凡例の色見本（色は smile.js の COLORS と同じ値） */
+.swatch {
+    display: inline-block;
+    width: 18px;
+    height: 0;
+    border-top: 3px solid #000;
+}
+.swatch-dash {
+    border-top-style: dashed;
+}
+.sw-otm-1 {
+    border-top-color: #1a237e;
+}
+.sw-otm-2 {
+    border-top-color: #7986cb;
+}
+.sw-call-1 {
+    border-top-color: #c62828;
+}
+.sw-call-2 {
+    border-top-color: #ef9a9a;
+}
+.sw-put-1 {
+    border-top-color: #1565c0;
+}
+.sw-put-2 {
+    border-top-color: #90caf9;
+}
+.sw-pin {
+    border-top-color: #9e9e9e;
+}
+.smile-canvas {
+    touch-action: none;
+    cursor: crosshair;
+}
+.smile-canvas.dragging {
+    cursor: grabbing;
+}
+.chart-help {
+    font-size: 0.8em;
     color: #666;
 }

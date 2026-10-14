@@ -11,7 +11,8 @@ from importlib import resources
 
 from . import settings as st
 
-QUERY_NAMES = ("latest_snapshot", "smile", "atm_iv_meta", "atm_iv", "atm_iv_minute", "trading_holidays")
+QUERY_NAMES = ("latest_snapshot", "smile", "smile_snapshot", "atm_iv_meta", "atm_iv", "atm_iv_minute",
+               "trading_holidays")
 _PLACEHOLDER = re.compile(r"\$\{(\w+)\}")
 
 

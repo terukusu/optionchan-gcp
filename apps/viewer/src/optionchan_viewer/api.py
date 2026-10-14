@@ -3,14 +3,14 @@
 runner(name, params) は sql/<name>.sql をパラメータ付きで実行して行（dict）のリストを返す
 （bq.BigQueryRunner。テストでは偽物）。期間はすべて now（サーバーの現在時刻、UTC）から固定の上限で決める
 （リクエストの値で広がるのは /atm_iv_data の d と /atm_iv_bars の start・end だけで、上限は settings.D_MAX・
-settings.BARS_RANGE）。
+settings.BARS_RANGE。/smile_snapshot の at は探す時点を動かすだけで、読む幅は固定）。
 """
 
 import re
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from . import bars, csvfmt
+from . import bars, csvfmt, smile
 from . import settings as st
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -72,6 +72,21 @@ def parse_range(raw_start: str | None, raw_end: str | None, tf: str, now: dateti
     return start, end
 
 
+def parse_at(raw: str | None, now: datetime) -> datetime:
+    """/smile_snapshot の at（UTC の UNIX 秒、#79）→ aware な UTC。省略は now。形は parse_range と同じ
+    （符号・小数・空白・末尾の改行・空は BadRequest）。2010-01-01 UTC より前は BadRequest、未来は now に縮める"""
+    now = _utc(now)
+    if raw is None:
+        return now
+    if not _EPOCH_RE.fullmatch(raw):
+        raise BadRequest("at")
+    at = datetime.fromtimestamp(int(raw), UTC)
+    if at < st.BARS_EPOCH:
+        raise BadRequest("at")
+    # 未来の at は不正にせず now に縮める（画面の時計がサーバーより進んでいても 400 にしない）
+    return min(at, now)
+
+
 def parse_n(raw: str | None) -> int:
     if raw is None:
         return st.N_DEFAULT
@@ -111,6 +126,22 @@ def smile_data(runner, now: datetime) -> str:
     if atm is None:
         raise NoData("no_atm")
     return csvfmt.smile_csv(snapshot_at, atm, rows)
+
+
+def smile_snapshot(runner, at: datetime) -> str:
+    """/smile_snapshot（#79）: at 以前 SEARCH_DAYS 日（[at − 14 日, at]。at ちょうどを含む）で最新の完了した
+    スナップショットの 1 時点を、限月 × 行使価格 × call / put の縦持ちの CSV にする（csvfmt.snapshot_csv）。
+    スナップショットが無ければ空（/atm_iv_bars の「行が無ければ空の 200」と同じ。5xx と区別できる）"""
+    at = _utc(at)
+    # latest_runs は [start, end) なので、at ちょうどのスナップショットを含めるために 1 秒足す（snapshot_at は分の頭）
+    [row] = runner("latest_snapshot", {"start_at": at - timedelta(days=st.SEARCH_DAYS),
+                                       "end_at": at + timedelta(seconds=1)})
+    snapshot_at = row["snapshot_at"]
+    if snapshot_at is None:
+        return ""
+    rows = runner("smile_snapshot", {"start_at": snapshot_at, "end_at": snapshot_at + timedelta(seconds=1)})
+    months, out = smile.snapshot_rows(rows)
+    return csvfmt.snapshot_csv(snapshot_at, months, out)
 
 
 def atm_iv_params(now: datetime, last_started_at: datetime | None, d: int, n: int) -> dict:
