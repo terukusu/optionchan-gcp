@@ -7,6 +7,7 @@
 import os
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 # BigQuery のプロジェクト ID / データセット名として許す形（SQL の識別子に埋めるので厳密に検査する）
 # ドメイン付きのプロジェクト ID（example.com:my-project）も受け付ける。バッククォート・空白・ドットの連続等は拒否
@@ -27,10 +28,25 @@ N_DEFAULT, N_VALUES = 0, (0, 1)  # /atm_iv_data・/atm_iv_bars の n（何番目
 # 1h・1d は 1 時間足（/atm_iv_data と同じ）から
 TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 TF_DEFAULT = "1h"
-# /atm_iv_bars の d（日数）: 足 → (既定, 最小, 最大)。分足は生データを読むので、スキャン量
-# （1 日 約 90 MiB × (d + 1) 日分のパーティション）が 512 MiB 以下になる 3 日まで（#68 AC 6）。
-# 1h・1d は /atm_iv_data と同じ上限
-BARS_D = {"1m": (1, 1, 3), "5m": (1, 1, 3), "15m": (1, 1, 3), "1h": (10, 1, 100), "1d": (100, 1, 100)}
+# /atm_iv_bars の期間（#77。画面に期間の選択は無く、チャートの表示範囲で決まる）: 足 → (既定, 1 回の最大, 遡れる上限)。
+#   既定 = start・end を省いたときの日数（分足は最新のスナップショットの、1h・1d は now の、
+#     その日数前の UTC の 0 時〜now）
+#   1 回の最大 = end − start の上限（日）。分足は生データ（option_price_latest。1 日 約 90 MiB）を読むので、
+#     日の境目に揃えない 3 日でも 4 日分のパーティション（約 360 MiB）で 1 クエリ 512 MiB 以下（#68 AC 6）。
+#     1h・1d は 1 時間足（atm_iv。小さい）を読む
+#   遡れる上限 = start が now の何日前の UTC の 0 時まで許すか（分足だけ。長期間の分足は集計済みテーブルが前提で、
+#     スコープ外）
+BARS_RANGE = {
+    "1m": (1, 3, 31),
+    "5m": (1, 3, 31),
+    "15m": (1, 3, 31),
+    "1h": (10, 100, None),
+    "1d": (100, 400, None),
+}
+BARS_EPOCH = datetime(2010, 1, 1, tzinfo=UTC)  # start の下限（これより前のデータは無い）
+# 日足: 取引日の 1 時間足は 00:00 JST の前（前の取引日の夜間。連休の前の夜間を含む）から始まり、日中（当日）で終わる。
+# [start, end) に 00:00 JST が入る取引日を完全に作るため、1 時間足を start の 10 日前〜end の 1 日後まで読む
+DAILY_LOOKBEHIND_DAYS = 10
 HOLIDAYS_AHEAD_DAYS = 15  # 日足の取引日の判定に読む休業日の先（今日の夜間が属する休み明けの日まで。年末年始を含む）
 QUERY_TIMEOUT_SECONDS = 30  # BigQuery の結果を待つ上限（gunicorn の --timeout 60 より短く）
 

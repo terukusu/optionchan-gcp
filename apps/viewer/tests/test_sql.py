@@ -75,8 +75,9 @@ def test_atm_iv_uses_hourly_bars_and_put():
     assert "SAFE_OFFSET(@n)" in text
     # 限月の候補は直近 10 日（現行の t1 と同じ開区間）
     assert "WHERE started_at > @months_since" in text
-    # N3: 1 時間足・補った足のどちらも d 日の下端で絞る
-    cond = r"WHERE last_trading_day = \(SELECT last_trading_day FROM month\) AND started_at >= @days_start\n"
+    # N3: 1 時間足・補った足のどちらも d 日の下端で絞る。#77: 上端（@range_end）でも
+    cond = (r"WHERE last_trading_day = \(SELECT last_trading_day FROM month\) AND started_at >= @days_start "
+            r"AND started_at < @range_end\n")
     assert len(re.findall(cond, text)) == 2
 
 

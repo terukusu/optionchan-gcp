@@ -27,7 +27,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
 
 * apps/viewer
   * 新しいビューアー（#13 / #52。Python 3.13・uv・Flask）。Cloud Run `viewer`（asia-northeast1）に IAP（Cloud Run への直接設定）の後ろでデプロイする（#53）。アプリに認証は無いので、IAP なし・`allUsers` で公開しない。デプロイ・オーナーの手作業（OAuth クライアント）・確認は docs/runbook.md の「ビューアー（#13）」。ページ `/` `/smile` `/atm_iv` と CSV の API `/smile_data` `/atm_iv_data?d=&n=` は現行（appengine/ + HTTP 関数）と同じ URL・同じ CSV の形式で（旧型の ATM 推移 `/atm`・`/atm_data` は移さない。#58）、BigQuery の新系（`optionchan_tokyo` の最新版のテーブル関数と 1 時間足 `atm_iv`）を直接読む
-  * `/atm_iv` は足（1分・5分・15分・1時間・日足）を切り替えられるローソク足（#68）。データは `/atm_iv_bars?tf=&d=&n=`（`tf` は `1m` `5m` `15m` `1h` `1d`、`d` は日数で分足 1〜3・1 時間足と日足 1〜100、CSV は `/atm_iv_data` と同じ列で値の無い足を除く）。分足は最新版の ATM の put から 1 分足を作り（5・15 分足はアプリで束ねる）、1 時間足・日足は `/atm_iv_data` と同じ 1 時間足から。日足は取引日（夜間は次の取引日。休業日は取引カレンダー `trading_calendar_latest`）ごと
+  * `/atm_iv` は足（1分・5分・15分・1時間・日足）を切り替えられるローソク足（#68）。期間の選択は無く、チャートの表示範囲（スクロール・拡縮）で読む範囲が決まり、端に近づくとその外側を追加で読む。足・限月を変えても表示範囲を保つ。読み込み中はチャート上に表示し、失敗したら再試行できる（#77）。データは `/atm_iv_bars?tf=&n=&start=&end=`（`tf` は `1m` `5m` `15m` `1h` `1d`。`start`・`end` は UTC の UNIX 秒で両方か両方なし（なしは足ごとの既定の範囲）、1 回の上限は分足 3 日（31 日前まで）・1 時間足 100 日・日足 400 日、`end` は now に縮める。読んだ範囲を応答のヘッダ `X-Bars-Start`・`X-Bars-End` で返す。CSV は `/atm_iv_data` と同じ列で値の無い足を除く。費用の見積もりは docs/runbook.md の「ビューアー（#13）」の「コスト」）。分足は最新版の ATM の put から 1 分足を作り（5・15 分足はアプリで束ねる）、1 時間足・日足は `/atm_iv_data` と同じ 1 時間足から。日足は取引日（夜間は次の取引日。休業日は取引カレンダー `trading_calendar_latest`）ごと
   * 設定は環境変数: `GCP_PROJECT`（必須）、`BQ_DATASET`（既定 `optionchan_tokyo`）、`BQ_LOCATION`（既定 `asia-northeast1`）、`MAX_BYTES_BILLED`（既定 1 GiB）。SQL は `src/optionchan_viewer/sql/` にだけ置き、値はクエリパラメータで渡す
   * ブラウザ用ライブラリ（Chart.js（`/smile`）・TradingView Lightweight Charts（`/atm_iv`））は `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
 

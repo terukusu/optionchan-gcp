@@ -1,7 +1,8 @@
 """ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 3 つ（/smile_data /atm_iv_data /atm_iv_bars）。
 
 /smile_data・/atm_iv_data の URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。/atm_iv_bars は /atm_iv の足の
-切り替え用（#68。CSV は /atm_iv_data と同じ列）。認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
+切り替え・表示範囲に応じた読み込み用（#68・#77。CSV は /atm_iv_data と同じ列。期間は start・end）。
+認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
 """
 
 from datetime import UTC, datetime
@@ -57,8 +58,12 @@ def create_app(runner=None, clock=None) -> Flask:
             # BigQuery の例外の本文はプロジェクト番号・アカウントを含みうるので、応答には出さず、ログは型だけ
             log("ERROR", "query_failed", endpoint=endpoint, error_type=type(e).__name__)
             return Response("internal error\n", status=500, content_type="text/plain; charset=utf-8")
+        headers = {}
+        if isinstance(body, tuple):
+            body, headers = body
         res = Response(body, status=200, content_type=CSV_TYPE)
         res.headers["Cache-Control"] = "no-cache"
+        res.headers.update(headers)
         return res
 
     @app.get("/")
@@ -89,12 +94,16 @@ def create_app(runner=None, clock=None) -> Flask:
 
     @app.get("/atm_iv_bars")
     def atm_iv_bars():
+        # 読んだ範囲（UTC の UNIX 秒）を応答のヘッダで返す。画面はこれで取得済みの範囲を覚え、
+        # 表示範囲の外だけを取りに来る（#77）
         def produce():
-            # 検証を先に（tf → d → n。不正なら BigQuery を呼ばない）
+            # 検証を先に（tf → n → start・end。不正なら BigQuery を呼ばない）
             tf = api.parse_tf(request.args.get("tf"))
-            d = api.parse_bars_d(request.args.get("d"), tf)
             n = api.parse_n(request.args.get("n"))
-            return api.atm_iv_bars(runner, clock(), tf, d, n)
+            now = clock()
+            rng = api.parse_range(request.args.get("start"), request.args.get("end"), tf, now)
+            body, start, end = api.atm_iv_bars(runner, now, tf, n, rng)
+            return body, {"X-Bars-Start": str(int(start.timestamp())), "X-Bars-End": str(int(end.timestamp()))}
 
         return csv_response("atm_iv_bars", produce)
 

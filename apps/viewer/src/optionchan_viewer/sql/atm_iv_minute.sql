@@ -1,5 +1,5 @@
--- /atm_iv_bars の分足（1m・5m・15m。#68）: [@start_at, @end_at)（アプリが最新のスナップショットの d 日前の UTC の 0 時〜now を
--- 渡す。d は最大 3 日）の最新版の option_price の ATM の put を、限月の 1 分ごとの iv の OHLC にする。5m・15m はアプリが束ねる。
+-- /atm_iv_bars の分足（1m・5m・15m。#68・#77）: [@start_at, @end_at)（アプリが要求の start・end（最大 3 日）か、既定の最新のスナップショットの 1 日前の UTC の 0 時〜now を
+-- 渡す。遡れるのは now の 31 日前まで）の最新版の option_price の ATM の put を、限月の 1 分ごとの iv の OHLC にする。5m・15m はアプリが束ねる。
 --   限月 = 窓の中の last_trading_day のうち @today（JST の今日）以降を昇順に並べた @n 番目（範囲外は NULL → 0 行。並べ方は sql/atm_iv.sql と同じだが、候補を探すのは直近 10 日ではなく読む窓の中）
 --   足 = TIMESTAMP_TRUNC(created_at, MINUTE) ごと。open / high / low / close は sql/ohlc/atm_hourly.sql の bars の iv の 4 式と同じ
 --        （created_at が最も早い / 遅い NULL でない値、最大 / 最小。同じ created_at の行の順は target_price で決める）

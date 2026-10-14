@@ -24,9 +24,6 @@
             <option value="1d">日足</option>
         </select>
     </label>
-    <label>期間
-        <select id="days"></select>
-    </label>
     <label>限月
         <select id="nmonth">
             <option value="0" selected>0</option>
@@ -35,11 +32,24 @@
     </label>
 </div>
 <div id="legend" class="chart-legend"></div>
-<div id="chart" class="chart-box"></div>
-<div id="message"></div>
-<div id="loading">
-    <img src="/static/loading.gif" alt="読み込み中">
+<div id="chart-wrap" class="chart-wrap" aria-busy="true">
+    <div id="chart" class="chart-box"></div>
+    <!-- 読み込み中（最初・足と限月の切り替え）: チャートを薄くしてスピナー -->
+    <div id="chart-busy" class="chart-busy" role="status" hidden>
+        <span class="spinner" aria-hidden="true"></span><span>読み込み中…</span>
+    </div>
+    <!-- 表示範囲の外の追加の読み込み: 端のバッジ -->
+    <div id="chart-edge" class="chart-edge" role="status" hidden>
+        <span class="spinner spinner-small" aria-hidden="true"></span><span id="chart-edge-text"></span>
+    </div>
+    <div id="chart-error" class="chart-error" role="alert" hidden>
+        <div class="chart-error-box">
+            <span id="chart-error-text"></span>
+            <button id="chart-retry" type="button">再試行</button>
+        </div>
+    </div>
 </div>
+<div id="message" class="chart-note"></div>
 <p class="attribution">
     チャート: <a id="attribution-link" rel="noopener noreferrer" target="_blank">TradingView Lightweight Charts™</a>
     Copyright (c) 2025 TradingView, Inc.

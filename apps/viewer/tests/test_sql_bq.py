@@ -462,15 +462,24 @@ def test_bars_hourly_same_as_atm_hourly_values():
 
 
 def test_bars_api_minute_window():
-    # API: 窓は最新のスナップショットの d 日前の UTC の 0 時から。d=3 なら 10-10 00:00 UTC（土曜 09:00 JST）以降
+    # API（#77）: 範囲 [start, end) の足。10-10 00:00 UTC（土曜 09:00 JST）〜now
     fx = fixtures(BARS_OPTIONS, runs=[{"snapshot_at": utc(13, 5, 59)}], calendar=BARS_CALENDAR)
     run = fixture_runner(fx)
-    lines = api.atm_iv_bars(run, NOW, "15m", 3, 0).splitlines()
-    want = [r for r in reference_bars(900, M1) if r["started_at"] >= datetime(2026, 10, 10, tzinfo=UTC)]
+    start = datetime(2026, 10, 10, tzinfo=UTC)
+    lines = api.atm_iv_bars(run, NOW, "15m", 0, (start, NOW))[0].splitlines()
+    want = [r for r in reference_bars(900, M1) if r["started_at"] >= start]
     assert lines == csvfmt.atm_iv_csv(want).splitlines()
     assert lines and all(not line.startswith(",") for line in lines)
-    assert api.atm_iv_bars(run, NOW, "1m", 3, 0) == csvfmt.atm_iv_csv(
-        [r for r in bars.drop_empty(minute_rows(0)) if r["started_at"] >= datetime(2026, 10, 10, tzinfo=UTC)])
+    assert api.atm_iv_bars(run, NOW, "1m", 0, (start, NOW))[0] == csvfmt.atm_iv_csv(
+        [r for r in bars.drop_empty(minute_rows(0)) if r["started_at"] >= start])
+    # 上端: 10-09 16:10 JST より前だけ
+    end = jdt(9, 16, 10)
+    assert api.atm_iv_bars(run, NOW, "1m", 0, (jdt(9, 0), end))[0] == csvfmt.atm_iv_csv(
+        [r for r in bars.drop_empty(minute_rows(0)) if r["started_at"] < end])
+    # 既定（範囲なし）: 最新のスナップショットの 1 日前の UTC の 0 時（10-12）から
+    text, s, e = api.atm_iv_bars(run, NOW, "1m", 0)
+    assert (s, e) == (datetime(2026, 10, 12, tzinfo=UTC), NOW)
+    assert text == csvfmt.atm_iv_csv([r for r in bars.drop_empty(minute_rows(0)) if r["started_at"] >= s])
 
 
 # 日足用の 1 時間足（atm_iv）。最後の足は土曜 05:00 JST、その後（火曜の日中）は option_price から補う
@@ -500,17 +509,19 @@ BARS_HOURLY = [
 def test_bars_daily_friday_night_goes_to_next_trading_day(calendar, want):
     fx = fixtures(BARS_OPTIONS, BARS_HOURLY, calendar=calendar)
     run = fixture_runner(fx)
-    assert api.atm_iv_bars(run, NOW, "1d", 7, 0).splitlines() == want
+    rng = (datetime(2026, 10, 6, tzinfo=UTC), NOW)
+    assert api.atm_iv_bars(run, NOW, "1d", 0, rng)[0].splitlines() == want
     # 2 限月は M2 の足だけ
-    m2 = api.atm_iv_bars(run, NOW, "1d", 7, 1).splitlines()
+    m2 = api.atm_iv_bars(run, NOW, "1d", 1, rng)[0].splitlines()
     assert m2[0] == "60.0,60.0,60.0,60.0,2026-10-08 15:00:00+00:00"
     assert all(float(line.split(",")[1]) >= 50 for line in m2)
 
 
-def test_bars_daily_drops_partial_first_day():
-    # d=4: 1 時間足は 5 日分（10-08 00:00 UTC = 木曜 09:00 JST から）読み、夜間が欠けた木曜の日足は出さない
+def test_bars_daily_range_by_trading_day():
+    # 範囲 [10-08 00:00 UTC, now): 00:00 JST（started_at）が範囲の前の木曜（10-07 15:00 UTC）の日足は出さない
     fx = fixtures(BARS_OPTIONS, BARS_HOURLY, calendar=BARS_CALENDAR)
-    lines = api.atm_iv_bars(fixture_runner(fx), NOW, "1d", 4, 0).splitlines()
+    rng = (datetime(2026, 10, 8, tzinfo=UTC), NOW)
+    lines = api.atm_iv_bars(fixture_runner(fx), NOW, "1d", 0, rng)[0].splitlines()
     assert [line.split(",")[4] for line in lines] == ["2026-10-08 15:00:00+00:00", "2026-10-12 15:00:00+00:00"]
 
 
@@ -519,8 +530,24 @@ def test_bars_hourly_same_as_atm_iv_data():
     fx = fixtures(ATM_IV_OPTIONS, ATM_IV_HOURLY)
     for d, n in ((7, 0), (20, 0), (7, 1)):
         data = api.atm_iv_data(fixture_runner(fx), NOW, d, n).splitlines()
-        assert api.atm_iv_bars(fixture_runner(fx), NOW, "1h", d, n).splitlines() == [
+        rng = (api.utc_day(NOW - timedelta(days=d)), NOW)
+        assert api.atm_iv_bars(fixture_runner(fx), NOW, "1h", n, rng)[0].splitlines() == [
             line for line in data if not line.startswith(",")]
+
+
+def test_bars_hourly_past_range_without_fill():
+    # #77: 過去だけの範囲（end が補う分の始まり以前）は生データを読まず、1 時間足だけから同じ足を返す
+    fx = fixtures(ATM_IV_OPTIONS, ATM_IV_HOURLY)
+    # 1 時間足の最後は 10-12 23:00 UTC（補う分は 10-13 00:00 から）。範囲の上端は 10-12 22:00
+    end = datetime(2026, 10, 12, 22, tzinfo=UTC)
+    start = api.utc_day(NOW - timedelta(days=20))
+    params = api.hourly_params(NOW, datetime(2026, 10, 12, 23, tzinfo=UTC), start, end, 0)
+    assert params["fill_end"] < params["fill_start"]
+    data = api.atm_iv_data(fixture_runner(fx), NOW, 20, 0).splitlines()
+    got = api.atm_iv_bars(fixture_runner(fx), NOW, "1h", 0, (start, end))[0]
+    want = [line for line in data if not line.startswith(",") and datetime.fromisoformat(line.split(",")[4]) < end]
+    assert got.splitlines() == want
+    assert len(want) == 6  # 10-03・10-08 の 2 本・10-12 の 3 本（10-13 の補った足と 10-12 22:00 以降は入らない）
 
 
 # ---- 実テーブルの dry run（AC 6） ----
@@ -549,29 +576,34 @@ def test_dry_run_real_tables(name, record_property):
 
 
 def bars_dry_run_params(end):
-    """/atm_iv_bars が許す最大の期間で、end（最新の完了した日の終わり = UTC の 0 時）を終わりにしたパラメータ。
-    当日（書き込み中）のパーティションは dry run が 0 を返すので含めない"""
-    snapshot_at = end - timedelta(minutes=1)
-    _, _, minute_max = api.st.BARS_D["1m"]
-    hourly = api.atm_iv_params(end, None, api.st.BARS_D["1d"][2] + 1, 0)
+    """/atm_iv_bars が許す 1 回の最大の期間（settings.BARS_RANGE）で、end（最新の完了した日の終わり = UTC の 0 時）を
+    終わりにしたパラメータ（#77）。当日（書き込み中）のパーティションは dry run が 0 を返すので含めない。
+    分足は日の境目に揃えない 3 日（4 日分のパーティション）が最大"""
+    minute_max = api.st.BARS_RANGE["1m"][1]
+    daily_max = api.st.BARS_RANGE["1d"][1]
+    daily_start = end - timedelta(days=daily_max + api.st.DAILY_LOOKBEHIND_DAYS)
     return {
-        "atm_iv_minute": {"start_at": api.utc_day(snapshot_at - timedelta(days=minute_max)), "end_at": end,
-                          "today": api.jst_date(end), "n": 0},
-        "trading_holidays": {"start_date": api.jst_date(hourly["days_start"]) - timedelta(days=1),
-                             "end_date": api.jst_date(end) + timedelta(days=api.st.HOLIDAYS_AHEAD_DAYS)},
-        # 1h・1d は /atm_iv_data と同じクエリ（補う分は最大 3 日。1 時間足が無いときが最大）
-        "atm_iv": hourly,
+        "atm_iv_minute": ("atm_iv_minute", {"start_at": end - timedelta(days=minute_max + 1, hours=-1),
+                                            "end_at": end - timedelta(days=1, hours=-1), "today": api.jst_date(end),
+                                            "n": 0}),
+        "trading_holidays": ("trading_holidays", {
+            "start_date": api.jst_date(daily_start) - timedelta(days=1),
+            "end_date": api.jst_date(end) + timedelta(days=api.st.HOLIDAYS_AHEAD_DAYS)}),
+        # 1h・1d の最新を含む範囲（補う分は最大 3 日。1 時間足が無いときが最大）
+        "atm_iv": ("atm_iv", api.hourly_params(end, None, daily_start, end, 0)),
+        # 過去だけの範囲（左への追加読み込み）: 生データを読まない
+        "atm_iv_past": ("atm_iv", api.hourly_params(end, None, daily_start, end - timedelta(days=5), 0)),
     }
 
 
-@pytest.mark.parametrize("name", ["atm_iv_minute", "trading_holidays", "atm_iv"])
+@pytest.mark.parametrize("name", ["atm_iv_minute", "trading_holidays", "atm_iv", "atm_iv_past"])
 def test_dry_run_bars_within_512mib(name, record_property):
     now = datetime.now(UTC)
     # UTC の 1 日（JST 09:00〜翌 08:59）は日中 + 夜間。夜間が終わった後（22:00 UTC = 07:00 JST 以降）なら
     # 当日の UTC の日も書き込みが終わっている
     end = api.utc_day(now) + timedelta(days=1 if now.hour >= 22 else 0)
-    params = bars_dry_run_params(end)[name]
-    nbytes = bq(real_sql(name), params, dry_run=True, maximum_bytes=GiB)
+    sql_name, params = bars_dry_run_params(end)[name]
+    nbytes = bq(real_sql(sql_name), params, dry_run=True, maximum_bytes=GiB)
     record_property("bytes", nbytes)
     print(f"dry run {name} (end {end:%Y-%m-%d}): {nbytes} bytes ({nbytes / MiB:.1f} MiB)")
     assert nbytes <= 512 * MiB
