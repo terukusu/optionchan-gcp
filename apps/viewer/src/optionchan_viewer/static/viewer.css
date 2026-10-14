@@ -37,6 +37,102 @@
     height: 70vh;
     min-height: 320px;
 }
+/* /atm_iv の読み込み中・エラー（#77）。表示の切り替えは hidden 属性（JS は DOM のプロパティだけを触る。CSP） */
+[hidden] {
+    display: none !important;
+}
+.chart-wrap {
+    position: relative;
+}
+.chart-note {
+    color: #666;
+    min-height: 1.4em;
+}
+.chart-busy {
+    position: absolute;
+    inset: 0;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.6em;
+    background: rgba(255, 255, 255, 0.65);
+    font-weight: bold;
+    color: #333;
+    cursor: progress;
+}
+.chart-edge {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    padding: 0.3em 0.7em;
+    border-radius: 4px;
+    background: rgba(33, 33, 33, 0.8);
+    color: #fff;
+    font-size: 0.85em;
+    pointer-events: none;
+}
+.chart-edge-right {
+    left: auto;
+    right: 70px;
+}
+.chart-error {
+    position: absolute;
+    top: 8px;
+    left: 0;
+    right: 0;
+    z-index: 11;
+    display: flex;
+    justify-content: center;
+    pointer-events: none;
+}
+.chart-error-dim {
+    top: 0;
+    bottom: 0;
+    align-items: center;
+    background: rgba(255, 255, 255, 0.65);
+}
+.chart-error-box {
+    display: flex;
+    align-items: center;
+    gap: 0.8em;
+    padding: 0.5em 1em;
+    border: 1px solid #c00;
+    border-radius: 4px;
+    background: #fff5f5;
+    color: #c00;
+    pointer-events: auto;
+}
+.spinner {
+    display: inline-block;
+    width: 28px;
+    height: 28px;
+    border: 3px solid rgba(0, 0, 0, 0.15);
+    border-top-color: #2962ff;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+.spinner-small {
+    width: 14px;
+    height: 14px;
+    border-width: 2px;
+    border-color: rgba(255, 255, 255, 0.3);
+    border-top-color: #fff;
+}
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+@media (prefers-reduced-motion: reduce) {
+    .spinner {
+        animation-duration: 3s;
+    }
+}
 .attribution {
     font-size: 0.75em;
     color: #666;

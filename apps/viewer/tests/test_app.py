@@ -173,7 +173,7 @@ def test_atm_iv_params_fill_start():
     assert p["months_since"] == datetime(2026, 10, 3, tzinfo=UTC)
     assert p["hourly_start"] == datetime(2026, 10, 3, tzinfo=UTC)
     assert api.atm_iv_params(now, None, 20, 0)["hourly_start"] == datetime(2026, 9, 23, tzinfo=UTC)
-    assert p["end_at"] == now and p["today"] == date(2026, 10, 13)
+    assert p["fill_end"] == now and p["range_end"] == now and p["today"] == date(2026, 10, 13)
 
 
 def test_today_is_jst():
@@ -242,19 +242,32 @@ def csv_times(text):
     return [line.split(",")[4] for line in text.splitlines()]
 
 
-@pytest.mark.parametrize("tf,names,count", [
-    ("1m", ["latest_snapshot", "atm_iv_minute"], 3),
-    ("5m", ["latest_snapshot", "atm_iv_minute"], 2),
-    ("15m", ["latest_snapshot", "atm_iv_minute"], 1),
-    ("1h", ["atm_iv_meta", "atm_iv"], 4),
-    ("1d", ["atm_iv_meta", "atm_iv", "trading_holidays"], 2),
+def ep(t):
+    """aware な datetime → UNIX 秒の文字列（/atm_iv_bars の start・end）"""
+    return str(int(t.timestamp()))
+
+
+def utc(day, hr=0, month=10, year=2026):
+    return datetime(year, month, day, hr, tzinfo=UTC)
+
+
+@pytest.mark.parametrize("tf,names,count,start", [
+    # 既定の範囲: 分足は最新のスナップショット（10-13 05:59）の 1 日前の UTC の 0 時、
+    # 1h・1d は now の 10 日・100 日前の UTC の 0 時から
+    ("1m", ["latest_snapshot", "atm_iv_minute"], 3, utc(12)),
+    ("5m", ["latest_snapshot", "atm_iv_minute"], 2, utc(12)),
+    ("15m", ["latest_snapshot", "atm_iv_minute"], 1, utc(12)),
+    ("1h", ["atm_iv_meta", "atm_iv"], 4, utc(3)),
+    ("1d", ["atm_iv_meta", "atm_iv", "trading_holidays"], 2, utc(5, month=7)),
 ])
-def test_atm_iv_bars_each_tf(make, tf, names, count):
+def test_atm_iv_bars_each_tf(make, tf, names, count, start):
     client, runner = make(bars_results())
     res = client.get(f"/atm_iv_bars?tf={tf}")
     assert res.status_code == 200
     assert res.headers["Content-Type"] == "text/csv; charset=utf-8"
     assert res.headers["Cache-Control"] == "no-cache"
+    # 読んだ範囲（#77。画面はこれで取得済みの範囲を覚える）
+    assert (res.headers["X-Bars-Start"], res.headers["X-Bars-End"]) == (ep(start), ep(NOW))
     text = res.get_data(as_text=True)
     times = csv_times(text)
     assert len(times) == count
@@ -264,68 +277,134 @@ def test_atm_iv_bars_each_tf(make, tf, names, count):
     assert [name for name, _ in runner.calls] == names
 
 
-def test_atm_iv_bars_minute_params(make):
+def test_atm_iv_bars_minute_range(make):
     client, runner = make(bars_results())
-    res = client.get("/atm_iv_bars?tf=5m&d=3&n=1")
+    res = client.get(f"/atm_iv_bars?tf=5m&n=1&start={ep(utc(10))}&end={ep(utc(13))}")
     assert res.get_data(as_text=True) == ("18.0,18.9,17.9,18.8,2026-10-13 05:50:00+00:00\n"
                                           "18.8,18.8,18.3,18.4,2026-10-13 05:55:00+00:00\n")
-    assert runner.calls[0][1] == {"start_at": NOW - timedelta(days=14), "end_at": NOW}
-    # 窓の始まりは最新のスナップショットの d 日前の UTC の 0 時（取引時間外・週末に開いても直近の足が入る）
-    assert runner.calls[1][1] == {"start_at": datetime(2026, 10, 10, tzinfo=UTC), "end_at": NOW,
-                                  "today": date(2026, 10, 13), "n": 1}
+    # 範囲を指定したら最新のスナップショットは探さない。[start, end) をそのまま読む
+    assert runner.calls == [("atm_iv_minute", {"start_at": utc(10), "end_at": utc(13), "today": date(2026, 10, 13),
+                                               "n": 1})]
+    assert (res.headers["X-Bars-Start"], res.headers["X-Bars-End"]) == (ep(utc(10)), ep(utc(13)))
+
+
+def test_atm_iv_bars_end_is_clamped_to_now(make):
+    # end が now より後なら（どれだけ先でも）now に縮め、ヘッダで返す（画面は最新まで読んだと分かる）
+    client, runner = make(bars_results())
+    res = client.get(f"/atm_iv_bars?tf=1m&start={ep(utc(12))}&end={ep(utc(14))}")
+    assert res.status_code == 200
+    assert runner.calls[0][1]["end_at"] == NOW
+    assert res.headers["X-Bars-End"] == ep(NOW)
 
 
 def test_atm_iv_bars_minute_defaults(make):
     client, runner = make(bars_results())
     assert client.get("/atm_iv_bars?tf=1m").get_data(as_text=True).splitlines()[0] == (
         "18.0,18.5,17.9,18.2,2026-10-13 05:50:00+00:00")
-    assert runner.calls[1][1]["start_at"] == datetime(2026, 10, 12, tzinfo=UTC)
-    assert runner.calls[1][1]["n"] == 0
+    assert runner.calls[1][1] == {"start_at": utc(12), "end_at": NOW, "today": date(2026, 10, 13), "n": 0}
 
 
-def test_atm_iv_bars_hourly_same_params_as_atm_iv_data(make):
-    # 1 時間足は /atm_iv_data と同じクエリ・パラメータ（AC 10）
+def test_atm_iv_bars_hourly_default_same_params_as_atm_iv_data(make):
+    # 1 時間足の既定（10 日〜now）は /atm_iv_data?d=10 と同じクエリ・パラメータ（#68 AC 10）
     client, runner = make(bars_results())
-    assert client.get("/atm_iv_bars?d=20&n=1").status_code == 200
+    assert client.get("/atm_iv_bars?n=1").status_code == 200
     bars_calls = list(runner.calls)
     runner.calls.clear()
-    assert client.get("/atm_iv_data?d=20&n=1").status_code == 200
+    assert client.get("/atm_iv_data?d=10&n=1").status_code == 200
     assert bars_calls == runner.calls
+
+
+def test_atm_iv_bars_hourly_recent_range_reads_fill(make):
+    client, runner = make(bars_results())
+    assert client.get(f"/atm_iv_bars?tf=1h&start={ep(utc(12))}&end={ep(NOW)}").status_code == 200
+    params = runner.calls[1][1]
+    # 最後の 1 時間足（10-12 21:00）の次からを生データで補う
+    assert params["fill_start"] == utc(12, 22) and params["fill_end"] == NOW
+    assert params["days_start"] == utc(12) and params["range_end"] == NOW
+    assert params["hourly_start"] == utc(3)  # 限月を決める直近 10 日を含む
+
+
+def test_atm_iv_bars_hourly_past_range_skips_fill(make):
+    # 過去だけの範囲（end <= 補う分の始まり）は option_price を読まない:
+    # fill_end を fill_start より前にする（逆向きの区間）
+    client, runner = make(bars_results())
+    res = client.get(f"/atm_iv_bars?tf=1h&start={ep(utc(1, month=9))}&end={ep(utc(1))}")
+    assert res.status_code == 200
+    params = runner.calls[1][1]
+    assert params["fill_end"] < params["fill_start"] == utc(12, 22)
+    assert params["days_start"] == utc(1, month=9) and params["range_end"] == utc(1)
+    assert params["hourly_start"] == utc(1, month=9)
+    assert params["months_since"] == utc(3)
+    assert (res.headers["X-Bars-Start"], res.headers["X-Bars-End"]) == (ep(utc(1, month=9)), ep(utc(1)))
 
 
 def test_atm_iv_bars_default_tf_is_1h(make):
     client, runner = make(bars_results())
     assert client.get("/atm_iv_bars").status_code == 200
     assert [name for name, _ in runner.calls] == ["atm_iv_meta", "atm_iv"]
-    # 1h の既定 d = 10
-    assert runner.calls[1][1]["days_start"] == datetime(2026, 10, 3, tzinfo=UTC)
+    # 1h の既定は 10 日
+    assert runner.calls[1][1]["days_start"] == utc(3)
 
 
 def test_atm_iv_bars_daily(make):
     client, runner = make(bars_results())
-    res = client.get("/atm_iv_bars?tf=1d&d=4&n=0")
+    res = client.get(f"/atm_iv_bars?tf=1d&start={ep(utc(8))}&end={ep(NOW)}")
     # 10-09 00:00 UTC（金曜 09:00 JST）の日中 → 10-09、金曜の夜間・休業日（月）の足 → 休み明けの火曜
     assert res.get_data(as_text=True) == ("20.0,21.0,19.5,20.5,2026-10-08 15:00:00+00:00\n"
                                           "20.5,22.0,18.0,18.8,2026-10-12 15:00:00+00:00\n")
-    # 日足は d + 1 日分の 1 時間足を読む
+    # 1 時間足は start の 10 日前から読む（取引日の前の夜間・連休を含める）
     params = runner.calls[1][1]
-    assert params["days_start"] == datetime(2026, 10, 8, tzinfo=UTC)
-    assert runner.calls[2] == ("trading_holidays", {"start_date": date(2026, 10, 7), "end_date": date(2026, 10, 28)})
+    assert params["days_start"] == utc(28, month=9) and params["range_end"] == NOW
+    assert runner.calls[2] == ("trading_holidays", {"start_date": date(2026, 9, 27), "end_date": date(2026, 10, 28)})
 
 
-def test_atm_iv_bars_daily_drops_partial_first_day(make):
-    # 読んだ範囲の先頭（10-08 00:00 UTC = 09:00 JST）より前の夜間が欠けた日（10-08）は出さない
+@pytest.mark.parametrize("start,end,want", [
+    # 取引日の 00:00 JST（started_at）が [start, end) の日足だけ
+    (utc(8, 15), NOW, ["2026-10-08 15:00:00+00:00", "2026-10-12 15:00:00+00:00"]),
+    (utc(8, 16), NOW, ["2026-10-12 15:00:00+00:00"]),
+    (utc(1), utc(12, 15), ["2026-10-08 15:00:00+00:00"]),
+    (utc(1), utc(12, 16), ["2026-10-08 15:00:00+00:00", "2026-10-12 15:00:00+00:00"]),
+])
+def test_atm_iv_bars_daily_range(make, start, end, want):
+    client, runner = make(bars_results())
+    res = client.get(f"/atm_iv_bars?tf=1d&start={ep(start)}&end={ep(end)}")
+    assert csv_times(res.get_data(as_text=True)) == want
+    # 1 時間足は end の 1 日後（now まで）まで読む（取引日の日中は 00:00 JST の後）
+    assert runner.calls[1][1]["range_end"] == min(end + timedelta(days=1), NOW)
+
+
+def test_atm_iv_bars_daily_today_night_is_included(make):
+    # end = now のときは上端なし: 今夜（10-13 17:00 JST 以降）の夜間は明日の取引日（00:00 JST が now より後）
     results = bars_results()
-    results["atm_iv"] = [hour(8, 0, 30.0, 30.0, 30.0, 30.0), *results["atm_iv"]]
-    client, _ = make(results)
-    times = csv_times(client.get("/atm_iv_bars?tf=1d&d=4").get_data(as_text=True))
-    assert times == ["2026-10-08 15:00:00+00:00", "2026-10-12 15:00:00+00:00"]
+    results["atm_iv"] = [*results["atm_iv"], hour(13, 9, 30.0, 30.0, 30.0, 30.0)]  # 10-13 18:00 JST
+    late = datetime(2026, 10, 13, 10, tzinfo=UTC)
+    app = create_app(runner=FakeRunner(results), clock=lambda: late)
+    times = csv_times(app.test_client().get(f"/atm_iv_bars?tf=1d&start={ep(utc(8))}&end={ep(late)}")
+                      .get_data(as_text=True))
+    assert times[-1] == "2026-10-13 15:00:00+00:00"
 
 
 @pytest.mark.parametrize("query", [
     "tf=2m", "tf=", "tf=1H", "tf=1m%0A", "tf=%201m", "tf=1d;DROP",
-    "tf=1m&d=4", "tf=5m&d=4", "tf=15m&d=0", "tf=1h&d=101", "tf=1d&d=101", "d=0", "tf=1m&d=abc", "tf=1h&d=10%0A",
     "tf=1m&n=2", "n=-1", "tf=1d&n=", "n=01",
+    # start・end は両方か、両方なし
+    f"start={ep(utc(12))}", f"end={ep(utc(12))}", f"start={ep(utc(12))}&end=",
+    # 形（UNIX 秒の 10 進の整数だけ）
+    "start=abc&end=1760000000", f"start=-1&end={ep(utc(12))}", f"start=1759000000.5&end={ep(utc(12))}",
+    f"start=%201759000000&end={ep(utc(12))}", f"start={ep(utc(11))}%0A&end={ep(utc(12))}",
+    f"start={ep(utc(11))}&end=123456789012", f"start=0x10&end={ep(utc(12))}",
+    # start < end
+    f"start={ep(utc(12))}&end={ep(utc(12))}", f"start={ep(utc(12))}&end={ep(utc(11))}",
+    # 未来の start（end を now に縮めた後に start >= end）
+    f"start={ep(NOW + timedelta(minutes=1))}&end={ep(NOW + timedelta(minutes=2))}",
+    f"start={ep(NOW)}&end={ep(NOW + timedelta(days=3))}",
+    # 1 回の最大: 分足 3 日、1h 100 日、1d 400 日
+    f"tf=1m&start={ep(utc(9))}&end={ep(utc(12, 1))}", f"tf=15m&start={ep(utc(1))}&end={ep(utc(5))}",
+    f"tf=1h&start={ep(utc(1, month=6))}&end={ep(utc(10, month=9))}",
+    f"tf=1d&start={ep(utc(1, month=1, year=2025))}&end={ep(utc(10, month=2, year=2026))}",
+    # 遡れる上限: 分足は now の 31 日前の UTC の 0 時（09-12）まで。全部は 2010-01-01 から
+    f"tf=5m&start={ep(utc(11, 23, month=9))}&end={ep(utc(13, month=9))}",
+    f"tf=1d&start={ep(utc(31, month=12, year=2009))}&end={ep(utc(10, month=1, year=2010))}",
 ])
 def test_atm_iv_bars_bad_request(make, query, capsys):
     client, runner = make(bars_results())
@@ -337,11 +416,21 @@ def test_atm_iv_bars_bad_request(make, query, capsys):
     assert record["event"] == "bad_request" and record["endpoint"] == "atm_iv_bars"
 
 
-@pytest.mark.parametrize("tf,d", [("1m", "1"), ("1m", "3"), ("5m", "2"), ("15m", "3"), ("1h", "1"), ("1h", "100"),
-                                  ("1d", "1"), ("1d", "100")])
-def test_atm_iv_bars_d_range_accepts(make, tf, d):
+@pytest.mark.parametrize("tf,start,end", [
+    ("1m", utc(9), utc(12)),  # ちょうど 3 日
+    ("5m", utc(12, month=9), utc(14, month=9)),  # 遡れる上限ちょうど
+    ("15m", utc(12, 5), NOW + timedelta(days=1)),  # 未来の end は now に縮める
+    ("1m", utc(12, 5), NOW + timedelta(days=30)),  # 画面の時計が進んでいても 400 にしない
+    ("1h", utc(1, month=6), utc(9, month=9)),  # 100 日
+    ("1d", utc(1, month=1, year=2010), utc(5, month=2, year=2011)),  # 400 日・BARS_EPOCH ちょうど
+])
+def test_atm_iv_bars_range_accepts(make, tf, start, end):
     client, _ = make(bars_results())
-    assert client.get(f"/atm_iv_bars?tf={tf}&d={d}").status_code == 200
+    assert client.get(f"/atm_iv_bars?tf={tf}&start={ep(start)}&end={ep(end)}").status_code == 200
+
+
+def test_parse_range_default_is_none():
+    assert api.parse_range(None, None, "1m", NOW) is None
 
 
 @pytest.mark.parametrize("tf,name", [("1m", "latest_snapshot"), ("15m", "atm_iv_minute"), ("1h", "atm_iv"),
