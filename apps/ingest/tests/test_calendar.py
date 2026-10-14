@@ -1,29 +1,38 @@
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
-from conftest import REPO_ROOT
+from calgen import CAL
 
-from optionchan_ingest.calendar import DAY, NIGHT, load_calendar, session_at
+from optionchan_ingest import settings
+from optionchan_ingest.calendar import DAY, NIGHT, build_calendar, session_at
 from optionchan_ingest.parser import jst
-from optionchan_ingest.settings import DEFAULT_CALENDAR_PATH
 
 
 @pytest.fixture(scope="module")
 def cal():
-    return load_calendar(REPO_ROOT / "config" / "trading_calendar.toml")
+    return CAL
 
 
-def test_default_path_is_repo_config():
-    assert DEFAULT_CALENDAR_PATH == REPO_ROOT / "config" / "trading_calendar.toml"
+def test_fixed_values_are_constants():
+    """#75: 立会時間・余裕・夜間なしの日は settings の定数（休業日・covered_until は BigQuery の版だけ）"""
+    default = build_calendar()
+    assert (default.day_open, default.day_close) == (time(8, 45), time(15, 45))
+    assert (default.night_open, default.night_close) == (time(17, 0), time(6, 0))
+    assert default.grace == timedelta(minutes=30)
+    assert default.no_night_session_before == frozenset()
+    assert settings.NO_NIGHT_SESSION_BEFORE == frozenset()
 
 
-def test_calendar_contents(cal):
-    assert cal.covered_until >= date(2027, 6, 30)
-    assert date(2026, 11, 23) in cal.closed_dates
-    assert date(2026, 12, 31) in cal.closed_dates
-    assert date(2027, 1, 1) in cal.closed_dates
-    # 土日は書かない（規則で休み）
-    assert all(d.weekday() < 5 for d in cal.closed_dates)
+def test_without_version_every_weekday_is_trading_day():
+    """版を一度も読めていない: 休業日なし（土日以外はすべて取引日）。休業日が分からないので期限切れと同じ扱い"""
+    default = build_calendar()
+    assert default.closed_dates == frozenset()
+    assert default.covered_until is None
+    assert session_at(jst(2026, 11, 23, 10, 0), default).kind == DAY  # 版では休業日
+    assert session_at(jst(2026, 12, 31, 10, 0), default).kind == DAY
+    assert session_at(jst(2026, 10, 17, 10, 0), default) is None  # 土曜
+    assert default.is_outdated(jst(2026, 10, 14, 10, 0))
+    assert default.days_left(jst(2026, 10, 14, 10, 0)) is None
 
 
 # (実時刻 JST, 期待: None か (kind, 取引日, セッション開始))
@@ -119,19 +128,8 @@ def test_session_end_excludes_grace(cal, now, end):
     assert session_at(now, cal).end == end
 
 
-def test_no_night_session_before(cal, tmp_path):
-    text = (REPO_ROOT / "config" / "trading_calendar.toml").read_text(encoding="utf-8")
-    text = text.replace("no_night_session_before = []", "no_night_session_before = [2026-10-15]")
-    path = tmp_path / "cal.toml"
-    path.write_text(text, encoding="utf-8")
-    custom = load_calendar(path)
+def test_no_night_session_before(monkeypatch):
+    monkeypatch.setattr(settings, "NO_NIGHT_SESSION_BEFORE", frozenset({date(2026, 10, 15)}))
+    custom = build_calendar(CAL.closed_dates, CAL.covered_until)
     assert session_at(jst(2026, 10, 14, 20, 0), custom) is None
     assert session_at(jst(2026, 10, 15, 20, 0), custom).kind == NIGHT
-
-
-def test_misplaced_key_is_rejected(tmp_path):
-    text = (REPO_ROOT / "config" / "trading_calendar.toml").read_text(encoding="utf-8")
-    path = tmp_path / "cal.toml"
-    path.write_text(text + "\nextra = 1\n", encoding="utf-8")  # [sessions] の中に入る
-    with pytest.raises(ValueError):
-        load_calendar(path)

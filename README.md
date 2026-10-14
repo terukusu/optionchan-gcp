@@ -23,15 +23,13 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * ローカルの動作確認は `INGEST_DRY_RUN=1`（GCS・BigQuery に書かず、件数と proto のサイズだけをログに出す）
   * 取引時間中は分の頭から 8 秒まで待ってから JPX を取得する（#38。ローカルでも実時刻で待つ。`INGEST_FETCH_AT_SECOND=0` で待たない）
   * 毎時 0 分に取りこぼし（生 HTML はあるが完了記録 `ingest_runs` が無いもの）を回収し、07:00 に前日分を照合する。期間を指定した作り直しは Cloud Run ジョブ `reprocess`（手動、#34）。手順は docs/runbook.md の「回収と照合」「再処理ジョブ」
+  * 時間外・休業日の判定: 立会時間はコードの定数（`settings.py`）、休業日は BigQuery の取引カレンダー（ビュー `trading_calendar_latest`）だけを正として読む（#63・#75。JPX から毎日自動で取り込む）。読めないときは直前の値、一度も読めていなければ休業日なしで ERROR。`INGEST_DRY_RUN=1` では読まない（休業日なし）。docs/runbook.md の「取引カレンダー（#63）」
 
 * apps/viewer
   * 新しいビューアー（#13 / #52。Python 3.13・uv・Flask）。Cloud Run `viewer`（asia-northeast1）に IAP（Cloud Run への直接設定）の後ろでデプロイする（#53）。アプリに認証は無いので、IAP なし・`allUsers` で公開しない。デプロイ・オーナーの手作業（OAuth クライアント）・確認は docs/runbook.md の「ビューアー（#13）」。ページ `/` `/smile` `/atm_iv` と CSV の API `/smile_data` `/atm_iv_data?d=&n=` は現行（appengine/ + HTTP 関数）と同じ URL・同じ CSV の形式で（旧型の ATM 推移 `/atm`・`/atm_data` は移さない。#58）、BigQuery の新系（`optionchan_tokyo` の最新版のテーブル関数と 1 時間足 `atm_iv`）を直接読む
   * `/atm_iv` は足（1分・5分・15分・1時間・日足）を切り替えられるローソク足（#68）。データは `/atm_iv_bars?tf=&d=&n=`（`tf` は `1m` `5m` `15m` `1h` `1d`、`d` は日数で分足 1〜3・1 時間足と日足 1〜100、CSV は `/atm_iv_data` と同じ列で値の無い足を除く）。分足は最新版の ATM の put から 1 分足を作り（5・15 分足はアプリで束ねる）、1 時間足・日足は `/atm_iv_data` と同じ 1 時間足から。日足は取引日（夜間は次の取引日。休業日は取引カレンダー `trading_calendar_latest`）ごと
   * 設定は環境変数: `GCP_PROJECT`（必須）、`BQ_DATASET`（既定 `optionchan_tokyo`）、`BQ_LOCATION`（既定 `asia-northeast1`）、`MAX_BYTES_BILLED`（既定 1 GiB）。SQL は `src/optionchan_viewer/sql/` にだけ置き、値はクエリパラメータで渡す
   * ブラウザ用ライブラリ（Chart.js（`/smile`）・TradingView Lightweight Charts（`/atm_iv`））は `package-lock.json` で固定し、イメージのビルドで同梱する（CDN を使わない）
-
-* config
-  * 取引カレンダー（`trading_calendar.toml`。取引時間と、休業日の予備）。休業日は JPX から自動で取り込む（docs/runbook.md の「取引カレンダー（#63）」）
 
 * schema
   * BigQueryのスキーマ。`schema/tokyo/` は新しい取り込みのテーブル（東京）の定義と設定（`tables.json`）と、日次チェックの結果のテーブル（`quality_daily`・`legacy_compare_daily`、#40）。`schema/ohlc/atm_ohlc.json` は東京の 1 時間足の 3 表（#49）の列（旧系の `atm_*.json` と同じ。取り込みのイメージに入る `schema/tokyo/` には置かない）
@@ -54,7 +52,7 @@ Cloud Functions とかでガーッと価格情報を取ってきて、BigQuery �
   * プロジェクト ID・GitHub リポジトリ名・state のバケット名は既定値を持たない（clone した人が自分の値を渡す）。`TF_VAR_project_id`（bootstrap は `TF_VAR_github_repository` も）と `terraform init -backend-config="bucket=<PROJECT_ID>-tfstate"`（bootstrap は `<PROJECT_ID>-tfstate-bootstrap`）で渡す
 
 * .github/workflows
-  * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）、`calendar-toml.yml`（毎日、取引カレンダーの TOML が BigQuery の最新版と違えば更新の PR を出す。#66）
+  * `ci.yml`（PR で pytest（`apps/ingest`・`apps/viewer` を含む）・terraform plan・取り込みとビューアーのイメージのビルド確認）、`deploy.yml`（master の terraform apply。Environment `prod` の承認が必要）
   * repository variables `GCP_PROJECT_ID`（GCP プロジェクト ID）・`TF_STATE_BUCKET`（prod の state のバケット）・`GCP_SA_TF_PLAN` / `GCP_SA_TF_APPLY` と secret `GCP_WIF_PROVIDER` を使う。設定は docs/runbook.md の「GitHub の設定（bootstrap の後、PR を出す前）」
 
 ## テストの実行

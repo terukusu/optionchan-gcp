@@ -11,7 +11,3 @@ output "sa_tf_plan_email" {
 output "sa_tf_apply_email" {
   value = google_service_account.tf_apply.email
 }
-
-output "sa_calendar_toml_email" {
-  value = google_service_account.calendar_toml.email
-}

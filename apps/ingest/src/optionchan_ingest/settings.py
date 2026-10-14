@@ -1,21 +1,21 @@
 """取り込みの設定を 1 か所にまとめる。
 
-データセット名・バケット名・生 HTML の形式などユーザー確認で変わりうる値は、ここと
-schema/tokyo/*.json・config/trading_calendar.toml だけを直せば差し替えられるようにする。
+データセット名・バケット名・生 HTML の形式・立会時間などユーザー確認で変わりうる値は、ここと
+schema/tokyo/*.json だけを直せば差し替えられるようにする。
 """
 
 import json
 import os
 from dataclasses import dataclass
+from datetime import time
 from pathlib import Path
 
 # イメージ内ではリポジトリ直下の構成を /app に置く（apps/ingest/Dockerfile）。
 # ローカルではこのファイルから 4 つ上（リポジトリ直下）を使う
 _REPO_ROOT = Path(__file__).resolve().parents[4]
-_APP_ROOT = Path("/app") if Path("/app/config").is_dir() else _REPO_ROOT
+_APP_ROOT = Path("/app") if Path("/app/schema").is_dir() else _REPO_ROOT
 
 DEFAULT_SCHEMA_DIR = _APP_ROOT / "schema" / "tokyo"
-DEFAULT_CALENDAR_PATH = _APP_ROOT / "config" / "trading_calendar.toml"
 
 # データを書くテーブル（書き込み順）と完了記録のテーブル
 DATA_TABLES = ("spot_price", "future_price", "option_price")
@@ -107,6 +107,19 @@ MIN_STRIKES = 10
 STALE_DAY_MINUTES = 30
 STALE_NIGHT_MINUTES = 40
 
+# --- 取引カレンダーの固定の値（#75。休業日・covered_until は BigQuery の最新版だけが正で、ここには持たない） ---
+# 立会時間（JST の実時刻）。出典: 大阪取引所「祝日取引」のページの「取引時間/取引日」（HOLIDAY_TRADING_URL）。
+# 日中 8:45〜15:45、夜間 17:00〜翌 6:00。毎日の取り込み（calendar_sync.py）でページの表と照合し、違えば
+# ERROR calendar_sessions_changed（ここを直して出し直す）
+SESSION_DAY_OPEN = time(8, 45)
+SESSION_DAY_CLOSE = time(15, 45)
+SESSION_NIGHT_OPEN = time(17, 0)
+SESSION_NIGHT_CLOSE = time(6, 0)
+# ページ時刻の約 15 分遅れ + 余裕。セッション終了後もこの分数だけ取り込みを続ける
+SESSION_GRACE_MINUTES = 30
+# ここに書いた取引日は、直前の夜間セッションが無いものとして扱う（臨時の休止用。通常は空）
+NO_NIGHT_SESSION_BEFORE: frozenset = frozenset()
+
 # 取引カレンダーの期限の通知: 1 日 1 回（この JST の時:分に来たリクエストだけ）。
 # covered_until の CALENDAR_WARN_DAYS 日前から WARNING calendar_expiring、過ぎたら ERROR calendar_outdated
 CALENDAR_NOTICE_AT = (9, 0)
@@ -126,6 +139,9 @@ CALENDAR_SYNC_AT = (6, 40)
 CALENDAR_HTTP_TIMEOUT_SECONDS = 10
 # 最新版の読み込み（起動時と毎時 0 分）の上限。起動時はこの分だけ取り込みの期限を短くする
 CALENDAR_LOAD_TIMEOUT_SECONDS = 5
+# 起動直後（プロセス内に直前の版が無い）に、14 日以内の休業日の増加を比べる BigQuery の 1 つ前の版を読む上限
+# （#75。失敗・期限なら比べずに WARNING calendar_previous_unavailable）。起動時の期限はこの分も足す
+CALENDAR_PREVIOUS_TIMEOUT_SECONDS = 3
 # 起動時の読み込みに失敗した（一度も読めていない）とき、次のリクエストで読み直すまでの秒数（毎時 0 分を待たない）
 CALENDAR_RETRY_SECONDS = 300
 # 版の追記の上限
@@ -139,7 +155,6 @@ class Settings:
     project: str | None
     dataset: str
     raw_bucket: str
-    calendar_path: Path
     schema_dir: Path
     dry_run: bool
     fetch_at_second: float = FETCH_AT_SECOND
@@ -157,7 +172,6 @@ class Settings:
             project=env.get("GCP_PROJECT") or None,
             dataset=env.get("BQ_DATASET", "optionchan_tokyo"),
             raw_bucket=raw_bucket or "dry-run",
-            calendar_path=Path(env.get("CALENDAR_PATH", DEFAULT_CALENDAR_PATH)),
             schema_dir=schema_dir,
             dry_run=dry_run,
             fetch_at_second=_fetch_at_second(env.get("INGEST_FETCH_AT_SECOND", "")),

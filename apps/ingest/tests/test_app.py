@@ -6,19 +6,19 @@ import time
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from conftest import REPO_ROOT, read_fixture
+from calgen import CAL
+from conftest import read_fixture
 from htmlgen import empty_page_html, page_html
 
 from optionchan_ingest import app as app_module
 from optionchan_ingest import settings
 from optionchan_ingest.app import Deps, fetch_wait_seconds, handle
-from optionchan_ingest.calendar import load_calendar
+from optionchan_ingest.calendar import build_calendar
 from optionchan_ingest.io_bq import WriteFailed
 from optionchan_ingest.io_gcs import AlreadyExists, RawObject, StorageFailed
 from optionchan_ingest.parser import JST, JpxUnavailable, jst
 from optionchan_ingest.snapshot import FetchedPage, decode_raw
 
-CAL = load_calendar(REPO_ROOT / "config" / "trading_calendar.toml")
 STRIKES = tuple(range(38000, 43000, 500))
 PAGE1 = page_html(strikes=STRIKES, atm=40000)
 PAGE2 = page_html(updated_at="2026/10/12 10:45", last_trading_day="2026/12/10", strikes=STRIKES, atm=40000)
@@ -429,6 +429,17 @@ def test_no_stale_after_calendar_outdated(capsys):
         after += timedelta(days=1)
     handle(datetime(after.year, after.month, after.day, 11, 0, tzinfo=JST), Fake(exists=True).deps())
     assert ("ERROR", "stale") not in events(capsys)
+
+
+def test_no_version_no_stale_and_no_expiry_notice(capsys):
+    """#75: 版を読めていない（休業日なし）間は鮮度・期限の通知を出さない（calendar_unavailable は CalendarHolder）"""
+    deps = Fake(exists=True).deps()
+    deps.calendar = build_calendar()
+    handle(jst(2026, 11, 23, 9, 0), deps)  # 版では休業日。休業日なしなので取り込みに行く
+    records = events(capsys)
+    assert ("INFO", "skipped_no_update") in records
+    assert ("ERROR", "stale") not in records
+    assert all(e[1] not in ("calendar_expiring", "calendar_outdated") for e in records)
 
 
 # --- 取引終了後の鮮度（毎日の誤報を出さない） ---

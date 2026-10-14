@@ -6,7 +6,16 @@
 
 from datetime import date
 
+from optionchan_ingest.calendar import build_calendar
 from optionchan_ingest.jpx_calendar import WEEKDAYS
+
+# テスト用のカレンダー: tests/fixtures/holiday_trading.html（2026-10-14 の実ページの抜粋）から作る版の、
+# 2026-10-14 以降の休業日と covered_until（取引時間は settings の定数）
+CLOSED_DATES = frozenset(
+    {date(2026, 11, 23), date(2026, 12, 31), date(2027, 1, 1), date(2027, 9, 20), date(2027, 12, 31)}
+)
+COVERED_UNTIL = date(2027, 6, 30)
+CAL = build_calendar(CLOSED_DATES, COVERED_UNTIL)
 
 NOTES = {
     4: "1月2日と12月31日は当分の間、祝日取引を実施しません。",

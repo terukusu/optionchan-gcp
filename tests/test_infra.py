@@ -225,22 +225,3 @@ def test_trading_calendar_resources():
     # 定期起動は ingest サービスの 06:40 のリクエスト（Scheduler を足さない）
     assert 'google_cloud_scheduler_job' not in tf
 
-
-def test_calendar_toml_sa_is_read_only():
-    """#66: workflow calendar-toml の SA は最新版のテーブル・ビューの dataViewer と bigquery.jobUser だけ"""
-    tf = dict(all_tf())
-    granted = []
-    for path, text in tf.items():
-        for m in re.finditer(r'role\s*=\s*"([^"]+)"\s*\n\s*member\s*=\s*([^\n]+)', text):
-            if 'calendar_toml' in m.group(2) or 'sa-calendar-toml@' in m.group(2):
-                granted.append((path, m.group(1)))
-    assert sorted(granted) == [
-        ('bootstrap/calendar_toml.tf', 'roles/bigquery.jobUser'),
-        ('prod/calendar.tf', 'roles/bigquery.dataViewer'),
-    ]
-    prod = tf['prod/calendar.tf']
-    block = re.search(r'resource "google_bigquery_table_iam_member" "calendar_toml_reader" \{(.*?)\n\}', prod, re.S).group(1)
-    assert 'google_bigquery_table.trading_calendar.table_id' in block
-    assert 'google_bigquery_table.trading_calendar_latest.table_id' in block
-    # 借用は master の ref だけ
-    assert ':ref:refs/heads/master"' in tf['bootstrap/calendar_toml.tf']

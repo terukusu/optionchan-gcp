@@ -1,23 +1,19 @@
 """取引カレンダーの自動取り込み（#63）の純粋関数。
 
-JPX のページ・祝日 CSV の解析、版の組み立て、検証、BigQuery の行・TOML
+JPX のページ・祝日 CSV の解析、版の組み立て、検証、BigQuery の行
 """
 
-import tomllib
 from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 
 import pytest
-from calgen import page_html, row, standard_rows
+from calgen import CAL, page_html, row, standard_rows
 from conftest import FIXTURES, REPO_ROOT
 
 from optionchan_ingest import bq_proto
 from optionchan_ingest import jpx_calendar as jc
-from optionchan_ingest.calendar import load_calendar
 
 TODAY = date(2026, 10, 14)
-TOML_PATH = REPO_ROOT / "config" / "trading_calendar.toml"
-CAL = load_calendar(TOML_PATH)
 FIXTURE = (FIXTURES / "holiday_trading.html").read_bytes()
 CSV = (FIXTURES / "syukujitsu_2026_2027.csv").read_bytes()
 HOLIDAYS = jc.parse_holidays_csv(CSV)
@@ -45,10 +41,6 @@ BCP = (date(2026, 11, 23), date(2027, 9, 20))
 
 def fixture_version():
     return jc.build_version(jc.parse_jpx_page(FIXTURE))
-
-
-def toml_reference():
-    return jc.reference_from_calendar(CAL.closed_dates, CAL.covered_until)
 
 
 def std_page(years=(2026, 2027), confirmed_until=date(2027, 5, 31), closed=BCP, holidays=None, **kwargs):
@@ -83,8 +75,8 @@ def test_parse_fixture():
     assert by_day[date(2027, 7, 19)].status == jc.PLANNED
 
 
-def test_fixture_matches_current_toml():
-    """照合（#63）: 今のページから作った版の今日以降の休業日・covered_until は、手で写した TOML と一致する"""
+def test_fixture_version():
+    """照合（#63）: 今のページから作った版の今日以降の休業日・covered_until（テスト用のカレンダー calgen.CAL の元）"""
     version = fixture_version()
     assert {d for d in version.closed_dates if d >= TODAY} == set(CAL.closed_dates)
     assert version.covered_until == CAL.covered_until == date(2027, 6, 30)
@@ -101,8 +93,9 @@ def test_fixture_matches_current_toml():
     assert by_date[date(2026, 5, 6)].day_type == jc.NATIONAL_HOLIDAY  # 憲法記念日の振替休日
 
 
-def test_fixture_passes_validation_against_toml():
-    problems = jc.validate(fixture_version(), jc.parse_jpx_page(FIXTURE), HOLIDAYS, toml_reference(), TODAY)
+def test_fixture_passes_validation_without_previous_version():
+    """初回（版が無い）: 前の版との差分の検証はせず、形・祝日・年末年始の検証だけ"""
+    problems = jc.validate(fixture_version(), jc.parse_jpx_page(FIXTURE), HOLIDAYS, None, TODAY)
     assert problems == []
 
 
@@ -111,87 +104,6 @@ def test_generated_page_matches_fixture():
     generated = jc.build_version(std_page())
     assert generated.closed_dates == fixture_version().closed_dates
     assert generated.covered_until == date(2027, 6, 30)
-
-
-def test_render_toml_keeps_current_file():
-    text = TOML_PATH.read_text(encoding="utf-8")
-    rendered = jc.render_toml(text, fixture_version(), TODAY)
-    data = tomllib.loads(rendered)
-    assert set(data["closed_dates"]) == set(CAL.closed_dates)
-    assert data["covered_until"] == CAL.covered_until
-    assert data["sessions"] == tomllib.loads(text)["sessions"]
-    # 名称と確定/予定のコメント
-    assert "  2027-09-20, # 敬老の日（予定。祝日取引を実施しない）" in rendered
-    assert "  2027-01-01, # 元日（確定）" in rendered
-
-
-def test_render_toml_after_update(tmp_path):
-    version = jc.build_version(std_page(confirmed_until=date(2027, 12, 31)))
-    rendered = jc.render_toml(TOML_PATH.read_text(encoding="utf-8"), version, date(2026, 12, 20))
-    path = tmp_path / "cal.toml"
-    path.write_text(rendered, encoding="utf-8")
-    cal = load_calendar(path)  # 読み込みのキーの検査も通る
-    assert cal.covered_until == date(2027, 12, 31)
-    assert date(2026, 11, 23) not in cal.closed_dates  # 過去日は書かない
-
-
-# ---- TOML の差分（#66） ----
-
-
-def test_toml_change_none_when_same():
-    change = jc.toml_change(TOML_PATH.read_text(encoding="utf-8"), fixture_version(), TODAY)
-    assert not change.changed and not change.toml_newer
-    assert change.added == () and change.removed == ()
-
-
-def test_toml_change_ignores_past_dates():
-    # 2026-11-23 が過ぎると生成した TOML からは消えるが、差分には数えない（祝日が過ぎるたびに PR を出さない）
-    text = TOML_PATH.read_text(encoding="utf-8")
-    change = jc.toml_change(text, fixture_version(), date(2026, 11, 24))
-    assert not change.changed
-    assert "2026-11-23" not in change.text
-
-
-def test_toml_change_added_removed_and_covered_until():
-    text = TOML_PATH.read_text(encoding="utf-8")
-    # 2027-09-20 が実施するに変わり、2027-07-19（海の日）が実施しないに変わり、下半期が確定
-    version = jc.build_version(
-        std_page(confirmed_until=date(2027, 12, 31), closed=(date(2026, 11, 23), date(2027, 7, 19)))
-    )
-    change = jc.toml_change(text, version, TODAY)
-    assert change.changed and not change.toml_newer
-    assert [d for d, _ in change.added] == [date(2027, 7, 19)]
-    assert change.added[0][1].startswith("海の日（確定")
-    assert change.removed == ((date(2027, 9, 20), "敬老の日（BCP テストのため実施しない。予定）"),)
-    assert change.covered_until == (date(2027, 6, 30), date(2027, 12, 31))
-    assert set(tomllib.loads(change.text)["closed_dates"]) == {d for d in version.closed_dates if d >= TODAY}
-
-    title, body = jc.toml_pr_text(change, datetime(2026, 12, 1, 21, 40, tzinfo=UTC), TODAY)
-    assert title.startswith("取引カレンダーの TOML を BigQuery の最新版に合わせる")
-    assert title.endswith("（休業日 +1、休業日 -1、covered_until 2027-06-30 → 2027-12-31）")
-    assert "- covered_until: 2027-06-30 → 2027-12-31\n" in body
-    assert "  - 2027-07-19（海の日（確定" in body
-    assert "  - 2027-09-20（敬老の日（BCP テストのため実施しない。予定））" in body
-    assert "version_at 2026-12-01T21:40:00+00:00" in body
-
-
-def test_toml_change_covered_until_only():
-    text = TOML_PATH.read_text(encoding="utf-8").replace("covered_until = 2027-06-30", "covered_until = 2027-05-31")
-    change = jc.toml_change(text, fixture_version(), TODAY)
-    assert change.changed and change.added == () and change.removed == ()
-    title, body = jc.toml_pr_text(change, VERSION_AT_FOR_TOML, TODAY)
-    assert title.endswith("（covered_until 2027-05-31 → 2027-06-30）")
-    assert "  - なし" in body
-
-
-def test_toml_change_toml_newer():
-    # 手で TOML の covered_until を延ばした（緊急回避）ときは版に合わせない
-    text = TOML_PATH.read_text(encoding="utf-8").replace("covered_until = 2027-06-30", "covered_until = 2027-12-31")
-    change = jc.toml_change(text, fixture_version(), TODAY)
-    assert change.toml_newer
-
-
-VERSION_AT_FOR_TOML = datetime(2026, 10, 14, 21, 40, tzinfo=UTC)
 
 
 # ---- 祝日 CSV ----
@@ -394,11 +306,6 @@ def test_past_changed():
     assert all(p.overridable for p in problems)
 
 
-def test_past_not_checked_against_toml():
-    """TOML は過去日を書かないので、初回（版が無い）は過去日の違いを見ない"""
-    assert _validate(_std_rows(), reference=toml_reference()) == []
-
-
 def test_covered_until_regressed():
     prev = replace(fixture_version(), covered_until=date(2027, 12, 31))
     assert rules(_validate(_std_rows(), reference=_ref(prev))) == ["covered_until_regressed"]
@@ -424,9 +331,13 @@ def test_too_many_changes():
     assert rules(_validate(_std_rows(closed=closed), reference=_ref(prev))) == ["too_many_changes"]
 
 
-def test_toml_reference_counts_changes():
-    closed = (date(2027, 7, 19), date(2027, 8, 11))  # BCP の 2 日が消え、2 日増える = 4 件
-    assert rules(_validate(_std_rows(closed=closed), reference=toml_reference())) == ["too_many_changes"]
+def test_no_reference_skips_diff_checks():
+    """初回（版が無い）は差分の検証をしない（休業日がいくつ変わっても・14 日以内でも問題にしない）"""
+    closed = (date(2026, 11, 3), date(2027, 7, 19), date(2027, 8, 11), date(2027, 10, 11))
+    assert _validate(_std_rows(closed=closed), today=date(2026, 10, 20), reference=None) == []
+    prev = fixture_version()  # 前の版があれば問題になる
+    problems = _validate(_std_rows(closed=closed), today=date(2026, 10, 20), reference=_ref(prev))
+    assert {"closes_soon", "too_many_changes"} <= set(rules(problems))
 
 
 def test_closes_soon_rejects_new_closed_day():
@@ -592,6 +503,12 @@ def test_ingest_sanity_rejects_new_closed_day_within_14_days():
     assert jc.ingest_sanity(_loaded(version, jc.ACCEPTED_OVERRIDE), CAL.closed_dates, today) == []
     # 今使っている値に既にある休業日は増えたことにならない
     assert jc.ingest_sanity(_loaded(version), CAL.closed_dates | {date(2026, 11, 3)}, today) == []
+
+
+def test_ingest_sanity_without_previous_skips_closes_soon():
+    """直前の版が無い（起動直後）ときは 14 日以内の休業日の増加を見ない（比べる相手が無い）。1 年の上限は見る"""
+    version = jc.build_version(std_page(closed=BCP + (date(2026, 11, 3),)))
+    assert jc.ingest_sanity(_loaded(version), None, date(2026, 10, 20)) == []
 
 
 def test_ingest_sanity_rejects_too_many_closed_days():

@@ -41,7 +41,6 @@ case "$IMAGE_NAME" in
       apps/ingest/pyproject.toml
       apps/ingest/uv.lock
       apps/ingest/src
-      config/trading_calendar.toml
       schema/tokyo
       .dockerignore
     )
