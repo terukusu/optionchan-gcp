@@ -5,7 +5,7 @@
 """
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 SMILE_COLUMNS = (
     "target_price",
@@ -19,6 +19,21 @@ SMILE_COLUMNS = (
     "o2_put_price_time",
 )
 ATM_IV_COLUMNS = ("open", "high", "low", "close", "started_at")
+# /smile_snapshot（#79）: 2 行目以降の列（縦持ち。1 行 = 限月 × 行使価格 × call / put。smile.snapshot_rows の行）
+SNAPSHOT_COLUMNS = (
+    "month",
+    "type",
+    "target_price",
+    "iv",
+    "price",
+    "price_time",
+    "bid_iv",
+    "ask_iv",
+    "bid",
+    "ask",
+    "mid_iv",
+    "otm",
+)
 
 
 def cell(value) -> str:
@@ -35,6 +50,9 @@ def cell(value) -> str:
         if value.tzinfo is None:
             raise ValueError("naive な datetime は出さない")
         return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S+00:00")
+    if isinstance(value, date):
+        # 最終取引日（/smile_snapshot）。datetime は date の派生なので、この判定は datetime の後
+        return value.isoformat()
     raise TypeError(f"未対応の型: {type(value).__name__}")
 
 
@@ -51,3 +69,12 @@ def smile_csv(snapshot_at: datetime, atm_target_price: int, rows: list[dict]) ->
 def atm_iv_csv(rows: list[dict]) -> str:
     """ヘッダ・メタ行なし、ATM_IV_COLUMNS（started_at 昇順）"""
     return "".join(line([r[c] for c in ATM_IV_COLUMNS]) for r in rows)
+
+
+def snapshot_csv(snapshot_at: datetime, months: dict, rows: list[dict]) -> str:
+    """/smile_snapshot（#79）: 1 行目 `<スナップショットの UNIX 秒>,<1 限月の最終取引日>,<1 限月の ATM>,
+    <2 限月の最終取引日>,<2 限月の ATM>`（ATM が無ければ空）、
+    以降 SNAPSHOT_COLUMNS（month, target_price, type の昇順）"""
+    head = line([int(snapshot_at.timestamp()), months[1]["last_trading_day"], months[1]["atm"],
+                 months[2]["last_trading_day"], months[2]["atm"]])
+    return head + "".join(line([r[c] for c in SNAPSHOT_COLUMNS]) for r in rows)

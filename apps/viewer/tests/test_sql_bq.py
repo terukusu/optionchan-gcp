@@ -14,6 +14,8 @@ CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
 - /atm_iv_bars（#68 AC 5・6）: 1 分足 SQL を束ねた 5 分・15 分・1 時間足が、生の行から sql/ohlc/atm_hourly.sql の
   bars で作った足と一致する。限月が混ざらない。日足で金曜・休業日の前日の夜間が休み明けの日に入る。
   新しいクエリの dry run が 512 MiB 以下
+- /smile_snapshot（#79 AC 6・7）: 再取り込み（同じスナップショットに 2 回の実行）で新しい実行の値だけ、週末の at で
+  金曜の最後のスナップショット、限月の割り当てが smile.sql と同じ。dry run が 512 MiB 以下
 """
 import json
 import os
@@ -104,6 +106,8 @@ def literal(value, typ):
         return f"CAST(NULL AS {typ})"
     if typ in ("TIMESTAMP", "DATETIME", "DATE"):
         return f"{typ} '{value}'"
+    if typ == "STRING":
+        return f"'{value}'"
     if typ == "BOOL":
         return "TRUE" if value else "FALSE"
     return repr(value)
@@ -118,16 +122,18 @@ def cte(name, columns, rows):
 
 
 OPTION = [("created_at", "TIMESTAMP"), ("type", "INT64"), ("target_price", "INT64"), ("last_trading_day", "DATE"),
-          ("iv", "FLOAT64"), ("price", "INT64"), ("price_time", "DATETIME"), ("is_atm", "BOOL")]
+          ("iv", "FLOAT64"), ("price", "INT64"), ("price_time", "DATETIME"), ("is_atm", "BOOL"),
+          ("bid_iv", "FLOAT64"), ("ask_iv", "FLOAT64"), ("bid", "INT64"), ("ask", "INT64"), ("ingest_run_id", "STRING")]
 HOURLY = [("open", "FLOAT64"), ("high", "FLOAT64"), ("low", "FLOAT64"), ("close", "FLOAT64"),
           ("last_trading_day", "DATE"), ("time_frame", "INT64"), ("started_at", "TIMESTAMP")]
-RUNS = [("snapshot_at", "TIMESTAMP")]
+RUNS = [("snapshot_at", "TIMESTAMP"), ("ingest_run_id", "STRING"), ("finished_at", "TIMESTAMP")]
 CALENDAR = [("calendar_date", "DATE"), ("is_trading_day", "BOOL")]
 
 
-def opt(at, typ, strike, month, iv=None, price=None, price_time=None, is_atm=False):
+def opt(at, typ, strike, month, iv=None, price=None, price_time=None, is_atm=False, **quote):
+    """quote: bid_iv・ask_iv・bid・ask・ingest_run_id（#79。省略は NULL）"""
     return {"created_at": at, "type": typ, "target_price": strike, "last_trading_day": month, "iv": iv,
-            "price": price, "price_time": price_time, "is_atm": is_atm}
+            "price": price, "price_time": price_time, "is_atm": is_atm, **quote}
 
 
 def bar(at, month, o, h, low, c):
@@ -550,6 +556,129 @@ def test_bars_hourly_past_range_without_fill():
     assert len(want) == 6  # 10-03・10-08 の 2 本・10-12 の 3 本（10-13 の補った足と 10-12 22:00 以降は入らない）
 
 
+# ---- /smile_snapshot（#79 AC 6） ----
+
+def latest_body(func, start, end):
+    """sql/latest/<func>.sql（テーブル関数の本文）を、引数を @パラメータに・表を固定値の CTE にしたサブクエリにする
+    （new_sql の差し替えは created_at で絞るだけで最新版の選択を通らないので、再取り込みの検査にはこちらを使う）"""
+    text = (REPO_ROOT / "sql" / "latest" / f"{func}.sql").read_text(encoding="utf-8")
+    text = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
+    text = re.sub(r"\bstart_at\b", start, text)
+    text = re.sub(r"\bend_at\b", end, text)
+    text = text.replace("`${project}.${dataset}.option_price`", "option_price")
+    text = text.replace("`${project}.${dataset}.ingest_runs`", "ingest_runs")
+    assert "${" not in text, func
+    return f"({text})"
+
+
+def latest_sql(name, fx):
+    """新しい SQL のテーブル関数の参照を、本文（sql/latest/*.sql）を固定値に当てたものに置き換える"""
+    text = (SQL_DIR / f"{name}.sql").read_text(encoding="utf-8")
+    for func in ("option_price_latest", "latest_runs"):
+        text = re.sub(rf"`\$\{{project\}}\.\$\{{dataset\}}\.{func}`\((@\w+), (@\w+)\)",
+                      lambda m, f=func: latest_body(f, m.group(1), m.group(2)), text)
+    assert "${" not in text, name
+    return with_fixtures(text, fx)
+
+
+SNAPSHOT_TYPES = {
+    "snapshot_at": ts, "month": int, "type": int, "target_price": int, "last_trading_day": date.fromisoformat,
+    "is_atm": lambda v: v == "true", "iv": float, "price": int, "price_time": int, "bid_iv": float, "ask_iv": float,
+    "bid": int, "ask": int,
+}
+
+
+def snapshot_runner(fx):
+    """api.smile_snapshot の runner（テーブル関数は本文どおりに最新版を選ぶ）"""
+    def run(name, params):
+        return typed(bq(latest_sql(name, fx), params), SNAPSHOT_TYPES)
+
+    return run
+
+
+def snapshot_csv(fx, at):
+    return api.smile_snapshot(snapshot_runner(fx), at)
+
+
+def quote(at, typ, strike, month, iv, bid_iv, ask_iv, run, **kw):
+    return opt(at, typ, strike, month, iv, 300, jst(13, 14, 50), bid_iv=bid_iv, ask_iv=ask_iv, bid=290, ask=310,
+               ingest_run_id=run, **kw)
+
+
+def test_smile_snapshot_reingest_uses_newest_run():
+    # 同じスナップショット（SNAP）に 2 回の実行: 古い実行 "a"（値 99、a にだけある行使価格 24500）と、
+    # 後で終わった再取り込み "b"。新しい実行の値だけを返す
+    options = [
+        quote(SNAP, 2, 24500, M1, 99.0, 99.0, 99.0, "a"),
+        quote(SNAP, 2, 25000, M1, 99.0, 99.0, 99.0, "a", is_atm=True),
+        quote(SNAP, 1, 25000, M1, 99.0, 99.0, 99.0, "a"),
+        quote(SNAP, 2, 25000, M1, 19.0, 18.5, 19.5, "b", is_atm=True),
+        quote(SNAP, 1, 25000, M1, 18.0, 17.5, 18.5, "b"),
+        # 前のスナップショット（実行 "c"）は読まない
+        quote(utc(13, 5, 58), 2, 25000, M1, 88.0, 88.0, 88.0, "c", is_atm=True),
+    ]
+    runs = [{"snapshot_at": SNAP, "ingest_run_id": "a", "finished_at": utc(13, 5, 59)},
+            {"snapshot_at": SNAP, "ingest_run_id": "b", "finished_at": utc(13, 7, 0)},
+            {"snapshot_at": utc(13, 5, 58), "ingest_run_id": "c", "finished_at": utc(13, 5, 58)}]
+    lines = snapshot_csv(fixtures(options, runs=runs), NOW).split("\n")
+    assert lines[0] == f"{int(SNAP_DT.timestamp())},2026-11-12,25000,2026-11-12,25000"
+    body = lines[1:-1]
+    pt = int(datetime(2026, 10, 13, 5, 50, tzinfo=UTC).timestamp())  # 14:50 JST
+    assert [line for line in body if line.startswith("1,")] == [
+        f"1,1,25000,18.0,300,{pt},17.5,18.5,290,310,18.0,1",
+        f"1,2,25000,19.0,300,{pt},18.5,19.5,290,310,19.0,0",
+    ]
+    assert "99" not in "\n".join(body) and "88" not in "\n".join(body)
+    # 新しい実行 "b" が先に終わっていたら（再取り込みが古い）"a" を使う: 選び方は latest_runs と同じ finished_at
+    runs[1]["finished_at"] = utc(13, 5, 59)
+    runs[0]["finished_at"] = utc(13, 7, 0)
+    assert "24500" in snapshot_csv(fixtures(options, runs=runs), NOW)
+
+
+def test_smile_snapshot_weekend_at_returns_friday_last():
+    # 2026-10-09（金）の夜間の最後 = 10-10（土）06:00 JST のスナップショット。その後は 10-13（火）08:45 JST まで無い
+    fri_last = jdt(10, 6, 0)
+    snaps = [(9, 15, 0), (10, 6, 0), (13, 8, 45)]  # JST の (日, 時, 分)
+    options = [quote(jt(*s), 2, 25000, M1, 20.0 + i, 19.0 + i, 21.0 + i, f"r{i}", is_atm=True)
+               for i, s in enumerate(snaps)]
+    runs = [{"snapshot_at": jt(*s), "ingest_run_id": f"r{i}", "finished_at": jt(*s)} for i, s in enumerate(snaps)]
+    fx = fixtures(options, runs=runs)
+    # 日曜 12:00 JST・月曜（休業日）12:00 JST → 金曜の最後（土曜 06:00 JST）
+    for at in (jdt(11, 12, 0), jdt(12, 12, 0), fri_last + timedelta(seconds=59)):
+        head = snapshot_csv(fx, at).split("\n")[0]
+        assert head.split(",")[0] == str(int(fri_last.timestamp())), at
+    # at ちょうどのスナップショットを含む・1 秒前なら前のもの
+    assert snapshot_csv(fx, fri_last).split(",")[0] == str(int(fri_last.timestamp()))
+    assert snapshot_csv(fx, fri_last - timedelta(seconds=1)).split(",")[0] == str(int(jdt(9, 15, 0).timestamp()))
+    # 14 日より前しか無ければデータなし（空）
+    assert snapshot_csv(fx, jdt(13, 8, 45) + timedelta(days=14, seconds=1)) == ""
+
+
+def test_smile_snapshot_months_same_as_smile_sql():
+    # 限月の割り当て（1 限月 = last_trading_day の最小、2 限月 = 最大）と約定の IV・時刻が smile.sql と同じ
+    fx = fixtures(SMILE_OPTIONS, runs=[{"snapshot_at": utc(13, 5, 58)}, {"snapshot_at": SNAP}])
+    params = {"start_at": SNAP_DT, "end_at": SNAP_DT + timedelta(seconds=1)}
+    smile_rows = fixture_runner(fx, SMILE_TYPES)("smile", params)
+    rows = fixture_runner(fx, {"smile_snapshot": SNAPSHOT_TYPES})("smile_snapshot", params)
+    got = {}
+    for r in rows:
+        side = "call" if r["type"] == 1 else "put"
+        got[(r["target_price"], f"o{r['month']}_{side}_iv")] = r["iv"]
+        got[(r["target_price"], f"o{r['month']}_{side}_price_time")] = r["price_time"]
+    want = {}
+    for r in smile_rows:
+        for c in csvfmt.SMILE_COLUMNS[1:]:
+            if r[c] is not None:
+                want[(r["target_price"], c)] = r[c]
+    assert {k: v for k, v in got.items() if v is not None} == want
+    assert {r["month"] for r in rows} == {1, 2}
+    assert {r["last_trading_day"] for r in rows if r["month"] == 1} == {M1}
+    assert {r["last_trading_day"] for r in rows if r["month"] == 2} == {M2}
+    # API の結果のメタ行: 限月ごとの ATM（put の is_atm）
+    head = api.smile_snapshot(fixture_runner(fx, {"smile_snapshot": SNAPSHOT_TYPES}), NOW).split("\n")[0]
+    assert head == f"{int(SNAP_DT.timestamp())},2026-11-12,25000,2026-12-10,25000"
+
+
 # ---- 実テーブルの dry run（AC 6） ----
 
 def real_sql(name):
@@ -594,6 +723,26 @@ def bars_dry_run_params(end):
         # 過去だけの範囲（左への追加読み込み）: 生データを読まない
         "atm_iv_past": ("atm_iv", api.hourly_params(end, None, daily_start, end - timedelta(days=5), 0)),
     }
+
+
+def completed_day_end(now):
+    """最新の完了した日の終わり（UTC の 0 時）。UTC の 1 日（JST 09:00〜翌 08:59）は日中 + 夜間。夜間が終わった後
+    （22:00 UTC = 07:00 JST 以降）なら当日の UTC の日も書き込みが終わっている"""
+    return api.utc_day(now) + timedelta(days=1 if now.hour >= 22 else 0)
+
+
+@pytest.mark.parametrize("name", ["smile_snapshot", "latest_snapshot"])
+def test_dry_run_smile_snapshot_within_512mib(name, record_property):
+    # #79 AC 7: 最新の完了した日の最後のスナップショット（23:59 UTC）を at にした /smile_snapshot の 2 クエリ
+    at = completed_day_end(datetime.now(UTC)) - timedelta(minutes=1)
+    params = {
+        "latest_snapshot": {"start_at": at - timedelta(days=api.st.SEARCH_DAYS), "end_at": at + timedelta(seconds=1)},
+        "smile_snapshot": {"start_at": at, "end_at": at + timedelta(seconds=1)},
+    }[name]
+    nbytes = bq(real_sql(name), params, dry_run=True, maximum_bytes=GiB)
+    record_property("bytes", nbytes)
+    print(f"dry run {name} (at {at:%Y-%m-%d %H:%M} UTC): {nbytes} bytes ({nbytes / MiB:.1f} MiB)")
+    assert nbytes <= 512 * MiB
 
 
 @pytest.mark.parametrize("name", ["atm_iv_minute", "trading_holidays", "atm_iv", "atm_iv_past"])

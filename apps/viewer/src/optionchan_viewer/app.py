@@ -1,7 +1,9 @@
-"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 3 つ（/smile_data /atm_iv_data /atm_iv_bars）。
+"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 4 つ（/smile_data /smile_snapshot /atm_iv_data
+/atm_iv_bars）。
 
 /smile_data・/atm_iv_data の URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。/atm_iv_bars は /atm_iv の足の
 切り替え・表示範囲に応じた読み込み用（#68・#77。CSV は /atm_iv_data と同じ列。期間は start・end）。
+/smile_snapshot は /smile の時点の移動用（#79。at 以前で最新のスナップショットの 1 時点。曲線の列は smile.py）。
 認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
 """
 
@@ -81,6 +83,15 @@ def create_app(runner=None, clock=None) -> Flask:
     @app.get("/smile_data")
     def smile_data():
         return csv_response("smile_data", lambda: api.smile_data(runner, clock()))
+
+    @app.get("/smile_snapshot")
+    def smile_snapshot():
+        def produce():
+            # 検証を先に（不正なら BigQuery を呼ばない）
+            at = api.parse_at(request.args.get("at"), clock())
+            return api.smile_snapshot(runner, at)
+
+        return csv_response("smile_snapshot", produce)
 
     @app.get("/atm_iv_data")
     def atm_iv_data():

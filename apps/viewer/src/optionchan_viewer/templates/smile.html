@@ -5,19 +5,66 @@
     <meta http-equiv="Cache-Control" content="no-cache">
     <meta http-equiv="Expires" content="0">
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>スマイルカーブ</title>
     <script src="/static/vendor/chart.umd.min.js"></script>
     <script src="/static/smile.js" defer></script>
     <link rel="stylesheet" href="/static/viewer.css">
-    <title>スマイルカーブ</title>
 </head>
 <body>
-<a href="/">トップへ</a><br />
-<div class="chart-area">
-    <canvas id="chartCanvas"></canvas>
-</div><br />
-<div id="message"></div>
-<div id="loading">
-  <img src="/static/loading.gif" />
+<a href="/">トップへ</a>
+<h1 class="chart-title">スマイルカーブ <span id="snapshot-time" class="snapshot-time"></span></h1>
+<div id="control" class="smile-control">
+    <div class="control-row">
+        <button id="latest" type="button">最新</button>
+        <button type="button" class="step" data-step="-86400">−1日</button>
+        <button type="button" class="step" data-step="-3600">−1時間</button>
+        <button type="button" class="step" data-step="-600">−10分</button>
+        <button type="button" class="step" data-step="-60">−1分</button>
+        <button type="button" class="step" data-step="60">+1分</button>
+        <button type="button" class="step" data-step="600">+10分</button>
+        <button type="button" class="step" data-step="3600">+1時間</button>
+        <button type="button" class="step" data-step="86400">+1日</button>
+    </div>
+    <div class="control-row">
+        <label>日時（JST）<input id="at-input" type="datetime-local" step="60"></label>
+        <button id="at-go" type="button">表示</button>
+    </div>
+    <div class="control-row">
+        <label><input id="show-m1" type="checkbox" checked>1限月</label>
+        <label><input id="show-m2" type="checkbox" checked>2限月</label>
+        <label>表示
+            <select id="mode">
+                <option value="otm" selected>OTM合成</option>
+                <option value="cp">call・put別</option>
+            </select>
+        </label>
+        <button id="pin" type="button">この時点を固定</button>
+        <button id="unpin" type="button" disabled>固定を解除</button>
+        <button id="reset" type="button">表示をリセット</button>
+    </div>
 </div>
+<div id="legend" class="smile-legend"></div>
+<div id="cursor" class="smile-cursor"></div>
+<div id="chart-wrap" class="chart-wrap" aria-busy="true">
+    <div class="chart-box">
+        <canvas id="chart" class="smile-canvas"></canvas>
+    </div>
+    <!-- 読み込み中（最初・時点の移動）: チャートを薄くしてスピナー -->
+    <div id="chart-busy" class="chart-busy" role="status" hidden>
+        <span class="spinner" aria-hidden="true"></span><span>読み込み中…</span>
+    </div>
+    <div id="chart-error" class="chart-error" role="alert" hidden>
+        <div class="chart-error-box">
+            <span id="chart-error-text"></span>
+            <button id="chart-retry" type="button">再試行</button>
+        </div>
+    </div>
+</div>
+<div id="message" class="chart-note"></div>
+<p class="chart-help">
+    線: 気配の仲値（mid）の IV、縦のひげ: 買い気配（bid）〜売り気配（ask）の IV、点: 約定の IV。
+    ホイール・ドラッグ（スマートフォンはピンチ・スワイプ）で拡大縮小・スクロール。
+</p>
 </body>
 </html>

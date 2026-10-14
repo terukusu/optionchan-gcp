@@ -1,6 +1,6 @@
 """CSV の形式（現行の HTTP 関数の契約）の純粋関数の検査（#52 AC 2）。"""
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
@@ -17,6 +17,8 @@ def test_cell():
     assert csvfmt.cell(datetime(2026, 10, 13, 7, 0, tzinfo=UTC)) == "2026-10-13 07:00:00+00:00"
     jst = timezone(timedelta(hours=9))
     assert csvfmt.cell(datetime(2026, 10, 13, 16, 0, tzinfo=jst)) == "2026-10-13 07:00:00+00:00"
+    # 日付（/smile_snapshot の最終取引日）
+    assert csvfmt.cell(date(2026, 11, 12)) == "2026-11-12"
     with pytest.raises(ValueError):
         csvfmt.cell(datetime(2026, 10, 13))
     with pytest.raises(TypeError):
@@ -62,3 +64,23 @@ def test_atm_iv_csv():
         "18.0,19.5,17.75,19.0,2026-10-12 00:00:00+00:00\n,,,,2026-10-12 01:00:00+00:00\n"
     )
     assert csvfmt.atm_iv_csv([]) == ""
+
+
+def test_snapshot_csv():
+    # /smile_snapshot（#79）: メタ行 + SNAPSHOT_COLUMNS の縦持ち
+    at = datetime(2026, 10, 13, 5, 59, tzinfo=UTC)
+    months = {1: {"last_trading_day": date(2026, 11, 12), "atm": 25000},
+              2: {"last_trading_day": date(2026, 12, 10), "atm": None}}
+    rows = [
+        {"month": 1, "type": 2, "target_price": 24750, "iv": None, "price": 150, "price_time": 1760335080,
+         "bid_iv": 20.0, "ask_iv": 21.0, "bid": 145, "ask": 155, "mid_iv": 20.5, "otm": 1},
+        {"month": 2, "type": 1, "target_price": 25000, "iv": 17.25, "price": None, "price_time": None,
+         "bid_iv": None, "ask_iv": 18.0, "bid": None, "ask": 610, "mid_iv": None, "otm": 0},
+    ]
+    text = csvfmt.snapshot_csv(at, months, rows)
+    lines = text.split("\n")
+    assert lines[0] == f"{int(at.timestamp())},2026-11-12,25000,2026-12-10,"
+    assert lines[1] == "1,2,24750,,150,1760335080,20.0,21.0,145,155,20.5,1"
+    assert lines[2] == "2,1,25000,17.25,,,,18.0,,610,,0"
+    assert all(len(line.split(",")) == len(csvfmt.SNAPSHOT_COLUMNS) == 12 for line in lines[1:-1])
+    assert text.endswith("\n") and lines[-1] == ""
