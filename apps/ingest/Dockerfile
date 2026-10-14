@@ -1,4 +1,4 @@
-# 取り込みサービス（Cloud Run）。ビルド context はリポジトリ直下（config/ と schema/tokyo/ を同梱するため）:
+# 取り込みサービス（Cloud Run）。ビルド context はリポジトリ直下（schema/tokyo/ を同梱するため）:
 #   docker build -f apps/ingest/Dockerfile -t ingest:local .
 # context に入るものは .dockerignore（許可リスト方式）で限定する。auth.txt・functions/ 等は入らない
 ARG PYTHON_IMAGE=python:3.13-slim@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f
@@ -20,7 +20,6 @@ RUN uv sync --locked --no-dev --no-editable
 FROM ${PYTHON_IMAGE}
 RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
 COPY --from=build /opt/venv /opt/venv
-COPY config/trading_calendar.toml /app/config/trading_calendar.toml
 COPY schema/tokyo/ /app/schema/tokyo/
 ENV PATH=/opt/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \

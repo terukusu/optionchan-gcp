@@ -3,7 +3,7 @@
 - JPX「祝日取引」のページ（祝日取引実施日の表・注記・取引時間の表）と内閣府の祝日 CSV の解析
 - 版（Version）の組み立て: ページの行 + 規則（平日の 1/1 は常に休業。表に載らない）+ 前の版の過去年の行の引き継ぎ
 - 検証（Problem の一覧）: 形・祝日との照合・年末年始（上書き不可）と、前の版との差分（--accept で上書き可）
-- BigQuery の行（schema/tokyo/trading_calendar.json）との変換、TOML（config/trading_calendar.toml）の生成
+- BigQuery の行（schema/tokyo/trading_calendar.json）との変換
 - 過去年の埋め戻し（#67）: 祝日 CSV と JPX「祝日取引実施日（確定）一覧」（xlsx）から、版の掲載範囲より前の行を作る
 
 版の 1 行は「業務規程上の休業日に当たる平日 1 日」（国民の祝日・休日と年末年始 12/31・1/1・1/2・1/3）。
@@ -15,11 +15,10 @@ import io
 import json
 import posixpath
 import re
-import tomllib
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
 from urllib.parse import urljoin
 from xml.etree import ElementTree
 
@@ -143,13 +142,12 @@ class LoadedVersion:
 
 @dataclass(frozen=True)
 class Reference:
-    """差分の検証の基準（前の版、または版が無いときのイメージの TOML）"""
+    """差分の検証の基準（前の版。版が無い初回は基準なし = 差分の検証をしない）"""
 
     closed_dates: frozenset[date]
     covered_until: date
     listed_until: date
-    rows: dict[date, DayRow] | None  # 確定/予定を比べられる行（TOML には無い）
-    check_past: bool  # 過去日の変化を見る（TOML は過去日を書かないので見ない）
+    rows: dict[date, DayRow]  # 確定/予定を比べる行
     # 掲載範囲の開始。これより前への過去年の行（source = history）の追加は変化に数えない
     listed_from: date | None = None
 
@@ -565,15 +563,8 @@ def build_version(page: JpxPage, previous: Version | None = None) -> Version:
 
 def reference_from_version(version: Version) -> Reference:
     return Reference(
-        version.closed_dates, version.covered_until, version.listed_until, version.by_date, True, version.listed_from
+        version.closed_dates, version.covered_until, version.listed_until, version.by_date, version.listed_from
     )
-
-
-def reference_from_calendar(closed_dates, covered_until: date) -> Reference:
-    """BigQuery に版が無いとき（初回）の基準: イメージの TOML。掲載範囲は書いてある最後の休業日の年末まで"""
-    closed = frozenset(closed_dates)
-    listed = date(max(closed).year, 12, 31) if closed else covered_until
-    return Reference(closed, covered_until, max(listed, covered_until), None, False)
 
 
 # ---- 検証 ----
@@ -669,10 +660,9 @@ def _diff_problems(version: Version, ref: Reference, today: date) -> list[Proble
         changed = frozenset(
             d for d in changed if not (d < ref.listed_from and by_date.get(d) and by_date[d].source == SOURCE_HISTORY)
         )
-    if ref.check_past:
-        past = sorted(d for d in changed if d < today)
-        if past:
-            problems.append(Problem("past_changed", f"過去日の休業/取引日が変わる: {past[:5]}", True))
+    past = sorted(d for d in changed if d < today)
+    if past:
+        problems.append(Problem("past_changed", f"過去日の休業/取引日が変わる: {past[:5]}", True))
     if version.covered_until < ref.covered_until:
         problems.append(
             Problem(
@@ -685,18 +675,17 @@ def _diff_problems(version: Version, ref: Reference, today: date) -> list[Proble
         problems.append(
             Problem("listed_until_regressed", f"掲載範囲が縮む: {ref.listed_until} → {version.listed_until}", True)
         )
-    if ref.rows is not None:
-        regressed = []
-        for d, old in sorted(ref.rows.items()):
-            new = version.by_date.get(d)
-            if d < today or old.status != CONFIRMED:
-                continue
-            if new is None or new.status != CONFIRMED or new.is_trading_day != old.is_trading_day:
-                regressed.append(d)
-        if regressed:
-            problems.append(
-                Problem("confirmed_changed", f"確定の日が消える・予定に戻る・実施有無が変わる: {regressed[:5]}", True)
-            )
+    regressed = []
+    for d, old in sorted(ref.rows.items()):
+        new = version.by_date.get(d)
+        if d < today or old.status != CONFIRMED:
+            continue
+        if new is None or new.status != CONFIRMED or new.is_trading_day != old.is_trading_day:
+            regressed.append(d)
+    if regressed:
+        problems.append(
+            Problem("confirmed_changed", f"確定の日が消える・予定に戻る・実施有無が変わる: {regressed[:5]}", True)
+        )
     future = sorted(d for d in changed if today <= d <= ref.listed_until)
     if len(future) > MAX_FUTURE_CHANGES:
         problems.append(
@@ -722,7 +711,7 @@ def closed_diff(version: Version, ref: Reference | None, today: date) -> dict:
 
 
 def sessions_mismatch(page_sessions: dict[str, time] | None, configured: dict[str, time]) -> str | None:
-    """ページの取引時間と設定（TOML の [sessions]）の違い。同じなら None"""
+    """ページの取引時間と設定（settings.SESSION_*）の違い。同じなら None"""
     if page_sessions is None:
         return "ページの取引時間の表が読めない"
     diffs = [
@@ -798,18 +787,19 @@ def from_rows(rows: list[dict]) -> LoadedVersion | None:
     return LoadedVersion(one["version_at"].pop(), version, accepted)
 
 
-def ingest_sanity(loaded: LoadedVersion, current_closed, today: date) -> list[str]:
+def ingest_sanity(loaded: LoadedVersion, previous_closed, today: date) -> list[str]:
     """ingest が版を使う前の最低限の検査（取り込み側の検証をすり抜けた誤りで取引日を取りこぼさないため）。
 
-    - 今日から CLOSE_GUARD_DAYS 日以内に、今使っている値（前の版か TOML）より休業日が増えていない
-      （手動で受け入れた版（override）は確認済みなので見ない）
+    - 今日から CLOSE_GUARD_DAYS 日以内に、直前に読めた版（previous_closed）より休業日が増えていない
+      （手動で受け入れた版（override）は確認済みなので見ない。previous_closed が None = 直前の版が無い
+      起動直後は比べる相手が無いので見ない）
     - 1 年あたりの休業平日が MAX_CLOSED_PER_YEAR 以下
     """
     problems = []
     closed = loaded.version.closed_dates
-    if loaded.accepted != ACCEPTED_OVERRIDE:
+    if loaded.accepted != ACCEPTED_OVERRIDE and previous_closed is not None:
         horizon = today + timedelta(days=CLOSE_GUARD_DAYS)
-        soon = sorted(d for d in closed - frozenset(current_closed) if today <= d <= horizon)
+        soon = sorted(d for d in closed - frozenset(previous_closed) if today <= d <= horizon)
         if soon:
             problems.append(f"closes_soon: {CLOSE_GUARD_DAYS} 日以内に休業日が増える {soon}")
     per_year = Counter(d.year for d in closed)
@@ -817,115 +807,3 @@ def ingest_sanity(loaded: LoadedVersion, current_closed, today: date) -> list[st
     if over:
         problems.append(f"too_many_closed: 1 年の休業平日が {MAX_CLOSED_PER_YEAR} を超える {over}")
     return problems
-
-
-# ---- TOML の生成（config/trading_calendar.toml を最新版に合わせる。PR は workflow calendar-toml が出す（#66）） ----
-
-
-def render_toml(base_text: str, version: Version, today: date) -> str:
-    """base_text（今の TOML）の covered_until と closed_dates だけを版の値に置き換える。コメント・他のキーはそのまま。
-
-    closed_dates は今日以降の休業日（予定を含む）。過去日は書かない（今の運用と同じ）
-    """
-    lines = []
-    for r in version.rows:
-        if r.is_trading_day or r.calendar_date < today:
-            continue
-        status = "確定" if r.status == CONFIRMED else "予定"
-        note = "。祝日取引を実施しない" if r.day_type == NATIONAL_HOLIDAY and r.source == SOURCE_JPX else ""
-        lines.append(f"  {r.calendar_date.isoformat()}, # {r.name}（{status}{note}）")
-    block = "closed_dates = [\n" + "\n".join(lines) + ("\n" if lines else "") + "]"
-    text, n1 = re.subn(r"(?m)^covered_until = .*$", f"covered_until = {version.covered_until.isoformat()}", base_text)
-    text, n2 = re.subn(r"(?ms)^closed_dates = \[.*?^\]", lambda _: block, text)
-    if n1 != 1 or n2 != 1:
-        raise ValueError("TOML の covered_until / closed_dates が見つからない")
-    data = tomllib.loads(text)  # 生成した TOML が読めること
-    if set(data["closed_dates"]) != {d for d in version.closed_dates if d >= today}:
-        raise ValueError("生成した TOML の closed_dates が版と合わない")
-    return text
-
-
-@dataclass(frozen=True)
-class TomlChange:
-    """今の TOML と最新版の違い（今日以降の休業日と covered_until。過ぎた休業日・コメントだけの違いは数えない）"""
-
-    text: str  # 最新版に合わせた TOML（render_toml）
-    added: tuple[tuple[date, str], ...]  # (日付, コメント) 今日以降で版にだけある休業日
-    removed: tuple[tuple[date, str], ...]  # (日付, コメント) 今日以降で TOML にだけある休業日
-    covered_until: tuple[date, date]  # (TOML, 版)
-
-    @property
-    def toml_newer(self) -> bool:
-        """TOML の covered_until の方が新しい（手で延ばした。ingest は TOML を使う）ので版に合わせない"""
-        return self.covered_until[0] > self.covered_until[1]
-
-    @property
-    def changed(self) -> bool:
-        return bool(self.added or self.removed) or self.covered_until[0] != self.covered_until[1]
-
-
-_TOML_DATE_LINE = re.compile(r"^\s*(\d{4}-\d{2}-\d{2})\s*,?\s*(?:#\s*(.*?))?\s*$")
-
-
-def _toml_comments(text: str) -> dict[date, str]:
-    """closed_dates の各行のコメント（無ければ空文字）"""
-    m = re.search(r"(?ms)^closed_dates = \[(.*?)^\]", text)
-    comments = {}
-    for line in (m.group(1) if m else "").splitlines():
-        hit = _TOML_DATE_LINE.match(line)
-        if hit:
-            comments[date.fromisoformat(hit.group(1))] = hit.group(2) or ""
-    return comments
-
-
-def toml_change(base_text: str, version: Version, today: date) -> TomlChange:
-    """今の TOML（base_text）と版の違い。text は render_toml の結果（changed でなければ使わない）"""
-    data = tomllib.loads(base_text)
-    old_closed = {d for d in data["closed_dates"] if d >= today}
-    new_closed = {d for d in version.closed_dates if d >= today}
-    text = render_toml(base_text, version, today)
-    old_comments, new_comments = _toml_comments(base_text), _toml_comments(text)
-    return TomlChange(
-        text=text,
-        added=tuple((d, new_comments.get(d, "")) for d in sorted(new_closed - old_closed)),
-        removed=tuple((d, old_comments.get(d, "")) for d in sorted(old_closed - new_closed)),
-        covered_until=(data["covered_until"], version.covered_until),
-    )
-
-
-def toml_pr_text(change: TomlChange, version_at: datetime, today: date) -> tuple[str, str]:
-    """PR のタイトルと本文（Markdown）"""
-    old, new = change.covered_until
-    parts = []
-    if change.added:
-        parts.append(f"休業日 +{len(change.added)}")
-    if change.removed:
-        parts.append(f"休業日 -{len(change.removed)}")
-    if old != new:
-        parts.append(f"covered_until {old.isoformat()} → {new.isoformat()}")
-    title = f"取引カレンダーの TOML を BigQuery の最新版に合わせる（{'、'.join(parts)}）"
-
-    def items(days):
-        return [f"  - {d.isoformat()}" + (f"（{c}）" if c else "") for d, c in days] or ["  - なし"]
-
-    body = "\n".join(
-        [
-            "`config/trading_calendar.toml` の `closed_dates` / `covered_until` を BigQuery の取引カレンダーの最新版"
-            f"（`trading_calendar_latest`、version_at {version_at.astimezone(UTC).isoformat()}）に合わせる。",
-            "workflow `calendar-toml`（#66）が `python -m optionchan_ingest.calendar_sync --update-toml` で生成した。",
-            "",
-            f"- covered_until: {old.isoformat()} → {new.isoformat()}" + ("" if old != new else "（変わらない）"),
-            "- 追加した休業日:",
-            *items(change.added),
-            "- 削除した休業日:",
-            *items(change.removed),
-            "",
-            f"{today.isoformat()} より前の休業日は TOML に書かないので、過ぎた日の削除は差分に数えない。"
-            "コメント（確定/予定・名称）は版の値で書き直す。",
-            "",
-            "確認: JPX「祝日取引」のページ（https://www.jpx.co.jp/derivatives/rules/holidaytrading/index.html ）と"
-            "休業日が合うこと。マージすると ingest のイメージが作り直され、deploy の承認が要る"
-            "（docs/runbook.md「取引カレンダー（#63）」の「TOML」）。",
-        ]
-    )
-    return title, body + "\n"

@@ -1,27 +1,23 @@
-"""取引カレンダーの読み込みとセッションの判定（純粋関数）。
+"""取引カレンダーとセッションの判定（純粋関数）。
 
-取引時間・grace・no_night_session_before はイメージの config/trading_calendar.toml。
-休業日（closed_dates）と covered_until は BigQuery の最新版（#63、calendar_sync.py）で置き換え、
-読めないときは TOML の値を使う（with_closed_dates）。
+取引時間・grace・no_night_session_before は settings の定数。休業日（closed_dates）と covered_until は
+BigQuery の最新版（#63、calendar_sync.CalendarHolder）だけが正で、コードには持たない（#75）。
+版を一度も読めていないときは休業日なし（土日以外はすべて取引日）・covered_until なしの値（build_calendar() の既定）。
 """
 
-import tomllib
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 
+from . import settings
 from .parser import JST
 
 DAY = "day"
 NIGHT = "night"
 
-_TOP_KEYS = {"covered_until", "grace_minutes", "closed_dates", "no_night_session_before"}
-_SESSION_KEYS = {"day_open", "day_close", "night_open", "night_close"}
-
 
 @dataclass(frozen=True)
 class Calendar:
-    covered_until: date
+    covered_until: date | None  # 版の確定の最終日。版を読めていなければ None（休業日が分からない）
     closed_dates: frozenset[date]
     no_night_session_before: frozenset[date]
     day_open: time
@@ -46,11 +42,14 @@ class Calendar:
         return d
 
     def is_outdated(self, now: datetime) -> bool:
-        """now が covered_until を過ぎた（未知の平日を取引日として判定している）"""
-        return _jst(now).date() > self.covered_until
+        """休業日を判定できない（未知の平日を取引日として判定している）: now が covered_until を過ぎたか、
+        版を読めていない（covered_until が None）"""
+        return self.covered_until is None or _jst(now).date() > self.covered_until
 
-    def days_left(self, now: datetime) -> int:
-        """covered_until までの日数（JST の日付。当日は 0、過ぎたら負）"""
+    def days_left(self, now: datetime) -> int | None:
+        """covered_until までの日数（JST の日付。当日は 0、過ぎたら負）。版を読めていなければ None"""
+        if self.covered_until is None:
+            return None
         return (self.covered_until - _jst(now).date()).days
 
 
@@ -62,36 +61,18 @@ class Session:
     end: datetime  # セッションの終了（余裕を含まない立会の終了時刻。JST aware）
 
 
-def _parse_time(text: str) -> time:
-    hour, minute = text.split(":")
-    return time(int(hour), int(minute))
-
-
-def load_calendar(path: str | Path) -> Calendar:
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-    # キーの置き場所の誤り（[sessions] の後に closed_dates を書く等）を黙って無視しない
-    top = set(data) - {"sessions"}
-    if top != _TOP_KEYS:
-        raise ValueError(f"trading calendar keys: {sorted(top)} (expected {sorted(_TOP_KEYS)})")
-    sessions = data["sessions"]
-    if set(sessions) != _SESSION_KEYS:
-        raise ValueError(f"trading calendar [sessions] keys: {sorted(sessions)}")
+def build_calendar(closed_dates=(), covered_until: date | None = None) -> Calendar:
+    """settings の取引時間に休業日と covered_until を合わせたカレンダー。引数なしは版を読めていないときの値"""
     return Calendar(
-        covered_until=data["covered_until"],
-        closed_dates=frozenset(data["closed_dates"]),
-        no_night_session_before=frozenset(data["no_night_session_before"]),
-        day_open=_parse_time(sessions["day_open"]),
-        day_close=_parse_time(sessions["day_close"]),
-        night_open=_parse_time(sessions["night_open"]),
-        night_close=_parse_time(sessions["night_close"]),
-        grace=timedelta(minutes=int(data["grace_minutes"])),
+        covered_until=covered_until,
+        closed_dates=frozenset(closed_dates),
+        no_night_session_before=frozenset(settings.NO_NIGHT_SESSION_BEFORE),
+        day_open=settings.SESSION_DAY_OPEN,
+        day_close=settings.SESSION_DAY_CLOSE,
+        night_open=settings.SESSION_NIGHT_OPEN,
+        night_close=settings.SESSION_NIGHT_CLOSE,
+        grace=timedelta(minutes=settings.SESSION_GRACE_MINUTES),
     )
-
-
-def with_closed_dates(cal: Calendar, closed_dates, covered_until: date) -> Calendar:
-    """休業日と covered_until だけを置き換えたカレンダー（取引時間などはそのまま）"""
-    return replace(cal, closed_dates=frozenset(closed_dates), covered_until=covered_until)
 
 
 def sessions_of(cal: Calendar) -> dict[str, time]:

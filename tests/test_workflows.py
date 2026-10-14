@@ -13,7 +13,7 @@ WORKFLOWS_DIR = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__
 WORKFLOW_FILES = sorted(glob.glob(os.path.join(WORKFLOWS_DIR, '*.yml')) + glob.glob(os.path.join(WORKFLOWS_DIR, '*.yaml')))
 SHA_PINNED = re.compile(r'^[^@\s]+@[0-9a-f]{40}$')
 # id-token: write（GCP の SA を借用できる）を持ってよい job
-ID_TOKEN_JOBS = {'terraform-plan', 'plan', 'apply', 'read-calendar'}
+ID_TOKEN_JOBS = {'terraform-plan', 'plan', 'apply'}
 
 
 def load(path):
@@ -148,30 +148,3 @@ def test_plan_passes_both_images():
         plan_step = next(s for s in steps if s.get('name') == 'terraform plan（prod）')
         assert {'TF_VAR_ingest_image', 'TF_VAR_viewer_image'} <= set(plan_step['env']), path
 
-
-def test_calendar_toml_separates_gcp_and_write_tokens():
-    """#66: 最新版を読む job（GCP の SA を借用）と、PR / Issue を書く job を分ける"""
-    wf = load(os.path.join(WORKFLOWS_DIR, 'calendar-toml.yml'))
-    assert set(triggers(wf)) == {'schedule', 'workflow_dispatch'}
-    read, propose = wf['jobs']['read-calendar'], wf['jobs']['propose']
-    # 読む job: リポジトリへの書き込み権限は無く、master の ref でだけ動く（SA の借用も master の subject だけ）
-    assert read['permissions'] == {'contents': 'read', 'id-token': 'write'}
-    assert "github.ref == 'refs/heads/master'" in read['if']
-    read_text = yaml.safe_dump(read, allow_unicode=True)
-    assert 'vars.GCP_SA_CALENDAR_TOML' in read_text
-    assert 'GCP_SA_TF_PLAN' not in read_text
-    assert 'create-github-app-token' not in read_text
-    # 書く job: GCP の SA を借用しない。App のトークンは contents・pull-requests の write だけ
-    assert 'id-token' not in propose['permissions']
-    assert propose['permissions'] == {'contents': 'read', 'issues': 'write'}
-    app = next(s for s in propose['steps'] if s.get('uses', '').startswith('actions/create-github-app-token@'))
-    assert {k: v for k, v in app['with'].items() if k.startswith('permission-')} == {
-        'permission-contents': 'write',
-        'permission-pull-requests': 'write',
-    }
-    assert not any(s.get('uses', '').startswith('google-github-actions/auth@') for s in propose['steps'])
-    # App の秘密鍵は master だけの Environment calendar の secret。読む job は Environment を使わない
-    # （使うと OIDC の subject が environment:… になり、master の ref に限った SA の借用が通らない）
-    assert propose['environment'] == 'calendar'
-    assert 'environment' not in read
-    assert app['with']['private-key'] == '${{ secrets.CALENDAR_APP_PRIVATE_KEY }}'

@@ -9,14 +9,14 @@ fixture:
 from datetime import date, timedelta
 
 import pytest
-from conftest import FIXTURES, REPO_ROOT
+from calgen import CAL
+from conftest import FIXTURES
 from test_calendar_sync import CSV as CSV_2026
 from test_calendar_sync import FIXTURE, VERSION_AT, FakeSync, events, loaded, logs, sync
 from xlsxgen import read_rows, xlsx_bytes
 
 from optionchan_ingest import calendar_sync
 from optionchan_ingest import jpx_calendar as jc
-from optionchan_ingest.calendar import load_calendar
 from optionchan_ingest.calendar_sync import CalendarFetchFailed, CalendarHolder, SyncDeps
 from optionchan_ingest.parser import jst
 
@@ -28,7 +28,6 @@ HOLIDAYS = jc.parse_holidays_csv(CSV_ALL)
 HELD = jc.parse_holiday_trading_xlsx(XLSX)
 START, END = date(2018, 1, 1), date(2026, 1, 1)
 XLSX_URL = "https://www.jpx.co.jp/derivatives/rules/holidaytrading/nlsgeu000006hweb-att/List_of_Finalized_Holiday_Trading_Days_J.xlsx"
-CAL = load_calendar(REPO_ROOT / "config" / "trading_calendar.toml")
 
 
 def fixture_version():
@@ -259,7 +258,7 @@ def test_backfilled_rows_round_trip_and_ingest_sanity():
         per_year[d.year] = per_year.get(d.year, 0) + 1
     assert max(per_year.values()) == per_year[2019] == 20 <= jc.MAX_CLOSED_PER_YEAR
     # 前の版（2026〜）を使っている ingest が埋め戻した版に切り替えても、今日以降の判定は同じ
-    holder = CalendarHolder(CAL, load=None)
+    holder = CalendarHolder(load=None)
     holder.apply(loaded(fixture_version()), {}, "test", jst(2026, 10, 15, 9, 0))
     before = holder.current
     holder.apply(
@@ -270,13 +269,6 @@ def test_backfilled_rows_round_trip_and_ingest_sanity():
         d for d in before.closed_dates if d >= date(2026, 10, 15)
     }
     assert not holder.current.is_trading_day(date(2019, 5, 1))
-
-
-def test_toml_ignores_history_rows():
-    text = (REPO_ROOT / "config" / "trading_calendar.toml").read_text(encoding="utf-8")
-    assert jc.render_toml(text, backfilled(), date(2026, 10, 15)) == jc.render_toml(
-        text, fixture_version(), date(2026, 10, 15)
-    )
 
 
 # ---- run_sync / 手動ジョブ ----
@@ -295,11 +287,9 @@ class FakeBackfill(FakeSync):
             raise self.xlsx_error
         return self.xlsx
 
-    def deps(self, base=CAL):
-        d = super().deps(base)
-        return SyncDeps(
-            d.base, d.load_latest, d.fetch_page, d.fetch_holidays, d.append_rows, d.clock, fetch_url=self.fetch_url
-        )
+    def deps(self):
+        d = super().deps()
+        return SyncDeps(d.load_latest, d.fetch_page, d.fetch_holidays, d.append_rows, d.clock, fetch_url=self.fetch_url)
 
 
 def test_backfill_writes_one_version(capsys):
@@ -360,7 +350,7 @@ def test_backfill_failures_do_not_write(capsys, kwargs, stage):
 
 def test_main_backfill(capsys):
     def run(argv, fake):
-        return calendar_sync.main(argv, deps=fake.deps(), base_path=REPO_ROOT / "config" / "trading_calendar.toml")
+        return calendar_sync.main(argv, deps=fake.deps())
 
     fake = FakeBackfill(latest=loaded())
     assert run(["--dry-run", "--backfill-from=2018-01-01"], fake) == 0
