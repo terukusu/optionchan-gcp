@@ -6,6 +6,8 @@
 //   中断する。読んだスナップショットと「at → どのスナップショットか」の区間を覚え、同じ時点ではサーバーに要求しない
 // - 取りすぎ防止: この画面で出す要求は MAX_REQUESTS 回まで（1 回 約 130 MiB のスキャン。中断・再試行も数える）
 // - 表示の切り替えは hidden 属性・classList・disabled だけ（CSP の style-src 'self'）
+// - 約定 IV の点は約定からの経過（smile_age.js の SmileAge。#82）で段ごとに塗り・枠・大きさを変える（Chart.js の点ごとの配列）。
+//   「経過時間」をオンにすると経過（分）を右軸に描く（サーバーに要求しない）
 // 時刻は UTC の UNIX 秒で持ち、表示は JST（日本に夏時間は無いので 9 時間を足す）。
 var JST_OFFSET = 9 * 3600;
 var DAY = 86400;
@@ -25,6 +27,13 @@ var COLORS = {
   put: { 1: '#1565c0', 2: '#90caf9' },
   pin: { 1: '#9e9e9e', 2: '#cfcfcf' },
 };
+// 約定 IV の点の段ごとの見た目（SmileAge.TIERS の順。fill / border は曲線の色の不透明度、null は白）
+var TIER_STYLE = [
+  { fill: 1, border: 1, radius: 3.5 },
+  { fill: 0.45, border: 1, radius: 3 },
+  { fill: null, border: 1, radius: 2.5 },
+  { fill: null, border: 0.35, radius: 2.5 },
+];
 var COLUMNS = ['month', 'type', 'target_price', 'iv', 'price', 'price_time', 'bid_iv', 'ask_iv', 'bid', 'ask', 'mid_iv',
   'otm'];
 
@@ -93,6 +102,24 @@ function fmtIv(v) {
 
 function fmtNum(v) {
   return v === null ? '—' : String(v);
+}
+
+// '#rrggbb' と不透明度 → 'rgba(...)'（1 はそのまま）
+function alpha(hex, a) {
+  if (a === 1) {
+    return hex;
+  }
+  var n = parseInt(hex.slice(1), 16);
+  return 'rgba(' + (n >> 16) + ', ' + ((n >> 8) & 255) + ', ' + (n & 255) + ', ' + a + ')';
+}
+
+// 約定時刻の表示: 'YYYY-MM-DD HH:MM（N分前）'。スナップショットより後は経過を出さない
+function fmtPriceTime(snapshot, priceTime) {
+  if (priceTime === null) {
+    return '—';
+  }
+  var ago = SmileAge.agoText(SmileAge.ageSeconds(snapshot, priceTime));
+  return formatJst(priceTime) + '（' + (ago === null ? '時点より後' : ago) + '）';
 }
 
 // ---- CSV ----
@@ -183,6 +210,10 @@ function mode() {
   return el('mode').value;
 }
 
+function showAge() {
+  return el('show-age').checked;
+}
+
 // 描く曲線のまとまり: OTM 合成は限月ごとに 1 本（otm の行）、call・put 別は限月 × type
 function groups(snap) {
   var out = [];
@@ -211,6 +242,50 @@ function points(rows, key) {
   return out;
 }
 
+// 約定 IV の点: 点ごとに経過の段の見た目にする
+function tradeDataset(snap, g) {
+  var data = [];
+  var fill = [];
+  var border = [];
+  var radius = [];
+  g.rows.forEach(function(r) {
+    if (r.iv === null) {
+      return;
+    }
+    var t = TIER_STYLE[SmileAge.tierOf(SmileAge.ageSeconds(snap.s, r.price_time))];
+    data.push({ x: r.target_price, y: r.iv });
+    fill.push(t.fill === null ? '#ffffff' : alpha(g.color, t.fill));
+    border.push(alpha(g.color, t.border));
+    radius.push(t.radius);
+  });
+  return { type: 'line', data: data, showLine: false, borderColor: g.color, backgroundColor: '#ffffff',
+    pointBackgroundColor: fill, pointBorderColor: border, pointRadius: radius, pointStyle: 'circle', borderWidth: 1.2,
+    order: 0 };
+}
+
+// 右軸の経過（分）。約定の時刻が分かる行（経過が null でない行）だけ。
+// 軸は対数（前日の約定が 1 本あっても直近の差が潰れないように）。0 分は描けないので AGE_AXIS_MIN 分に寄せる
+var AGE_AXIS_MIN = 0.5;
+// 右軸の目盛り（分）。対数軸の既定の目盛り（1〜9 × 10^n、小数つき）は上の方で重なるので、読みやすい区切りだけにする
+var AGE_TICKS = [1, 5, 10, 30, 60, 120, 300, 600, 1440, 2880, 7200, 14400];
+
+function ageTicks(axis) {
+  axis.ticks = AGE_TICKS.filter(function(v) { return v >= axis.min && v <= axis.max; })
+    .map(function(v) { return { value: v }; });
+}
+
+function ageDataset(snap, g) {
+  var data = [];
+  g.rows.forEach(function(r) {
+    var age = SmileAge.ageSeconds(snap.s, r.price_time);
+    if (age !== null) {
+      data.push({ x: r.target_price, y: Math.max(age / 60, AGE_AXIS_MIN) });
+    }
+  });
+  return { type: 'line', yAxisID: 'age', data: data, borderColor: alpha(g.color, 0.6), backgroundColor: g.color,
+    borderDash: [2, 3], borderWidth: 1, pointRadius: 1.5, tension: 0, order: 4 };
+}
+
 function datasets() {
   var out = [];
   groups(shown).forEach(function(g) {
@@ -221,8 +296,10 @@ function datasets() {
       out.push({ type: 'line', data: points(g.rows, key), showLine: false, borderColor: g.color,
         backgroundColor: g.color, pointStyle: 'line', pointRadius: 4, borderWidth: 1, order: 2 });
     });
-    out.push({ type: 'line', data: points(g.rows, 'iv'), showLine: false, borderColor: g.color,
-      backgroundColor: '#ffffff', pointStyle: 'circle', pointRadius: 2.5, borderWidth: 1.2, order: 0 });
+    out.push(tradeDataset(shown, g));
+    if (showAge()) {
+      out.push(ageDataset(shown, g));
+    }
   });
   if (pinned) {
     groups(pinned).forEach(function(g) {
@@ -308,6 +385,7 @@ function setView(min, max) {
 
 function render() {
   chart.data.datasets = datasets();
+  chart.options.scales.age.display = !!shown && showAge();
   applyView();
   chart.update('none');
   renderHeading();
@@ -370,6 +448,29 @@ function renderLegend() {
     item.dataset.role = 'pinned';
     box.appendChild(item);
   }
+  if (showAge()) {
+    var age = legendItem('sw-age', '約定からの経過（右軸）', true);
+    age.dataset.role = 'age';
+    box.appendChild(age);
+  }
+  // 約定 IV の点の段（色見本は曲線の色によらない灰色の丸）
+  var head = document.createElement('span');
+  head.className = 'legend-item';
+  head.textContent = '約定IV:';
+  box.appendChild(head);
+  SmileAge.TIERS.forEach(function(t, i) {
+    var tier = document.createElement('span');
+    tier.className = 'legend-item';
+    tier.dataset.role = 'tier';
+    tier.dataset.tier = String(i);
+    var dot = document.createElement('span');
+    dot.className = 'dot dot-t' + i;
+    tier.appendChild(dot);
+    var label = document.createElement('span');
+    label.textContent = t.label;
+    tier.appendChild(label);
+    box.appendChild(tier);
+  });
 }
 
 function nearestStrike(x) {
@@ -426,7 +527,7 @@ function renderCursor() {
         field(row, 'ask_iv', 'ask', fmtIv(r.ask_iv));
         field(row, 'iv', '約定IV', fmtIv(r.iv));
         field(row, 'price', '約定', fmtNum(r.price));
-        field(row, 'price_time', '約定時刻', r.price_time === null ? '—' : formatJst(r.price_time));
+        field(row, 'price_time', '約定時刻', fmtPriceTime(shown.s, r.price_time));
         field(row, 'bid', '気配', fmtNum(r.bid) + ' / ' + fmtNum(r.ask));
       }
       box.appendChild(row);
@@ -528,6 +629,10 @@ function createChart() {
       scales: {
         x: { type: 'linear', title: { display: true, text: '行使価格' } },
         y: { type: 'linear', grace: '5%', title: { display: true, text: 'IV (%)' } },
+        // 約定からの経過（分）。「経過時間」がオンのときだけ見せる
+        age: { type: 'logarithmic', position: 'right', display: false, min: AGE_AXIS_MIN, grid: { drawOnChartArea: false },
+          afterBuildTicks: ageTicks, ticks: { callback: function(v) { return String(v); } },
+          title: { display: true, text: '約定からの経過（分）' } },
       },
     },
     plugins: [overlay],
@@ -804,6 +909,7 @@ function bind() {
   el('show-m1').addEventListener('change', render);
   el('show-m2').addEventListener('change', render);
   el('mode').addEventListener('change', render);
+  el('show-age').addEventListener('change', render);
   el('pin').addEventListener('click', function() {
     if (shown) {
       pinned = shown;

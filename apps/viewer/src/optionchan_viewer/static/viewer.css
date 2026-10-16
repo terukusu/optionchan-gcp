@@ -206,6 +206,30 @@
 .sw-pin {
     border-top-color: #9e9e9e;
 }
+.sw-age {
+    border-top-width: 2px;
+    border-top-style: dotted;
+    border-top-color: #757575;
+}
+/* 約定 IV の点の段（#82。smile.js の TIER_STYLE と同じ並び: 塗り → 半分 → 白抜き → 薄い白抜き。色は限月によらない灰色） */
+.dot {
+    display: inline-block;
+    box-sizing: border-box;
+    width: 9px;
+    height: 9px;
+    border: 1.5px solid #424242;
+    border-radius: 50%;
+    background: #fff;
+}
+.dot-t0 {
+    background: #424242;
+}
+.dot-t1 {
+    background: rgba(66, 66, 66, 0.45);
+}
+.dot-t3 {
+    border-color: rgba(66, 66, 66, 0.35);
+}
 .smile-canvas {
     touch-action: none;
     cursor: crosshair;
