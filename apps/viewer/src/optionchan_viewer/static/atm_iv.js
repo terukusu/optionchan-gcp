@@ -9,8 +9,7 @@
 //   データの無い範囲が続いたら（EMPTY_LIMIT 回）それより前は無いとみなす
 // - 足・限月を切り替えても表示していた時間の範囲を保つ（その範囲を読み直す。分足は 1 回の上限まで）
 // - 5分・15分足は 1 分足を読んでこの画面で束ねる（1 分・5 分・15 分の切り替えで BigQuery を読み直さない）
-// - IV は約定（既定）か mid（気配の中値。&iv=mid。#93）。mid は分足だけ（1 時間足・日足の集計に mid が無い）なので、
-//   mid のときは 1 時間・日足を選べなくし、1 時間・日足を見ているときに mid を選ぶと 15 分足に切り替える
+// - IV は約定（既定）か mid（気配の中値。&iv=mid。分足は #93、1 時間足・日足は 1 時間足 atm_mid_iv から #98）。どの足でも選べる
 // - サーバーの 1 日のクエリ量の上限（#95）に達すると 429 が返る。そのときは上限に達したことを出す
 // - 限月の選択肢は static/atm_series.js の系列の表（AtmSeries.SERIES）から作る。「期近つなぎ」（n=roll。#101）は
 //   取引日ごとに期近の最終取引日の 5 営業日前で 2 限月へ乗り換えてつないだ足で、乗り換えた足に印（新しい限月）を付け、
@@ -292,8 +291,7 @@ function request(mode, src, n, iv, start, end, onData, onFail) {
 }
 
 // 足・限月・IV を選んだとき・最初: view（保つ時間の範囲）を読み込み済みなら描くだけ、無ければ読む。
-// first: 最初に出す説明（IV の切り替えで足を変えたとき）
-function select(view, first) {
+function select(view) {
   gen++;
   if (inflight) {
     inflight.ctrl.abort();
@@ -309,7 +307,7 @@ function select(view, first) {
   var entry = entries[key];
   var start = null;
   var end = null;
-  var msg = first || '';
+  var msg = '';
   if (view) {
     // 表示していた範囲の右端から 1 回分まで（分足は遡れる範囲の中）
     end = view.atRight ? utcDay(nowSec()) + DAY : view.to;
@@ -371,7 +369,7 @@ function select(view, first) {
     renderMonths();
     showLegend(undefined);
     note('');
-    showError(failText(reason), function() { select(view, first); }, true);
+    showError(failText(reason), function() { select(view); }, true);
   });
 }
 
@@ -516,32 +514,9 @@ function onSelect() {
   select(visibleTimeRange());
 }
 
-// mid のときは 1 時間・日足を選べなくする（mid は分足だけ）
-function updateTfOptions() {
-  var mid = el('ivkind').value === 'mid';
-  Array.prototype.forEach.call(el('tf').options, function(o) {
-    o.disabled = mid && TF[o.value].seconds >= 3600;
-  });
-}
-
-// mid で 1 時間・日足なら 15 分足にする（ブラウザが前の選択を戻したときも）。変えたら説明を返す
-function fixTf() {
-  if (el('ivkind').value === 'mid' && TF[el('tf').value].seconds >= 3600) {
-    el('tf').value = '15m';
-    return 'mid は分足（1分・5分・15分）だけです。15分足に切り替えました';
-  }
-  return '';
-}
-
-function onIvChange() {
-  var first = fixTf();
-  updateTfOptions();
-  select(visibleTimeRange(), first);
-}
-
 el('tf').addEventListener('change', onSelect);
 el('nmonth').addEventListener('change', onSelect);
-el('ivkind').addEventListener('change', onIvChange);
+el('ivkind').addEventListener('change', onSelect);
 el('chart-retry').addEventListener('click', function() {
   if (retry) {
     retry();
@@ -550,6 +525,4 @@ el('chart-retry').addEventListener('click', function() {
 
 fillSeriesOptions();
 createChart();
-var initialNote = fixTf();
-updateTfOptions();
-select(null, initialNote);
+select(null);

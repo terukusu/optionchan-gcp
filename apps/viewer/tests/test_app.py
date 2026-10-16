@@ -674,6 +674,10 @@ def mid_results():
         minute(5, 52, None, None, None, None),
         minute(5, 53, 18.3, 18.4, 18.2, 18.4),
     ]
+    # 1 時間足・日足の mid（#98）: 約定と同じ形の 1 時間足（値は約定と違う）
+    results["atm_mid"] = [
+        {**r, **({} if r["high"] is None else {k: r[k] + 0.5 for k in ("open", "high", "low", "close")})}
+        for r in results["atm_iv"]]
     return results
 
 
@@ -697,10 +701,31 @@ def test_atm_iv_bars_trade_is_default(make):
     assert [name for name, _ in runner.calls].count("atm_mid_minute") == 0
 
 
-@pytest.mark.parametrize("query", ["tf=1h&iv=mid", "iv=mid", "tf=1d&iv=mid", "tf=1m&iv=", "tf=1m&iv=MID",
-                                   "tf=1m&iv=bid", "tf=1m&iv=mid%0A"])
+@pytest.mark.parametrize("tf", ["1h", "1d"])
+def test_atm_iv_bars_mid_hourly(make, tf):
+    # #98: 1 時間足・日足の mid は sql/atm_mid.sql（1 時間足 atm_mid_iv）。
+    # 読み方・パラメータ・CSV の形は約定と同じで、値だけ違う
+    client, runner = make(mid_results())
+    query = f"tf={tf}&n=1&start={ep(utc(8))}&end={ep(NOW)}"
+    mid = client.get(f"/atm_iv_bars?{query}&iv=mid")
+    mid_calls = list(runner.calls)
+    runner.calls.clear()
+    trade = client.get(f"/atm_iv_bars?{query}")
+    assert mid.status_code == 200 and trade.status_code == 200
+    assert [name for name, _ in mid_calls] == [("atm_mid" if name == "atm_iv" else name) for name, _ in runner.calls]
+    assert [p for _, p in mid_calls] == [p for _, p in runner.calls]
+    mid_lines, trade_lines = mid.get_data(as_text=True).splitlines(), trade.get_data(as_text=True).splitlines()
+    assert mid_lines and len(mid_lines) == len(trade_lines)
+    for m, t in zip(mid_lines, trade_lines, strict=True):
+        assert m.split(",")[4] == t.split(",")[4]
+        assert float(m.split(",")[3]) == pytest.approx(float(t.split(",")[3]) + 0.5)
+    assert (mid.headers["X-Bars-Start"], mid.headers["X-Bars-End"]) == (trade.headers["X-Bars-Start"],
+                                                                         trade.headers["X-Bars-End"])
+
+
+@pytest.mark.parametrize("query", ["tf=1m&iv=", "tf=1m&iv=MID", "tf=1m&iv=bid", "tf=1m&iv=mid%0A", "tf=1h&iv=Mid",
+                                   "tf=1d&iv=mid%20"])
 def test_atm_iv_bars_bad_iv(make, query, capsys):
-    # mid は分足だけ（既定の tf は 1h）
     client, runner = make(mid_results())
     res = client.get(f"/atm_iv_bars?{query}")
     assert res.status_code == 400
@@ -740,6 +765,9 @@ def roll_results():
         with_month(results["atm_iv_minute"], NOV) + with_month(results["atm_iv_minute"], DEC, 30.0),
         key=lambda r: (r["started_at"], r["last_trading_day"]))
     results["atm_mid_minute_months"] = with_month(mid_results()["atm_mid_minute"], NOV)
+    results["atm_mid_months"] = sorted(
+        with_month(mid_results()["atm_mid"], NOV) + with_month(mid_results()["atm_mid"], DEC, 30.0),
+        key=lambda r: (r["started_at"], r["last_trading_day"]))
     results["atm_iv_months"] = sorted(
         with_month(results["atm_iv"], NOV) + with_month(results["atm_iv"], DEC, 30.0),
         key=lambda r: (r["started_at"], r["last_trading_day"]))
@@ -798,19 +826,33 @@ def test_atm_iv_bars_roll_params(make):
     assert runner.calls[2] == ("trading_holidays", {"start_date": date(2026, 9, 27), "end_date": date(2026, 11, 20)})
 
 
-@pytest.mark.parametrize("tf", ["1m", "5m", "15m"])
-def test_atm_iv_bars_roll_mid(make, tf):
+@pytest.mark.parametrize("tf,names", [
+    ("1m", ["latest_snapshot", "atm_mid_minute_months", "trading_holidays"]),
+    ("5m", ["latest_snapshot", "atm_mid_minute_months", "trading_holidays"]),
+    ("15m", ["latest_snapshot", "atm_mid_minute_months", "trading_holidays"]),
+    # #98: 1 時間足・日足の mid の期近つなぎは sql/atm_mid_months.sql
+    ("1h", ["atm_iv_meta", "atm_mid_months", "trading_holidays"]),
+    ("1d", ["atm_iv_meta", "atm_mid_months", "trading_holidays"]),
+])
+def test_atm_iv_bars_roll_mid(make, tf, names):
     client, runner = make(roll_results())
     res = client.get(f"/atm_iv_bars?tf={tf}&n=roll&iv=mid")
     assert res.status_code == 200
     lines = res.get_data(as_text=True).splitlines()
     assert lines and all(len(line.split(",")) == 6 for line in lines)
-    assert [name for name, _ in runner.calls] == ["latest_snapshot", "atm_mid_minute_months", "trading_holidays"]
+    assert all(line.split(",")[5] == "2026-11-12" for line in lines)
+    assert [name for name, _ in runner.calls] == names
+    if tf in ("1h", "1d"):
+        # パラメータは約定の期近つなぎと同じ
+        mid_calls = list(runner.calls)
+        runner.calls.clear()
+        client.get(f"/atm_iv_bars?tf={tf}&n=roll")
+        assert [p for _, p in mid_calls] == [p for _, p in runner.calls]
 
 
 @pytest.mark.parametrize("path", [
-    "/atm_iv_bars?tf=1h&n=roll&iv=mid", "/atm_iv_bars?tf=1d&n=roll&iv=mid", "/atm_iv_bars?n=roll&iv=mid",
-    "/atm_iv_data?n=roll", "/atm_iv_bars?n=ROLL", "/atm_iv_bars?n=roll%0A", "/atm_iv_bars?n=Roll",
+    "/atm_iv_bars?tf=1h&n=roll&iv=MID", "/atm_iv_data?n=roll", "/atm_iv_bars?n=ROLL", "/atm_iv_bars?n=roll%0A",
+    "/atm_iv_bars?n=Roll",
     "/atm_iv_bars?n=%20roll", "/atm_iv_bars?n=2", "/atm_iv_bars?n=", "/atm_iv_bars?tf=1m&n=rolls",
     # start・end の検証は n=0 と同じ（片方だけ・1 回の最大・分足の遡れる上限）
     f"/atm_iv_bars?n=roll&start={ep(utc(12))}",

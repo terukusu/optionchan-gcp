@@ -1,7 +1,7 @@
 """SQL の静的検査（#52 AC 4）。
 
 - SQL は sql/*.sql にだけ置く（Python で組み立てない）。名前は ${project}・${dataset}、値は @パラメータだけ
-- 読むのは最新版のテーブル関数（*_latest・latest_runs）と 1 時間足 atm_iv・取引カレンダーの最新版
+- 読むのは最新版のテーブル関数（*_latest・latest_runs）と 1 時間足 atm_iv・atm_mid_iv（#98）・取引カレンダーの最新版
   trading_calendar_latest（#68）だけ（生テーブルを直接読まない）。期間で絞る
 - 書き込み・DDL をしない
 """
@@ -17,7 +17,7 @@ SQL_DIR = PKG_DIR / "sql"
 SQL = {p.stem: p.read_text(encoding="utf-8") for p in SQL_DIR.glob("*.sql")}
 ALLOWED_FUNCS = {"latest_runs", "option_price_latest"}
 # 表 → 期間で絞る列
-ALLOWED_TABLES = {"atm_iv": "started_at", "trading_calendar_latest": "calendar_date"}
+ALLOWED_TABLES = {"atm_iv": "started_at", "atm_mid_iv": "started_at", "trading_calendar_latest": "calendar_date"}
 
 
 def body(text):
@@ -126,6 +126,32 @@ def test_months_sql_same_rules_as_one_month():
     assert "month AS" not in text and "@today" not in text and "@n" not in text
     assert "ORDER BY started_at, last_trading_day" in text
     assert "WHERE started_at >= @days_start AND started_at < @range_end\n" in text
+
+
+def test_mid_hourly_same_as_trade_hourly():
+    # #98: 1 時間足・日足の mid のクエリは、約定のクエリ（atm_iv.sql・atm_iv_months.sql）の
+    # 1 時間足の表を atm_mid_iv に、補う分の計算（bars）を mid の計算（mid_bars。sql/ohlc/atm_hourly.sql と
+    # 一字一句同じ）に、読む列を bid_iv・ask_iv に替えただけ
+    hourly = (REPO_ROOT / "sql" / "ohlc" / "atm_hourly.sql").read_text(encoding="utf-8")
+
+    def block(text, name):
+        return text[text.index(f"\n-- {name}:begin\n") + 1:text.index(f"\n-- {name}:end\n") + 1]
+
+    def after_bars(text, name):
+        # 計算の区間の後（限月の選び方・期間・並べ方）
+        return text[text.index(f"\n-- {name}:end\n"):]
+
+    for mid, trade in (("atm_mid", "atm_iv"), ("atm_mid_months", "atm_iv_months")):
+        text = SQL[mid]
+        assert block(text, "mid_bars") == block(hourly, "mid_bars"), mid
+        assert "`${project}.${dataset}.atm_mid_iv`" in text and "`${project}.${dataset}.atm_iv`" not in text
+        assert "SELECT created_at, last_trading_day, target_price, bid_iv, ask_iv\n" in text
+        assert not re.search(r"\b(iv|price)\b", body(text).replace("bid_iv", "").replace("ask_iv", "")), mid
+        want = (after_bars(SQL[trade], "bars").replace("-- bars:end", "-- mid_bars:end")
+                .replace("FROM bars\n", "FROM mid_bars\n")
+                .replace("iv_open AS open, iv_high AS high, iv_low AS low, iv_close AS close",
+                         "mid_open AS open, mid_high AS high, mid_low AS low, mid_close AS close"))
+        assert after_bars(text, "mid_bars") == want, mid
 
 
 def test_trading_holidays_reads_latest_calendar():

@@ -29,10 +29,12 @@ COMPARE = os.path.join(SQL_DIR, 'compare.sql')
 IMPORT = os.path.join(SQL_DIR, 'import.sql')
 FINGERPRINT = os.path.join(SQL_DIR, 'fingerprint.sql')
 TABLES = ('atm_iv', 'atm_option_price', 'atm_target_price')
+HOURLY_TABLES = TABLES + ('atm_mid_iv',)   # 定期クエリが書く表（#98 で mid IV を足した）
+BACKFILL = os.path.join(SQL_DIR, 'mid_backfill.sql')
 
 M1, M2 = '2026-11-12', '2026-12-10'
 ATM = [('created_at', 'TIMESTAMP'), ('last_trading_day', 'DATE'), ('target_price', 'INT64'), ('iv', 'FLOAT64'),
-       ('price', 'INT64')]
+       ('price', 'INT64'), ('bid_iv', 'FLOAT64'), ('ask_iv', 'FLOAT64')]
 BAR = [('open', 'FLOAT64'), ('high', 'FLOAT64'), ('low', 'FLOAT64'), ('close', 'FLOAT64'), ('last_trading_day', 'DATE'),
        ('time_frame', 'INT64'), ('started_at', 'TIMESTAMP')]
 LEGACY_BAR = [('tbl', 'STRING')] + BAR
@@ -44,8 +46,9 @@ def ts(hour, minute=0, day=12):
     return f'2026-10-{day:02d} {hour:02d}:{minute:02d}:00+00'
 
 
-def atm(at, month, strike, iv, price):
-    return {'created_at': at, 'last_trading_day': month, 'target_price': strike, 'iv': iv, 'price': price}
+def atm(at, month, strike, iv, price, bid_iv=None, ask_iv=None):
+    return {'created_at': at, 'last_trading_day': month, 'target_price': strike, 'iv': iv, 'price': price,
+            'bid_iv': bid_iv, 'ask_iv': ask_iv}
 
 
 def bar(o, h, low, c, month, at):
@@ -113,17 +116,18 @@ def bars_rows(rows):
 
 FIXTURE = [
     # M1 の 00 時台: ATM が 60000 → 60500 に変わる（分けない）。iv の NULL は open・close で飛ばす
-    atm(ts(0, 5), M1, 60000, 0.20, 100),
-    atm(ts(0, 30), M1, 60000, None, 120),
-    atm(ts(0, 59), M1, 60500, 0.30, 90),
-    # 01:00 ちょうどは次の 1 時間足
+    # mid（#98）: bid_iv・ask_iv の平均。片方が 0 の行は NULL（open・close で飛ばす）
+    atm(ts(0, 5), M1, 60000, 0.20, 100, 0.19, 0.21),
+    atm(ts(0, 30), M1, 60000, None, 120, 0.0, 0.25),
+    atm(ts(0, 59), M1, 60500, 0.30, 90, 0.28, 0.30),
+    # 01:00 ちょうどは次の 1 時間足。気配が無い → mid は NULL の 1 時間足
     atm(ts(1, 0), M1, 60500, 0.25, 95),
     # M2 の 00 時台: iv・price が全部 NULL → 値が NULL の 1 時間足（行は作る。旧系と同じ）
     atm(ts(0, 10), M2, 61000, None, None),
     atm(ts(0, 40), M2, 61000, None, None),
     # M2 の 02 時台: 同じ created_at に 2 行（旧系の重複を移した行・ATM が 2 行の版）→ target_price の順で決める
-    atm(ts(2, 10), M2, 61000, 0.40, 300),
-    atm(ts(2, 10), M2, 60500, 0.50, 350),
+    atm(ts(2, 10), M2, 61000, 0.40, 300, 0.38, 0.40),
+    atm(ts(2, 10), M2, 60500, 0.50, 350, 0.48, 0.52),
 ]
 EXPECTED = sorted([
     (M1, '2026-10-12 00:00', 0.20, 0.30, 0.20, 0.30, 100.0, 120.0, 90.0, 90.0, 60000.0, 60500.0, 60000.0, 60500.0),
@@ -131,6 +135,21 @@ EXPECTED = sorted([
     (M2, '2026-10-12 00:00', None, None, None, None, None, None, None, None, 61000.0, 61000.0, 61000.0, 61000.0),
     (M2, '2026-10-12 02:00', 0.50, 0.50, 0.40, 0.40, 350.0, 350.0, 300.0, 300.0, 60500.0, 61000.0, 60500.0, 61000.0),
 ])
+
+
+# mid の 1 時間足（#98）: (限月, started_at, open, high, low, close)
+EXPECTED_MID = sorted([
+    (M1, '2026-10-12 00:00', 0.20, 0.29, 0.20, 0.29),
+    (M1, '2026-10-12 01:00', None, None, None, None),
+    (M2, '2026-10-12 00:00', None, None, None, None),
+    (M2, '2026-10-12 02:00', 0.50, 0.50, 0.39, 0.39),
+])
+
+
+def mid_rows(rows):
+    return sorted((r['last_trading_day'], r['started_at'][:16]) + tuple(
+        None if r[k] is None else round(float(r[k]), 6) for k in ('mid_open', 'mid_high', 'mid_low', 'mid_close'))
+        for r in rows)
 
 
 def run_bars(atm_rows):
@@ -141,6 +160,7 @@ def run_bars(atm_rows):
 def test_bars_fixed_values():
     rows = run_bars(FIXTURE)
     assert bars_rows(rows) == EXPECTED
+    assert mid_rows(rows) == EXPECTED_MID
     assert {r['time_frame'] for r in rows} == {'3600'}
 
 
@@ -157,18 +177,22 @@ def hourly_script(atm_rows, existing, runs=1):
     m = between(text, '-- source:begin', '-- source:end')
     text = text[:m.start()] + cte('atm', ATM, atm_rows) + text[m.end():]
     declares, rest = split_declares(text)
-    setup = ''.join(temp_table(t, BAR, existing.get(t, [])) for t in TABLES)
+    setup = ''.join(temp_table(t, BAR, existing.get(t, [])) for t in HOURLY_TABLES)
     dump = ("SELECT 'atm_iv' AS tbl, * FROM atm_iv UNION ALL SELECT 'atm_option_price', * FROM atm_option_price "
-            "UNION ALL SELECT 'atm_target_price', * FROM atm_target_price;\n")
+            "UNION ALL SELECT 'atm_target_price', * FROM atm_target_price UNION ALL SELECT 'atm_mid_iv', * FROM atm_mid_iv;\n")
     script = declares + setup + rest + '\n' + dump
     for _ in range(runs - 1):
         script += 'DROP TABLE bars;\n' + rest + '\n' + dump
     return script
 
 
+def rnd(v):
+    return None if v is None else round(float(v), 6)
+
+
 def table_rows(rows):
-    return sorted((r['tbl'], r['last_trading_day'], r['started_at'][:16], num(r['open']), num(r['high']), num(r['low']),
-                   num(r['close'])) for r in rows)
+    return sorted((r['tbl'], r['last_trading_day'], r['started_at'][:16], rnd(r['open']), rnd(r['high']), rnd(r['low']),
+                   rnd(r['close'])) for r in rows)
 
 
 def test_hourly_merge_is_idempotent_and_replaces_window():
@@ -188,12 +212,51 @@ def test_hourly_merge_is_idempotent_and_replaces_window():
     assert ('atm_option_price', M1, '2026-10-12 22:00', 7.0, 7.0, 7.0, 7.0) in price
     assert len(price) == len(EXPECTED) + 2
     assert len([r for r in got if r[0] == 'atm_target_price']) == len(EXPECTED)
+    assert [r for r in got if r[0] == 'atm_mid_iv'] == sorted(('atm_mid_iv', *e) for e in EXPECTED_MID)
 
 
 def test_hourly_merge_does_nothing_without_atm_rows():
-    existing = {t: [bar(1, 2, 0.5, 1.5, M1, ts(3))] for t in TABLES}
+    existing = {t: [bar(1, 2, 0.5, 1.5, M1, ts(3))] for t in HOURLY_TABLES}
     [after] = run_script(hourly_script([], existing), params=[f'run_time:TIMESTAMP:{RUN_TIME}'])
-    assert table_rows(after) == sorted((t, M1, '2026-10-12 03:00', 1.0, 2.0, 0.5, 1.5) for t in TABLES)
+    assert table_rows(after) == sorted((t, M1, '2026-10-12 03:00', 1.0, 2.0, 0.5, 1.5) for t in HOURLY_TABLES)
+
+
+# ---- mid IV の過去分の作り直し（mid_backfill.sql、#98。一時テーブルに書く） ----
+
+def backfill_script(atm_rows, existing):
+    text = render(tables_to_temp(read(BACKFILL)), project=PROJECT, dataset='optionchan_tokyo')
+    m = between(text, '-- source:begin', '-- source:end')
+    text = text[:m.start()] + cte('atm', ATM, atm_rows) + text[m.end():]
+    i = text.index('\nIF ') + 1
+    return text[:i] + temp_table('atm_mid_iv', BAR, existing) + text[i:] + '\nSELECT * FROM atm_mid_iv;\n'
+
+
+BACKFILL_PARAMS = [f'start_at:TIMESTAMP:{ts(0)}', f'end_at:TIMESTAMP:{ts(3)}']
+
+
+def test_backfill_same_as_hourly_and_idempotent():
+    # 範囲 [00:00, 03:00): 中の既存の足は置き換え、計算に無いキーは消す。範囲の外（03:00）は触れない
+    existing = [bar(9, 9, 9, 9, M1, ts(0)), bar(9, 9, 9, 9, M1, ts(2)), bar(7, 7, 7, 7, M1, ts(3))]
+    script = backfill_script(FIXTURE, existing)
+    i = script.index('\nIF ') + 1
+    first, *_ = run_script(script, params=BACKFILL_PARAMS)
+    assert [int(first[0]['bars']), int(first[0]['with_mid'])] == [4, 2]
+    _, after = run_script(script, params=BACKFILL_PARAMS)[-2:]
+    got = sorted((r['last_trading_day'], r['started_at'][:16], rnd(r['open']), rnd(r['high']), rnd(r['low']),
+                  rnd(r['close'])) for r in after)
+    assert got == sorted(EXPECTED_MID + [(M1, '2026-10-12 03:00', 7.0, 7.0, 7.0, 7.0)])
+    # 流し直しても同じ（スクリプトの 2 回目: 表は作り直さず、計算と MERGE だけを繰り返す）
+    rest = script[i:].replace('CREATE TEMP TABLE bars', 'DROP TABLE bars;\nCREATE TEMP TABLE bars', 1)
+    *_, again = run_script(script + rest, params=BACKFILL_PARAMS)
+    assert sorted((r['last_trading_day'], r['started_at'][:16], rnd(r['open']), rnd(r['high']), rnd(r['low']),
+                   rnd(r['close'])) for r in again) == got
+
+
+@pytest.mark.parametrize('start,end', [(ts(3), ts(0)), (ts(0, 30), ts(3)), ('2099-01-01 00:00:00+00', '2099-01-02 00:00:00+00')])
+def test_backfill_rejects_bad_range(start, end):
+    text = render(read(BACKFILL), project=PROJECT, dataset='optionchan_tokyo')
+    guard = text[:text.index('CREATE TEMP TABLE bars')]
+    assert 'mid_backfill: ' in run_error(guard, params=[f'start_at:TIMESTAMP:{start}', f'end_at:TIMESTAMP:{end}'])
 
 
 def test_hourly_rejects_future_window():
@@ -395,6 +458,16 @@ def test_dry_run_hourly_bars():
     assert n <= 500 * MiB
 
 
+def test_dry_run_mid_backfill_one_year():
+    """mid IV の過去分の作り直し（#98）の 1 年分の SELECT（1 年ずつ流す）"""
+    sql = render(between(read(BACKFILL), '-- result:begin', '-- result:end').group(1), project=PROJECT,
+                 dataset='optionchan_tokyo')
+    n = bq("DECLARE start_at TIMESTAMP DEFAULT TIMESTAMP '2025-01-01 00:00:00+00';\n"
+           "DECLARE end_at TIMESTAMP DEFAULT TIMESTAMP '2026-01-01 00:00:00+00';\n" + sql, dry_run=True)
+    print(f'mid_backfill 2025: {n} bytes')
+    assert n <= 10 * GiB
+
+
 def test_dry_run_legacy_check_30_days():
     sql = render(between(read(CHECK), '-- result:begin', '-- result:end').group(1), project=PROJECT, legacy_dataset='optionchan')
     n = bq("DECLARE start_at TIMESTAMP DEFAULT TIMESTAMP '2026-09-12 00:00:00+00';\n"
@@ -420,6 +493,8 @@ def test_dry_run_legacy_reads(path):
      ['start_at:TIMESTAMP:2018-01-01 00:00:00+00', 'end_at:TIMESTAMP:2026-10-12 22:00:00+00']),
     (CHECK, {'legacy_dataset': 'optionchan'},
      ['start_at:TIMESTAMP:2026-09-12 00:00:00+00', 'end_at:TIMESTAMP:2026-10-13 00:00:00+00']),
+    (BACKFILL, {'dataset': 'optionchan_tokyo'},
+     ['start_at:TIMESTAMP:2025-01-01 00:00:00+00', 'end_at:TIMESTAMP:2026-01-01 00:00:00+00']),
 ])
 def test_dry_run_whole_script(path, names, params):
     """スクリプト全体（DECLARE・IF・CREATE・トランザクション・MERGE）の構文。スクリプトの dry run は構文だけを見る（表の有無は見ない）"""

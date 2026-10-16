@@ -147,9 +147,10 @@ def bar(at, month, o, h, low, c):
             "started_at": at}
 
 
-def fixtures(options=(), hourly=(), runs=(), calendar=()):
+def fixtures(options=(), hourly=(), runs=(), calendar=(), mid_hourly=()):
     return ",\n".join([cte("option_price", OPTION, list(options)), cte("atm_iv", HOURLY, list(hourly)),
-                       cte("ingest_runs", RUNS, list(runs)), cte("trading_calendar_latest", CALENDAR, list(calendar))])
+                       cte("ingest_runs", RUNS, list(runs)), cte("trading_calendar_latest", CALENDAR, list(calendar)),
+                       cte("atm_mid_iv", HOURLY, list(mid_hourly))])
 
 
 def with_fixtures(sql, fx):
@@ -169,6 +170,7 @@ def new_sql(name, fx):
     text = re.sub(r"`\$\{project\}\.\$\{dataset\}\.latest_runs`\((@\w+), (@\w+)\)",
                   r"(SELECT * FROM ingest_runs WHERE snapshot_at >= \1 AND snapshot_at < \2)", text)
     text = text.replace("`${project}.${dataset}.atm_iv`", "atm_iv")
+    text = text.replace("`${project}.${dataset}.atm_mid_iv`", "atm_mid_iv")
     text = text.replace("`${project}.${dataset}.trading_calendar_latest`", "trading_calendar_latest")
     assert "${" not in text, name
     return with_fixtures(text, fx)
@@ -655,6 +657,56 @@ def test_atm_iv_months_same_as_atm_iv(start, end):
     assert all(start <= r["started_at"] < end for r in rows)
 
 
+def same_bars(got, want):
+    assert [(r["started_at"], r.get("last_trading_day")) for r in got] == [
+        (r["started_at"], r.get("last_trading_day")) for r in want]
+    for g, w in zip(got, want, strict=True):
+        for k in ("open", "high", "low", "close"):
+            assert (g[k] is None) == (w[k] is None) and (g[k] is None or g[k] == pytest.approx(w[k])), (g, w)
+
+
+@pytest.mark.parametrize("start,end", [
+    (datetime(2026, 9, 23, tzinfo=UTC), NOW),  # 最新を含む（補う分を読む）
+    (datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 10, 12, 22, tzinfo=UTC)),  # 過去だけ（生データを読まない）
+])
+def test_atm_mid_same_as_trade_logic(start, end):
+    # #98: 1 時間足・日足の mid（atm_mid.sql・atm_mid_months.sql）は、1 時間足の表を atm_mid_iv に、
+    # 補う分を mid に替えた atm_iv.sql・atm_iv_months.sql と同じ
+    # （限月の選び方・期間・補う分・OHLC・同じ created_at の順）。
+    # mid の固定値は iv を bid_iv・ask_iv に移し（mid = 元の iv）、iv は 77 にし、atm_iv は空にする（読んだら分かる）
+    trade = fixtures(ATM_IV_OPTIONS, ATM_IV_HOURLY)
+    mid = fixtures(mid_options(ATM_IV_OPTIONS), mid_hourly=ATM_IV_HOURLY)
+    last = datetime(2026, 10, 12, 23, tzinfo=UTC)
+    for n in (0, 1):
+        params = api.hourly_params(NOW, last, start, end, n)
+        want = fixture_runner(trade)("atm_iv", params)
+        assert want
+        same_bars(fixture_runner(mid)("atm_mid", params), want)
+    params = api.roll_hourly_params(NOW, last, start, end)
+    want = months_rows("atm_iv_months", trade, params)
+    assert want
+    same_bars(months_rows("atm_mid_months", mid, params), want)
+
+
+def test_atm_mid_fill_needs_both_positive_quotes():
+    # 補う分の mid は bid_iv・ask_iv が両方 0 より大きいときだけ（分足の atm_mid_minute.sql と同じ規則）
+    at = datetime(2026, 10, 13, 2, 10, tzinfo=UTC)
+    options = [
+        opt(at, 2, 25000, M1, 50.0, 1, is_atm=True, bid_iv=20.0, ask_iv=None),
+        opt(at + timedelta(minutes=1), 2, 25000, M1, 50.0, 1, is_atm=True, bid_iv=0.0, ask_iv=21.0),
+        opt(at + timedelta(minutes=2), 2, 25000, M1, 50.0, 1, is_atm=True, bid_iv=20.0, ask_iv=21.0),
+        opt(at + timedelta(minutes=3), 2, 25000, M1, 50.0, 1, is_atm=True, bid_iv=-1.0, ask_iv=22.0),
+        opt(datetime(2026, 10, 13, 3, 0, tzinfo=UTC), 2, 25000, M1, 50.0, 1, is_atm=True),
+    ]
+    last = datetime(2026, 10, 12, 23, tzinfo=UTC)
+    rows = fixture_runner(fixtures(options))("atm_mid", api.hourly_params(NOW, last, datetime(2026, 10, 13, tzinfo=UTC),
+                                                                         NOW, 0))
+    assert [(r["started_at"], r["open"], r["high"], r["low"], r["close"]) for r in rows] == [
+        (datetime(2026, 10, 13, 2, tzinfo=UTC), 20.5, 20.5, 20.5, 20.5),
+        (datetime(2026, 10, 13, 3, tzinfo=UTC), None, None, None, None),
+    ]
+
+
 @pytest.mark.parametrize("tf", ["1m", "15m", "1h", "1d"])
 def test_roll_api_same_as_n0_without_switch(tf):
     # 期近（M1 = 11-12）の残存が長い期間: 期近つなぎは n=0 と同じ足（6 列目が M1）。
@@ -865,6 +917,10 @@ def bars_dry_run_params(end):
         "atm_mid_minute_months": ("atm_mid_minute_months", {"start_at": end - timedelta(days=minute_max + 1, hours=-1),
                                                             "end_at": end - timedelta(days=1, hours=-1)}),
         "atm_iv_months": ("atm_iv_months", api.roll_hourly_params(end, None, daily_start, end)),
+        # mid の 1 時間足・日足（#98）: 約定と同じ期間（1 時間足は atm_mid_iv、補う分は bid_iv・ask_iv）
+        "atm_mid": ("atm_mid", api.hourly_params(end, None, daily_start, end, 0)),
+        "atm_mid_past": ("atm_mid", api.hourly_params(end, None, daily_start, end - timedelta(days=5), 0)),
+        "atm_mid_months": ("atm_mid_months", api.roll_hourly_params(end, None, daily_start, end)),
         "atm_iv_months_past": ("atm_iv_months", api.roll_hourly_params(end, None, daily_start,
                                                                        end - timedelta(days=5))),
         "trading_holidays_roll": ("trading_holidays", {
@@ -896,7 +952,8 @@ def test_dry_run_smile_snapshot_within_512mib(name, record_property):
 
 @pytest.mark.parametrize("name", ["atm_iv_minute", "atm_mid_minute", "trading_holidays", "atm_iv", "atm_iv_past",
                                   "atm_iv_minute_months", "atm_mid_minute_months", "atm_iv_months",
-                                  "atm_iv_months_past", "trading_holidays_roll"])
+                                  "atm_iv_months_past", "trading_holidays_roll", "atm_mid", "atm_mid_past",
+                                  "atm_mid_months"])
 def test_dry_run_bars_within_512mib(name, record_property):
     now = datetime.now(UTC)
     # UTC の 1 日（JST 09:00〜翌 08:59）は日中 + 夜間。夜間が終わった後（22:00 UTC = 07:00 JST 以降）なら
