@@ -2,9 +2,10 @@
 // - 曲線の規則（OTM 合成・mid IV・IV の 0 の扱い）はサーバー（smile.py）が CSV の列（mid_iv・otm）にする。ここは列で絞るだけ
 // - 横軸は行使価格（値に比例）。拡大縮小・スクロールはこのファイルの pointer events で横軸の min / max を書き換えるだけで、
 //   サーバーに要求しない。縦軸は表示範囲の点から Chart.js が決める
-// - 操作（#84）: マウスはホバーでカーソル・ドラッグでパン・ホイールで拡縮。タッチは 1 本指の横のなぞりでカーソル
-//   （一番近い行使価格に吸い付き、描画領域の端では表示範囲を送る）、2 本指でパン・ピンチ、縦のスワイプはページのスクロール
-//   （canvas は touch-action: pan-y）。判定・吸い付き・送りの量は smile_touch.js の SmileTouch（純粋関数）
+// - 操作（#84・#86）: マウスはホバーでカーソル・ドラッグでパン・ホイールで拡縮。タッチは 1 本指の横のドラッグでパン、
+//   長押しで選択モード（そのままなぞると一番近い行使価格に吸い付き、描画領域の端では表示範囲を送る。離すと抜け、選択は残る）、
+//   タップで選択、2 本指でパン・ピンチ、縦のスワイプはページのスクロール（canvas は touch-action: pan-y）。
+//   判定（長押しの時間・移動量）・吸い付き・送りの量は smile_touch.js の SmileTouch（純粋関数）
 // - 操作中の描き直しは requestAnimationFrame で 1 フレーム 1 回にまとめる（表示範囲が変われば chart.update、
 //   カーソルだけなら chart.draw。縦線は overlay が描く）
 // - 時点の移動（最新・前後のステップ・日時の入力）は DEBOUNCE_MS でまとめてから 1 回だけ要求し、前の要求は AbortController で
@@ -63,9 +64,12 @@ var retry = null;
 var pending;  // まとめている時点（undefined: なし、null: 最新、数値: at）
 var debounceTimer = null;
 var pointers = new Map();  // pointerId → { x, y, x0, y0 }（x は canvas の左端から、y は clientY）
-// 操作中の状態: pan（マウスのドラッグ）、pending（タッチ 1 本。縦か横かを待つ）、cursor（なぞり。px は指の位置）、
-// scroll（縦。ページのスクロールに渡した）、pinch（2 本指）、none（ピンチの後に残った指。すべて離すまで何もしない）
+// 操作中の状態: pan（マウスのドラッグ・タッチ 1 本の横のドラッグ）、press（タッチ 1 本の押下。長押しか、パンか縦かを待つ。
+// id: pointerId、t0: 押した時刻）、select（長押しからの選択モード。px は指の位置）、scroll（縦。ページのスクロールに渡した）、
+// pinch（2 本指）、none（ピンチの後に残った指。すべて離すまで何もしない）。書き換えは setGesture
 var gesture = null;
+var pressTimer = null;  // 長押しのタイマー（press の間だけ）
+var lastPointerType = null;  // 最後の pointerdown の種類（contextmenu の抑止をタッチ・ペンに限る）
 var frame = { id: null, update: false, draw: false, cursor: false };  // 次のフレームで行う描き直し
 var auto = null;  // 端での自動送り中 { last: 前のフレームの時刻（ms） }
 
@@ -612,8 +616,10 @@ var overlay = {
     }
     if (cursorStrike !== null && shown) {
       var cx = x.getPixelForValue(cursorStrike);
-      ctx.strokeStyle = 'rgba(255, 111, 0, 0.8)';
-      ctx.setLineDash([4, 3]);
+      var selecting = !!gesture && gesture.kind === 'select';  // 選択モード（#86）は実線・太く・濃く
+      ctx.strokeStyle = selecting ? 'rgb(255, 111, 0)' : 'rgba(255, 111, 0, 0.8)';
+      ctx.lineWidth = selecting ? 2 : 1;
+      ctx.setLineDash(selecting ? [] : [4, 3]);
       ctx.beginPath();
       ctx.moveTo(cx, area.top);
       ctx.lineTo(cx, area.bottom);
@@ -792,7 +798,7 @@ function requestFrame(kind) {
 
 function onFrame(ts) {
   frame.id = null;
-  if (gesture && gesture.kind === 'cursor') {
+  if (gesture && gesture.kind === 'select') {
     stepAuto(ts);
   } else {
     auto = null;
@@ -897,7 +903,53 @@ function pinchGesture() {
     width: view.max - view.min, areaWidth: area.right - area.left };
 }
 
+// パン: x（px）の位置の値を指・マウスに合わせて動かす（表示範囲が未定なら null）
+function panGesture(x) {
+  if (!view) {
+    return null;
+  }
+  var area = chart.chartArea;
+  return { kind: 'pan', x: x, view: { min: view.min, max: view.max }, perPx: (view.max - view.min) / (area.right - area.left) };
+}
+
+// 状態を変える。長押しのタイマーを止め、選択モードに出入りしたら見た目（詳細の枠・縦線）を切り替える
+function setGesture(g) {
+  if (pressTimer !== null) {
+    clearTimeout(pressTimer);
+    pressTimer = null;
+  }
+  var was = !!gesture && gesture.kind === 'select';
+  var now = !!g && g.kind === 'select';
+  gesture = g;
+  if (was !== now) {
+    el('cursor').classList.toggle('selecting', now);
+    requestFrame('draw');
+  }
+}
+
+// 長押し（#86）: 選択モードに入り、指の位置に吸い付ける。対応する端末では短く振動させる
+function startSelect(px) {
+  setGesture({ kind: 'select', px: px });
+  if (typeof navigator.vibrate === 'function') {
+    try {
+      navigator.vibrate(10);
+    } catch (err) {
+      // 振動できなくても選択には関係しない
+    }
+  }
+  scrub(px);
+}
+
+function onLongPress() {
+  pressTimer = null;
+  var p = gesture && gesture.kind === 'press' && pointers.size === 1 ? pointers.get(gesture.id) : null;
+  if (p) {
+    startSelect(p.x);
+  }
+}
+
 function onPointerDown(e) {
+  lastPointerType = e.pointerType;
   if (!shown) {
     return;
   }
@@ -907,14 +959,17 @@ function onPointerDown(e) {
   if (e.pointerType === 'mouse') {
     setCursorAt(px);
     el('chart').classList.add('dragging');
-    var area = chart.chartArea;
-    gesture = view ? { kind: 'pan', x: px, view: { min: view.min, max: view.max },
-      perPx: (view.max - view.min) / (area.right - area.left) } : null;
+    setGesture(panGesture(px));
     return;
   }
   auto = null;
-  // タッチ・ペン: 1 本目は縦か横かを待つ。2 本目からはパン + ピンチ（最初の 2 本）
-  gesture = pointers.size === 1 ? { kind: 'pending' } : pinchGesture();
+  // タッチ・ペン: 1 本目は長押しか、パンか縦かを待つ。2 本目からはパン + ピンチ（最初の 2 本。選択モードは抜ける）
+  if (pointers.size === 1) {
+    setGesture({ kind: 'press', id: e.pointerId, t0: e.timeStamp });
+    pressTimer = setTimeout(onLongPress, SmileTouch.LONG_PRESS_MS);
+  } else {
+    setGesture(pinchGesture());
+  }
 }
 
 function onPointerMove(e) {
@@ -931,19 +986,25 @@ function onPointerMove(e) {
   if (!gesture) {
     return;
   }
+  if (gesture.kind === 'press') {
+    var kind = SmileTouch.press(px - p.x0, e.clientY - p.y0, e.timeStamp - gesture.t0);
+    if (kind === 'select') {
+      startSelect(px);  // この move から選択モードのなぞり
+      return;
+    } else if (kind === 'pan') {
+      // 押した位置を基準にする（指の下の値が指に付いてくる）。選択中の行使価格は変えない
+      setGesture(panGesture(p.x0) || { kind: 'none' });
+    } else if (kind === 'scroll') {
+      setGesture({ kind: 'scroll' });
+    }
+  }
   if (gesture.kind === 'pan') {
     var dv = (px - gesture.x) * gesture.perPx;
     setView(gesture.view.min - dv, gesture.view.max - dv);
-    setCursorAt(px);
-  } else if (gesture.kind === 'pending') {
-    var kind = SmileTouch.classify(px - p.x0, e.clientY - p.y0, SmileTouch.SLOP_PX);
-    if (kind === 'cursor') {
-      gesture = { kind: 'cursor', px: px };
-      scrub(px);
-    } else if (kind === 'scroll') {
-      gesture = { kind: 'scroll' };
+    if (e.pointerType === 'mouse') {
+      setCursorAt(px);
     }
-  } else if (gesture.kind === 'cursor') {
+  } else if (gesture.kind === 'select') {
     scrub(px);
   } else if (gesture.kind === 'pinch' && pointers.size >= 2) {
     // 最初の 2 本の中点の値を指の中点に保ち、幅を指の間隔に反比例させる（2 本指のドラッグで移動、ピンチで拡縮）
@@ -957,24 +1018,35 @@ function onPointerMove(e) {
   }
 }
 
-// pointerup と pointercancel（縦のスワイプでブラウザがスクロールを始めた等）。カーソルは最後のものを残す
+// pointerup と pointercancel（縦のスワイプでブラウザがスクロールを始めた等）。選択モードは抜け、カーソルは最後のものを残す
 function onPointerUp(e) {
   if (!pointers.has(e.pointerId)) {
     return;
   }
   pointers.delete(e.pointerId);
-  if (e.type === 'pointerup' && e.pointerType !== 'mouse' && gesture && gesture.kind === 'pending') {
-    setCursorAt(canvasX(e));  // タップ（動かさずに離した）: 今までどおりその位置で選ぶ
+  if (e.type === 'pointerup' && e.pointerType !== 'mouse' && gesture && gesture.kind === 'press') {
+    setCursorAt(canvasX(e));  // タップ（長押しの前に動かさずに離した）: その位置で選ぶ
   }
   auto = null;
   if (!pointers.size) {
     el('chart').classList.remove('dragging');
-    gesture = null;
+    setGesture(null);
   } else if (pointers.size >= 2) {
-    gesture = pinchGesture();
+    setGesture(pinchGesture());
   } else {
-    gesture = { kind: 'none' };
+    setGesture({ kind: 'none' });
   }
+}
+
+// ページが見えなくなった（アプリの切り替え等）: 押している指・長押し・選択モード・自動送りをすべて止める
+function onVisibilityChange() {
+  if (!document.hidden) {
+    return;
+  }
+  pointers.clear();
+  auto = null;
+  el('chart').classList.remove('dragging');
+  setGesture(null);
 }
 
 function onWheel(e) {
@@ -994,12 +1066,20 @@ function bind() {
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
   canvas.addEventListener('wheel', onWheel, { passive: false });
-  // 念のため（touch-action に頼れないブラウザ）: 2 本指・なぞりの間はページの拡大・スクロールを止める
+  // 2 本指・選択モード・1 本指のパンの間はページの拡大・スクロールを止める（touch-action: pan-y は押した時点で決まるので、
+  // 長押しの後に縦へなぞるとスクロールされうる。長押しの間は SLOP_PX 未満しか動かないので、スクロールが始まる前に止められる）
   canvas.addEventListener('touchmove', function(e) {
-    if (e.cancelable && (e.touches.length >= 2 || (gesture && gesture.kind === 'cursor'))) {
+    if (e.cancelable && (e.touches.length >= 2 || (gesture && (gesture.kind === 'select' || gesture.kind === 'pan')))) {
       e.preventDefault();
     }
   }, { passive: false });
+  // 長押しでのコンテキストメニューを出さない（タッチ・ペンだけ。マウスの右クリックは今までどおり）
+  canvas.addEventListener('contextmenu', function(e) {
+    if (lastPointerType === 'touch' || lastPointerType === 'pen') {
+      e.preventDefault();
+    }
+  });
+  document.addEventListener('visibilitychange', onVisibilityChange);
   el('latest').addEventListener('click', function() { schedule(null); });
   Array.from(document.querySelectorAll('button.step')).forEach(function(b) {
     b.addEventListener('click', function() { step(Number(b.dataset.step)); });
