@@ -5,9 +5,12 @@
 2. 分の頭から settings.FETCH_AT_SECOND 秒まで待ってから（#38）、1 限月ページを取得して更新時刻を得る。
    鮮度切れなら ERROR stale。生 HTML が既にあれば skipped_no_update。
    ページが取れない・空なら WARNING jpx_unavailable（次の分に任せる）。最後に保存できた生 HTML が
-   鮮度のしきい値より古ければ（jpx_unavailable が続いている）ERROR jpx_unavailable_stale も出す（#42）
+   鮮度のしきい値より古ければ（jpx_unavailable が続いている）ERROR jpx_unavailable_stale も出す（#42）。
+   HTTP 5xx・接続エラー・タイムアウトは、期限に余裕があれば 1 リクエストで 1 回だけ取り直す（#88、_fetch_jpx）。
+   JPX への接続は要求ごとに張り直す（#88、io_jpx.fetch_page）
 3. 2 限月ページを取得し、2 ページを封筒にして ifGenerationMatch=0 で作成（412 なら skipped_locked）
-4. 行を組み立てて構造を検査（違反は parse_failed。生 HTML は残し ingest_runs は書かない）
+4. 行を組み立てて構造を検査（違反は parse_failed。生 HTML は残し ingest_runs は書かない）。
+   取引時間中に option の本文が直前と同じことが続いたら WARNING body_frozen（#88、snapshot.BodyWatch）
 5. spot_price → future_price → option_price → ingest_runs の順に Storage Write API で追記（失敗は write_failed）
 6. 予定時刻（無ければ実時刻）が JST の毎時 0 分なら、応答の前に同じ期限の残りで取りこぼしを回収し、
    07:00 は日次の照合もする
@@ -38,14 +41,16 @@ from .calendar import Calendar, Session, session_at
 from .io_bq import WriteFailed
 from .io_gcs import AlreadyExists, RawObject, StorageFailed
 from .log import log
-from .parser import JST, JpxUnavailable, ParseError, parse_page, parse_updated_at
+from .parser import JST, JpxTransient, JpxUnavailable, ParseError, parse_page, parse_updated_at
 from .pipeline import Deadline, DeadlineExceeded, bounded, run_row, write_snapshot
 from .snapshot import (
+    BodyWatch,
     FetchedPage,
     RunMeta,
     build_rows,
     encode_raw,
     is_stale,
+    option_body_hash,
     raw_object_name,
     source_object,
     unavailable_window,
@@ -73,6 +78,8 @@ class Deps:
     # (start_offset, end_offset, timeout=) 生 HTML の一覧。失敗は StorageFailed。
     # jpx_unavailable が続いているかの判定（#42）に使う。None なら判定しない（dry-run・時間外）
     list_raw: Callable[..., list[RawObject]] | None = None
+    # 本文の凍結の判定（#88）。直前のスナップショットの本文を覚えるので、本番では Deps と同じくインスタンスで使い回す
+    body_watch: BodyWatch = field(default_factory=BodyWatch)
 
 
 @dataclass
@@ -157,6 +164,64 @@ def _unavailable_stale(now: datetime, session: Session, deps: Deps, deadline: De
     return {}
 
 
+class _RetryBudget:
+    """1 リクエストの JPX の取り直し（#88）。1 回まで（1 限月・2 限月の合計）"""
+
+    def __init__(self):
+        self.used = False
+
+
+def _fetch_jpx(deadline: Deadline, deps: Deps, page: int, budget: _RetryBudget, common: dict) -> FetchedPage:
+    """JPX のページを取る。一時的な失敗（JpxTransient）は、まだ取り直していなくて期限に余裕があれば、
+    JPX_RETRY_WAIT_SECONDS 待ってから 1 回だけ取り直す（settings の JPX_RETRY_* の説明）。
+
+    取り直したら common["jpx_retry"] = {page, first, result} を入れ、以降のログに載せる（result は ok / failed。
+    期限で取り直さなかったら skipped_deadline）。失敗は JpxUnavailable（2 回目の失敗）、期限は DeadlineExceeded
+    """
+    stage = f"jpx_page{page}"
+    try:
+        return bounded(deadline, stage, settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, page)
+    except JpxTransient as e:
+        if budget.used:
+            raise
+        first = str(e)
+    allowed = deadline.remaining() - settings.JPX_RETRY_WAIT_SECONDS - settings.JPX_RETRY_RESERVE_SECONDS
+    if allowed < settings.JPX_RETRY_MIN_TIMEOUT_SECONDS:
+        common["jpx_retry"] = {"page": page, "first": first, "result": "skipped_deadline"}
+        raise JpxUnavailable(first)
+    budget.used = True
+    log(
+        "INFO",
+        "jpx_retry",
+        page=page,
+        detail=first,
+        retry_wait_ms=int(settings.JPX_RETRY_WAIT_SECONDS * 1000),
+        elapsed_ms=deadline.elapsed_ms(),
+        **common,
+    )
+    deps.sleep(settings.JPX_RETRY_WAIT_SECONDS)
+    retry = {"page": page, "first": first, "result": "failed"}
+    common["jpx_retry"] = retry
+    fetched = bounded(deadline, f"{stage}_retry", min(settings.JPX_TIMEOUT_SECONDS, allowed), deps.fetch_page, page)
+    retry["result"] = "ok"
+    return fetched
+
+
+def _watch_body(snapshot_at: datetime, options: list[dict], deps: Deps, common: dict) -> None:
+    """本文の凍結（#88）: 取引時間中に option の本文が直前と同じことが BODY_FROZEN_REPEATS 回以上続いたら、
+    毎分 WARNING body_frozen。データはそのまま書く（JPX が返した値。品質チェックの body_frozen でも数える）。
+    判定は補助なので、想定外の例外でも取り込みを止めない（WARNING body_watch_failed）"""
+    try:
+        repeats = deps.body_watch.observe(snapshot_at, option_body_hash(options), deps.calendar)
+    except Exception as e:
+        log("WARNING", "body_watch_failed", detail=f"{type(e).__name__}: {e}", **common)
+        return
+    if repeats:
+        common["body_repeats"] = repeats
+    if repeats >= settings.BODY_FROZEN_REPEATS:
+        log("WARNING", "body_frozen", body_since=deps.body_watch.since, **common)
+
+
 def handle(now: datetime, deps: Deps, schedule_time: str | None = None, deadline: Deadline | None = None) -> Result:
     """deadline を渡すと、その残りで動く（ルートが毎時の回収と同じ期限を共有するため）。省略時はここで作る"""
     if deadline is None:
@@ -211,10 +276,11 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         deps.sleep(wait)
     common["wait_ms"] = int(wait * 1000)
 
-    # 1 限月ページ（JPX はリトライしない）
+    # 1 限月ページ（一時的な失敗は 1 リクエストで 1 回だけ取り直す。#88）
+    retry_budget = _RetryBudget()
     t_jpx = deps.monotonic()
     try:
-        page1 = bounded(deadline, "jpx_page1", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 1)
+        page1 = _fetch_jpx(deadline, deps, 1, retry_budget, common)
         updated_at = parse_updated_at(page1.html)
     except JpxUnavailable as e:
         return unavailable(str(e))
@@ -235,7 +301,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
 
     # 2 限月ページ
     try:
-        page2 = bounded(deadline, "jpx_page2", settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, 2)
+        page2 = _fetch_jpx(deadline, deps, 2, retry_budget, common)
     except JpxUnavailable as e:
         return unavailable(str(e))
     jpx_fetch_ms = int((deps.monotonic() - t_jpx) * 1000)
@@ -274,6 +340,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
     violations = validate_rows(rows)
     if violations:
         return done("ERROR", "parse_failed", 500, failure="parse_failed", detail=violations)
+    _watch_body(p1.updated_at, rows["option_price"], deps, common)
 
     # 書き込み（3 テーブル → ingest_runs）。期限を超えたら次のテーブルに入らない
     # （ingest_runs が無いので毎時の回収が拾う）
@@ -386,14 +453,11 @@ def _real_deps() -> Deps:
         )
         return _deps
 
-    import requests
-
     store, writer = _clients(cfg)
-    http = requests.Session()
     _deps = Deps(
         calendar,
         cfg.raw_bucket,
-        lambda page, timeout: io_jpx.fetch_page(page, timeout, http),
+        io_jpx.fetch_page,  # 接続は要求ごと（#88。セッションを使い回さない）
         store.exists,
         store.create,
         writer.append,

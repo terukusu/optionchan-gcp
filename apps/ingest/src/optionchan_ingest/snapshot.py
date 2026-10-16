@@ -1,14 +1,16 @@
-"""スナップショットの組み立て（純粋関数）: 生 HTML の名前と封筒、行の組み立てと構造の検査、鮮度判定。"""
+"""スナップショットの組み立て（純粋関数）: 生 HTML の名前と封筒、行の組み立てと構造の検査、鮮度判定、
+本文の凍結の判定（#88。BodyWatch だけは直前のスナップショットを覚える）。"""
 
 import base64
 import gzip
+import hashlib
 import json
 from collections import Counter
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta
 
 from . import settings
-from .calendar import DAY, Session
+from .calendar import DAY, Calendar, Session, in_session
 from .parser import JST, ParsedPage
 
 
@@ -191,3 +193,57 @@ def unavailable_window(
 
 def with_updated_at(page: FetchedPage, updated_at: datetime | None) -> FetchedPage:
     return replace(page, updated_at=updated_at)
+
+
+# 本文の凍結（#88）で比べる option の列（約定・気配・建玉とキー）。iv・ギリシャ指標・気配の IV は本文が止まっていても
+# JPX が毎分計算し直して変わる（2026-10-14 の凍結で確認）ので入れない。
+# 品質チェック（sql/quality/quality_daily.sql）と同じ列
+OPTION_BODY_KEY = ("type", "target_price", "last_trading_day")
+OPTION_BODY_COLUMNS = OPTION_BODY_KEY + (
+    "price",
+    "price_time",
+    "bid",
+    "bid_volume",
+    "ask",
+    "ask_volume",
+    "volume",
+    "positions",
+)
+
+
+def option_body_hash(options: list[dict]) -> str:
+    """option の行（build_rows の option_price）の本文のハッシュ。行の順序によらない（キーで並べる）"""
+    body = sorted(
+        ([r[c] for c in OPTION_BODY_COLUMNS] for r in options),
+        key=lambda v: [str(x) for x in v[: len(OPTION_BODY_KEY)]],
+    )
+    return hashlib.sha256(json.dumps(body, default=_iso, separators=(",", ":")).encode()).hexdigest()
+
+
+@dataclass
+class BodyWatch:
+    """直前のスナップショットの本文を覚え、取引時間中に本文が直前と同じ回数（repeats）を数える（インスタンスのメモリ。
+    インスタンスが変わると 0 から数え直す。取り逃しは品質チェックの body_frozen が拾う）"""
+
+    last_at: datetime | None = None
+    last_hash: str | None = None
+    last_in_session: bool = False
+    repeats: int = 0
+    since: datetime | None = None  # 本文が最後に変わったスナップショットの時刻
+
+    def observe(self, snapshot_at: datetime, body_hash: str, calendar: Calendar) -> int:
+        """スナップショットを 1 つ観測し、直前と同じ本文が続いた回数を返す。
+
+        数えるのは、今と直前のスナップショットがどちらも立会の時間 [開始, 終了) の中で、ヘッダの更新時刻が進み、
+        本文が同じときだけ。それ以外は 0 に戻す。直前より古い・同じ時刻のスナップショットは無視する（数を変えない）"""
+        _require_aware(snapshot_at, "snapshot_at")
+        if self.last_at is not None and snapshot_at <= self.last_at:
+            return self.repeats
+        now_in = in_session(snapshot_at, calendar)
+        if self.last_at is not None and now_in and self.last_in_session and body_hash == self.last_hash:
+            self.repeats += 1
+        else:
+            self.repeats = 0
+            self.since = snapshot_at
+        self.last_at, self.last_hash, self.last_in_session = snapshot_at, body_hash, now_in
+        return self.repeats

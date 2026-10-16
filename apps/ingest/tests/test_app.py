@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from calgen import CAL
 from conftest import read_fixture
-from htmlgen import empty_page_html, page_html
+from htmlgen import default_side, empty_page_html, page_html
 
 from optionchan_ingest import app as app_module
 from optionchan_ingest import settings
@@ -16,8 +16,8 @@ from optionchan_ingest.app import Deps, fetch_wait_seconds, handle
 from optionchan_ingest.calendar import build_calendar
 from optionchan_ingest.io_bq import WriteFailed
 from optionchan_ingest.io_gcs import AlreadyExists, RawObject, StorageFailed
-from optionchan_ingest.parser import JST, JpxUnavailable, jst
-from optionchan_ingest.snapshot import FetchedPage, decode_raw
+from optionchan_ingest.parser import JST, JpxTransient, JpxUnavailable, jst
+from optionchan_ingest.snapshot import BodyWatch, FetchedPage, decode_raw
 
 STRIKES = tuple(range(38000, 43000, 500))
 PAGE1 = page_html(strikes=STRIKES, atm=40000)
@@ -80,6 +80,8 @@ class Fake:
         self.calls.append(("fetch", page))
         self._tick(f"fetch{page}", timeout)
         html = self.pages[page]
+        if isinstance(html, list):  # 呼ぶたびに先頭から返す（最後の 1 つは返し続ける）
+            html = html.pop(0) if len(html) > 1 else html[0]
         if isinstance(html, Exception):
             raise html
         return FetchedPage(page, f"https://example.invalid/{page}", self.wall(), 200, html.encode("utf-8"))
@@ -910,3 +912,212 @@ def test_settings_bq_location_from_tables_json():
     """クエリの場所はデータセットの場所（schema/tokyo/tables.json）。環境変数 BQ_LOCATION で上書きできる"""
     assert settings.Settings.from_env({"RAW_BUCKET": "b"}).bq_location == "asia-northeast1"
     assert settings.Settings.from_env({"RAW_BUCKET": "b", "BQ_LOCATION": "US"}).bq_location == "US"
+
+
+# --- JPX の取り直し（#88） ---
+
+HTTP_502 = JpxTransient("page 1: HTTP 502")
+
+
+def fetches(fake):
+    return [c for c in fake.calls if c[0] == "fetch"]
+
+
+def test_retry_after_502_ingests(capsys):
+    """1 回目が 502、2 回目が 200 なら、その分を取り込む。取り直しの前に待ち、ログに取り直しと結果が出る"""
+    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2})
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "ingested")
+    assert fetches(fake) == [("fetch", 1), ("fetch", 1), ("fetch", 2)]
+    assert fake.sleeps == [settings.JPX_RETRY_WAIT_SECONDS]
+    assert fake.calls.index(("sleep", settings.JPX_RETRY_WAIT_SECONDS)) == 1  # 1 回目と 2 回目の間
+    assert set(fake.appended) == {"spot_price", "future_price", "option_price", "ingest_runs"}
+    records = logs(capsys)
+    assert [(r["severity"], r["event"]) for r in records] == [("INFO", "jpx_retry"), ("INFO", "ingested")]
+    assert (records[0]["page"], records[0]["detail"], records[0]["retry_wait_ms"]) == (1, "page 1: HTTP 502", 3000)
+    assert records[1]["jpx_retry"] == {"page": 1, "first": "page 1: HTTP 502", "result": "ok"}
+
+
+@pytest.mark.parametrize(
+    "error", [JpxTransient(f"page 2: {d}") for d in ("HTTP 503", "ConnectionError", "ReadTimeout")]
+)
+def test_retry_page2(capsys, error):
+    fake = Fake(pages={1: PAGE1, 2: [error, PAGE2]})
+    assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
+    assert fetches(fake) == [("fetch", 1), ("fetch", 2), ("fetch", 2)]
+    assert logs(capsys)[-1]["jpx_retry"] == {"page": 2, "first": str(error), "result": "ok"}
+
+
+def test_retry_fails_twice_is_jpx_unavailable(capsys):
+    fake = Fake(pages={1: [HTTP_502, JpxTransient("page 1: HTTP 504"), PAGE1], 2: PAGE2})
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    assert fetches(fake) == [("fetch", 1), ("fetch", 1)]  # 取り直しは 1 回まで
+    assert fake.created == {}
+    records = logs(capsys)
+    assert [(r["severity"], r["event"]) for r in records] == [("INFO", "jpx_retry"), ("WARNING", "jpx_unavailable")]
+    assert records[1]["failure"] == "jpx_unavailable"
+    assert records[1]["detail"] == "page 1: HTTP 504"
+    assert records[1]["jpx_retry"] == {"page": 1, "first": "page 1: HTTP 502", "result": "failed"}
+
+
+def test_retry_once_per_request(capsys):
+    """1 限月で取り直した後の 2 限月の失敗は取り直さない（1 リクエストで 1 回まで）"""
+    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: [JpxTransient("page 2: HTTP 502"), PAGE2]})
+    assert handle(IN_HOURS, fake.deps()).outcome == "jpx_unavailable"
+    assert fetches(fake) == [("fetch", 1), ("fetch", 1), ("fetch", 2)]
+    assert fake.sleeps == [settings.JPX_RETRY_WAIT_SECONDS]
+
+
+@pytest.mark.parametrize("error", [JpxUnavailable(f"page 1: HTTP {status}") for status in (400, 403, 404)])
+def test_no_retry_on_4xx(capsys, error):
+    fake = Fake(pages={1: [error, PAGE1], 2: PAGE2})
+    assert handle(IN_HOURS, fake.deps()).outcome == "jpx_unavailable"
+    assert fetches(fake) == [("fetch", 1)]
+    assert fake.sleeps == []
+    records = logs(capsys)
+    assert [r["event"] for r in records] == ["jpx_unavailable"]
+    assert "jpx_retry" not in records[0]
+
+
+def test_no_retry_on_empty_page(capsys):
+    fake = Fake(pages={1: [empty_page_html(), PAGE1], 2: PAGE2})
+    assert handle(IN_HOURS, fake.deps()).outcome == "jpx_unavailable"
+    assert fetches(fake) == [("fetch", 1)]
+
+
+def test_no_retry_beyond_deadline(capsys):
+    """読み取りタイムアウト（15 秒）の後は、待ち + 取り直し + 残りの処理が期限に収まらないので取り直さない"""
+    fake = Fake(pages={1: [JpxTransient("page 1: ReadTimeout"), PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
+    fake.cost = {"fetch1": 15.0}
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    assert fetches(fake) == [("fetch", 1)]
+    assert fake.sleeps == [8.0]  # 分の頭の待ちだけ
+    record = logs(capsys)[-1]
+    assert record["jpx_retry"] == {"page": 1, "first": "page 1: ReadTimeout", "result": "skipped_deadline"}
+    assert record["detail"] == "page 1: ReadTimeout"
+
+
+@pytest.mark.parametrize(
+    "first_cost, retried",
+    [
+        # 残り − 待ち 3 − 予約 15 が 5 以上なら取り直す: 期限 45 − 待ち 8 − 1 回目 = 残り
+        (14.0, True),  # 残り 23 → 予算 5
+        (14.5, False),  # 残り 22.5 → 予算 4.5
+    ],
+)
+def test_retry_deadline_boundary(capsys, first_cost, retried):
+    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
+    fake.cost = {"fetch1": first_cost}
+    handle(IN_HOURS, fake.deps())
+    assert len(fetches(fake)) == (3 if retried else 1)
+    if retried:
+        # 取り直しのタイムアウトは予算（5 秒）で頭打ち
+        assert [t for k, t in fake.timeouts if k == "fetch1"] == [settings.JPX_TIMEOUT_SECONDS, pytest.approx(5.0)]
+
+
+def test_retry_leaves_time_for_the_rest(capsys):
+    """8 秒目の 502 → 3 秒待って取り直し、取り直しが上限の 15 秒かかっても、残りの処理に 15 秒が残る"""
+    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
+    costs = iter([0.0, 15.0])
+    original = fake._tick
+
+    def tick(kind, timeout):
+        if kind == "fetch1":
+            fake.cost["fetch1"] = next(costs)
+        original(kind, timeout)
+
+    fake._tick = tick
+    assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
+    assert fake.clock_value == pytest.approx(8.0 + 3.0 + 15.0)
+    kinds = dict(fake.timeouts)
+    assert kinds["exists"] == settings.GCS_TIMEOUT_SECONDS
+    assert kinds["append_spot_price"] == settings.BQ_APPEND_TIMEOUT_SECONDS
+
+
+def test_deadline_exceeded_during_retry_is_error(capsys):
+    """取り直しが返らなければ従来どおり deadline_exceeded（stage は取り直し）"""
+    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2})
+    original = fake.fetch_page
+    calls = []
+
+    def fetch(page, timeout):
+        calls.append(page)
+        if len(calls) == 2:
+            raise app_module.DeadlineExceeded("jpx_page1_retry")
+        return original(page, timeout)
+
+    fake.fetch_page = fetch
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (500, "deadline_exceeded")
+    last = logs(capsys)[-1]
+    assert (last["stage"], last["jpx_retry"]["result"]) == ("jpx_page1_retry", "failed")
+
+
+# --- 本文の凍結（#88） ---
+
+
+def minute_page(minute, volume="30", iv="24.50%", hour=10):
+    """10:mm（JST）の 1 限月ページ。volume で本文（出来高）、iv で本文に入れない列を変える"""
+    side = default_side(40000, "call")
+    side[5], side[2] = volume, iv
+    rows = {40000: (side, default_side(40000, "put"))}
+    return page_html(updated_at=f"2026/10/12 {hour:02d}:{minute:02d}", strikes=STRIKES, atm=40000, rows=rows)
+
+
+def ingest_minutes(capsys, pages, now=IN_HOURS):
+    """同じ BodyWatch（インスタンス）で毎分取り込み、分ごとの body_frozen の有無を返す"""
+    watch = BodyWatch()
+    frozen = []
+    for page in pages:
+        fake = Fake(pages={1: page, 2: PAGE2})
+        deps = fake.deps()
+        deps.body_watch = watch
+        assert handle(now, deps).outcome == "ingested"
+        frozen.append([r for r in logs(capsys) if r["event"] == "body_frozen"])
+    return frozen
+
+
+def test_body_frozen_after_n_repeats(capsys):
+    """取引時間中に本文が N 回（3 回）直前と同じなら WARNING。N − 1 回までは出さない。データは書く"""
+    n = settings.BODY_FROZEN_REPEATS
+    pages = [minute_page(40 + i) for i in range(n + 2)]
+    frozen = ingest_minutes(capsys, pages)
+    assert [bool(f) for f in frozen] == [False] * n + [True, True]
+    record = frozen[n][0]
+    assert record["severity"] == "WARNING"
+    assert record["body_repeats"] == n
+    assert record["body_since"] == jst(2026, 10, 12, 10, 40).isoformat()
+    assert record["snapshot_at"] == jst(2026, 10, 12, 10, 40 + n).isoformat()
+
+
+def test_body_change_resets_count(capsys):
+    n = settings.BODY_FROZEN_REPEATS
+    pages = (
+        [minute_page(40 + i) for i in range(n)]
+        + [minute_page(43, volume="31")]
+        + [minute_page(44 + i, volume="31") for i in range(n - 1)]
+    )
+    assert not any(ingest_minutes(capsys, pages))
+
+
+def test_body_ignores_iv_changes(capsys):
+    """iv・ギリシャ指標は本文に入れない（凍結中も JPX が毎分計算し直して変わる）"""
+    n = settings.BODY_FROZEN_REPEATS
+    pages = [minute_page(40 + i, iv=f"2{i}.00%") for i in range(n + 1)]
+    assert [bool(f) for f in ingest_minutes(capsys, pages)] == [False] * n + [True]
+
+
+def test_body_not_frozen_after_close(capsys):
+    """引け後（ページ 15:45 以降）は本文が止まっても出さない（セッションの余裕の時間帯の取り込み）"""
+    pages = [minute_page(45 + i, hour=15) for i in range(6)]
+    assert not any(ingest_minutes(capsys, pages, now=jst(2026, 10, 12, 16, 10)))
+
+
+def test_body_watch_failure_does_not_stop_ingest(capsys, monkeypatch):
+    monkeypatch.setattr(app_module, "option_body_hash", lambda options: 1 / 0)
+    fake = Fake()
+    assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
+    assert "ingest_runs" in fake.appended
+    assert [r["event"] for r in logs(capsys)] == ["body_watch_failed", "ingested"]

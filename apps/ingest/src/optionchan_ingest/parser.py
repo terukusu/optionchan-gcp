@@ -33,6 +33,10 @@ class JpxUnavailable(Exception):
     """JPX のページが空・取得できない（4 時台の空ページ、接続断など）。次の分に任せる"""
 
 
+class JpxTransient(JpxUnavailable):
+    """一時的な取得の失敗（HTTP 5xx・接続エラー・タイムアウト）。同じ分の中で 1 回だけ取り直す（#88、app._fetch_jpx）"""
+
+
 class ParseError(Exception):
     """ページの構造が想定と違う（形式変更など）。生 HTML を残して parse_failed にする"""
 

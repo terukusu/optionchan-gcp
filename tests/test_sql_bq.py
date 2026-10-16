@@ -126,7 +126,9 @@ def jst(minute, hour=9, day=13):
 Q_RUNS = [('ingest_run_id', 'STRING'), ('rows_spot', 'INT64'), ('rows_future', 'INT64'), ('rows_option', 'INT64')]
 Q_LATEST = [('snapshot_at', 'TIMESTAMP')]
 Q_PRICE = [('created_at', 'TIMESTAMP'), ('page_updated_at', 'TIMESTAMP'), ('price_time', 'DATETIME')]
-Q_OPTION = Q_PRICE + [('type', 'INT64'), ('target_price', 'INT64'), ('last_trading_day', 'DATE'), ('is_atm', 'BOOL')]
+Q_OPTION = Q_PRICE + [('type', 'INT64'), ('target_price', 'INT64'), ('last_trading_day', 'DATE'), ('is_atm', 'BOOL'),
+                     ('price', 'INT64'), ('bid', 'INT64'), ('bid_volume', 'INT64'), ('ask', 'INT64'),
+                     ('ask_volume', 'INT64'), ('volume', 'INT64'), ('positions', 'INT64')]
 Q_RAW = [('tbl', 'STRING'), ('ingest_run_id', 'STRING'), ('n', 'INT64')]
 MONTHS = ('2026-11-12', '2026-12-10')
 
@@ -159,7 +161,7 @@ def run_quality(data):
 
 
 ITEMS = ('rowcount_mismatch', 'missing_table', 'dup_keys', 'months_not_2', 'atm_not_1',
-         'price_time_future', 'price_time_too_old', 'sunday')
+         'price_time_future', 'price_time_too_old', 'sunday', 'body_frozen')
 
 
 def test_quality_clean():
@@ -212,6 +214,110 @@ def test_quality_detects_each_item(item, mutate):
     got = {k: int(row[k]) for k in ITEMS}
     assert got == {k: int(k == item) for k in ITEMS}
     assert int(row['violations']) == 1
+
+
+# ---- 本文の凍結（#88） ----
+
+def quality_snapshots(snaps):
+    """snaps: [(ページの更新時刻（JST の 'YYYY-MM-DD HH:MM'）, 本文の値)]。本文の値は option の出来高に入れる
+    （ほかの項目は違反 0 の形。option の約定時刻は前の取引日の 15:00 で固定）"""
+    data = {k: [] for k in ('runs', 'latest_runs', 'spot_l', 'future_l', 'option_l', 'raw_counts')}
+    for i, (at_jst, body) in enumerate(snaps):
+        run, at = f'r{i}', f'{at_jst}:00+09'
+        data['runs'].append({'ingest_run_id': run, 'rows_spot': 1, 'rows_future': 1, 'rows_option': 4})
+        data['latest_runs'].append({'snapshot_at': at})
+        base = {'created_at': at, 'page_updated_at': at, 'price_time': f'{at_jst}:00'}
+        data['spot_l'].append(dict(base))
+        data['future_l'].append(dict(base))
+        for month in MONTHS:
+            for typ in (1, 2):
+                # 約定時刻は本文の列なのでスナップショットで変えない（本文の違いは出来高で付ける）
+                data['option_l'].append({**base, 'price_time': '2026-10-12 15:00:00', 'type': typ, 'target_price': 60000,
+                                         'last_trading_day': month, 'is_atm': True, 'price': 100, 'bid': 95, 'bid_volume': 1, 'ask': 105,
+                                         'ask_volume': 2, 'volume': body, 'positions': 1000})
+        data['raw_counts'] += [{'tbl': 'spot', 'ingest_run_id': run, 'n': 1},
+                               {'tbl': 'future', 'ingest_run_id': run, 'n': 1},
+                               {'tbl': 'option', 'ingest_run_id': run, 'n': 4}]
+    return data
+
+
+def same_body(start, minutes, body, day=13):
+    """start（'HH:MM'、JST）から minutes 本の毎分のスナップショット。本文はすべて body"""
+    h, m = map(int, start.split(':'))
+    out = []
+    for i in range(minutes):
+        t = h * 60 + m + i
+        out.append((f'2026-10-{day:02d} {t // 60:02d}:{t % 60:02d}', body))
+    return out
+
+
+def moving(start, minutes, day=13, base=0):
+    """毎分本文が変わるスナップショット"""
+    return [(t, base + i) for i, (t, _) in enumerate(same_body(start, minutes, None, day))]
+
+
+def day_2026_10_14_shape(frozen=True):
+    """2026-10-14 の窓の形（10-13 07:00〜10-14 07:00 JST に置く）: 寄り前・引け後の本文の止まり（実データの最長: 寄り前 5 回、
+    引け後 13 回）、取引時間中の静かな 1 分、夜間の終了直前の 05:58〜06:00、夜間 18:51〜19:27 の凍結（直前と同じが 36 回）。
+    frozen=False は凍結の 37 分を毎分変わる本文にした形（10-13〜10-15 の凍結以外の時間帯）"""
+    return (
+        same_body('08:31', 14, 1)                    # 日中の寄り前 08:31〜08:44（直前と同じ 13 回）
+        + moving('08:45', 15, base=100)              # 寄り付き後は毎分変わる
+        + same_body('09:00', 2, 200)                 # 静かな 1 分（直前と同じ 1 回）
+        + moving('09:02', 3, base=300)
+        + moving('15:40', 5, base=400)
+        + same_body('15:45', 15, 500)                # 引け後 15:45〜15:59（直前と同じ 14 回）
+        + same_body('16:46', 14, 600)                # 夜間の寄り前 16:46〜16:59
+        + moving('17:00', 5, base=700)
+        + moving('18:46', 5, base=800)
+        + (same_body('18:51', 37, 900) if frozen else moving('18:51', 37, base=900))
+        + moving('19:28', 3, base=1000)
+        + moving('05:50', 8, day=14, base=1100)
+        + same_body('05:58', 3, 1200, day=14)        # 05:58〜06:00（06:00 は終了。取引時間中の同じは 1 回）
+        + same_body('06:01', 14, 1300, day=14)       # 夜間の引け後 06:01〜06:14
+    )
+
+
+def test_quality_body_frozen_2026_10_14_shape():
+    """10-14 の凍結の形は違反（直前と同じ 36 回のうち 3 回目以降の 34）"""
+    row = run_quality(quality_snapshots(day_2026_10_14_shape()))
+    assert int(row['body_frozen']) == 34
+    assert int(row['violations']) == 34
+    assert {k: int(row[k]) for k in ITEMS if k != 'body_frozen'} == dict.fromkeys(set(ITEMS) - {'body_frozen'}, 0)
+
+
+def test_quality_body_frozen_other_hours_are_clean():
+    """寄り前・引け後・静かな 1 分・夜間の終了直前は違反にしない"""
+    row = run_quality(quality_snapshots(day_2026_10_14_shape(frozen=False)))
+    assert (int(row['body_frozen']), int(row['violations'])) == (0, 0)
+
+
+@pytest.mark.parametrize('repeats, frozen', [(2, 0), (3, 1), (4, 2)])
+def test_quality_body_frozen_threshold(repeats, frozen):
+    """取引時間中に本文が直前と同じことが N = 3 回続いたら違反、N − 1 回なら違反にしない"""
+    snaps = moving('10:00', 3) + same_body('10:03', repeats + 1, 50) + moving('10:30', 3, base=60)
+    row = run_quality(quality_snapshots(snaps))
+    assert (int(row['body_frozen']), int(row['violations'])) == (frozen, frozen)
+
+
+@pytest.mark.parametrize('column', ['price', 'bid', 'bid_volume', 'ask', 'ask_volume', 'positions'])
+def test_quality_body_frozen_breaks_on_body_change(column):
+    """本文の列のどれかが変われば同じ本文と見ない"""
+    data = quality_snapshots(same_body('10:00', 6, 50))
+    for r in data['option_l']:
+        if r['created_at'].startswith('2026-10-13 10:02'):
+            r[column] += 1
+    row = run_quality(data)
+    assert int(row['body_frozen']) == 0  # 10:00〜10:01（1 回）と 10:03〜10:05（2 回）に分かれる
+
+
+def test_quality_body_frozen_counts_across_page2_rows():
+    """2 限月の行だけが変わっても本文の変化（1 限月・2 限月の全行が本文）"""
+    data = quality_snapshots(same_body('10:00', 6, 50))
+    for r in data['option_l']:
+        if r['created_at'].startswith('2026-10-13 10:02') and r['last_trading_day'] == MONTHS[1] and r['type'] == 2:
+            r['price'] = 101
+    assert int(run_quality(data)['body_frozen']) == 0
 
 
 def test_quality_orphan_rows_are_not_violations():

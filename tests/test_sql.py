@@ -222,6 +222,43 @@ def test_stage_writes_only_stage_dataset():
     assert len(re.findall(r'FROM `\$\{project\}\.\$\{legacy_dataset\}\.(\w+)`', text)) == 3
 
 
+# ---- 品質チェックの本文の凍結（#88）: 取り込み（apps/ingest）と同じ回数・列・立会の時間 ----
+
+INGEST_SETTINGS = os.path.join(ROOT, 'apps', 'ingest', 'src', 'optionchan_ingest', 'settings.py')
+INGEST_SNAPSHOT = os.path.join(ROOT, 'apps', 'ingest', 'src', 'optionchan_ingest', 'snapshot.py')
+
+
+def ingest_time(name):
+    """settings.py の SESSION_* = time(h, m) を 'HH:MM:00' にする（このテストは apps/ingest を import しない）"""
+    h, m = re.search(rf'^{name} = time\((\d+), (\d+)\)$', read(INGEST_SETTINGS), re.M).groups()
+    return f'{int(h):02d}:{int(m):02d}:00'
+
+
+def test_quality_body_frozen_matches_ingest():
+    quality = sq('sql/quality/quality_daily.sql')
+    snap = re.search(r'^body_snap AS \(\n(.*?)^\),$', quality, re.S | re.M).group(1)
+    # 立会の [開始, 終了)
+    t = "TIME(created_at, 'Asia/Tokyo')"
+    day_open, day_close = ingest_time('SESSION_DAY_OPEN'), ingest_time('SESSION_DAY_CLOSE')
+    night_open, night_close = ingest_time('SESSION_NIGHT_OPEN'), ingest_time('SESSION_NIGHT_CLOSE')
+    assert f"({t} >= TIME '{day_open}' AND {t} < TIME '{day_close}')" in snap
+    assert f"OR {t} >= TIME '{night_open}'" in snap
+    assert f"OR {t} < TIME '{night_close}' AS in_session" in snap
+    # 本文の列（snapshot.OPTION_BODY_COLUMNS と同じ並び）
+    cols = re.search(r'OPTION_BODY_KEY = \(([^)]*)\)\nOPTION_BODY_COLUMNS = OPTION_BODY_KEY \+ \(([^)]*)\)',
+                     read(INGEST_SNAPSHOT)).groups()
+    ingest_cols = re.findall(r'"(\w+)"', cols[0] + cols[1])
+    struct = re.search(r'TO_JSON_STRING\(STRUCT\(([^)]*)\)\)', snap).group(1)
+    assert [c.strip() for c in struct.split(',')] == ingest_cols
+    # 回数
+    repeats = re.search(r'^BODY_FROZEN_REPEATS = (\d+)$', read(INGEST_SETTINGS), re.M).group(1)
+    assert f'(SELECT COUNTIF(repeats >= {repeats}) FROM body_streak) AS body_frozen' in quality
+    # 違反に数え、列は末尾（INSERT ROW は列の位置で入れる）
+    assert '+ price_time_future + price_time_too_old + sunday + body_frozen AS violations,' in quality
+    schema = json.load(open(os.path.join(SCHEMA_DIR, 'quality_daily.json'), encoding='utf-8'))
+    assert schema[-1]['name'] == 'body_frozen' and schema[-1]['mode'] == 'NULLABLE'
+
+
 # ---- 取引カレンダーの最新版のビュー（#63） ----
 
 CALENDAR_SQL = os.path.join(ROOT, 'sql', 'calendar', 'trading_calendar_latest.sql')
