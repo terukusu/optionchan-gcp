@@ -140,7 +140,7 @@ def create_app(runner=None, clock=None, daily=None) -> Flask:
             # 検証を先に（tf → n → iv → start・end。不正なら BigQuery を呼ばない）。n は roll（期近つなぎ、#101）も
             tf = api.parse_tf(request.args.get("tf"))
             n = api.parse_bars_n(request.args.get("n"))
-            iv = api.parse_iv(request.args.get("iv"), tf)
+            iv = api.parse_iv(request.args.get("iv"))
             now = clock()
             rng = api.parse_range(request.args.get("start"), request.args.get("end"), tf, now)
             body, start, end = api.atm_iv_bars(runner, now, tf, n, rng, iv)

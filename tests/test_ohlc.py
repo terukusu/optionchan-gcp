@@ -1,7 +1,7 @@
 """1 時間足（#49、target.md 3.2）の静的検査。
 
 - 新系の 3 表の列（schema/ohlc/atm_ohlc.json）が旧系の schema/atm_*.json と同じ（名前・型・モード・順）
-- infra/prod/sq.tf のテーブル 3・テーブル単位の付与・DTS（スケジュール等は tests/test_infra.py、窓・期間は tests/test_sql.py）
+- infra/prod/sq.tf のテーブル 4（3 表 + mid IV の atm_mid_iv、#98）・テーブル単位の付与・DTS（スケジュール等は tests/test_infra.py、窓・期間は tests/test_sql.py）
 - sql/ohlc/ の名前は ${...} だけ。表は期間で絞る。1 時間足の計算（-- bars:begin〜end）は定期クエリと旧系の同値の確認で一字一句同じ
 - 定期クエリは ATM の put だけを最新版から読み、3 表を窓の中だけ置き換える。移行は追記だけで、範囲を C 以下に限る
 BigQuery での実行の確認は tests/test_ohlc_bq.py（OPTIONCHAN_BQ_TEST=1）。
@@ -18,6 +18,9 @@ SQ_TF = os.path.join(ROOT, 'infra', 'prod', 'sq.tf')
 VIEWER_ATM_IV = os.path.join(ROOT, 'apps', 'viewer', 'src', 'optionchan_viewer', 'sql', 'atm_iv.sql')
 VIEWER_ATM_IV_MONTHS = os.path.join(ROOT, 'apps', 'viewer', 'src', 'optionchan_viewer', 'sql', 'atm_iv_months.sql')
 TABLES = ('atm_iv', 'atm_option_price', 'atm_target_price')
+# 定期クエリが書く表: 旧系と同じ 3 表 + mid IV（#98。旧系に無い。列は同じ）
+HOURLY_TABLES = TABLES + ('atm_mid_iv',)
+VIEWER_SQL = os.path.join(ROOT, 'apps', 'viewer', 'src', 'optionchan_viewer', 'sql')
 # SQL → 置換する名前（atm_hourly は Terraform、他は runbook の render が入れる）
 NAMES = {
     'atm_hourly.sql': {'project', 'dataset'},
@@ -26,6 +29,7 @@ NAMES = {
     'compare.sql': {'project', 'dataset'},
     'import.sql': {'project', 'dataset', 'import_dataset'},
     'fingerprint.sql': {'project', 'source_dataset'},
+    'mid_backfill.sql': {'project', 'dataset'},
 }
 # 窓 / 期間の条件（表ごとに読む・書く箇所の直後に来る）
 PERIOD = {
@@ -35,6 +39,7 @@ PERIOD = {
     'import.sql': ('start_at', 'end_at'),
     'export.sql': ('@start_at', '@end_at'),
     'fingerprint.sql': ('@start_at', '@end_at'),
+    'mid_backfill.sql': ('start_at', 'end_at'),
 }
 
 
@@ -83,7 +88,7 @@ def tf_block(kind, name):
 
 def test_terraform_tables():
     block = tf_block('google_bigquery_table', 'atm_ohlc')
-    assert sorted(re.findall(r'^\s*(\w+)\s*=\s*"ATM', block, re.M)) == sorted(TABLES)
+    assert sorted(re.findall(r'^\s*(\w+)\s*=\s*"ATM', block, re.M)) == sorted(HOURLY_TABLES)
     assert 'dataset_id               = google_bigquery_dataset.tokyo.dataset_id' in block
     assert 'schema/ohlc/atm_ohlc.json' in block
     assert re.search(r'^\s*clustering\s*=\s*\["last_trading_day"\]$', block, re.M)
@@ -135,7 +140,7 @@ def test_tables_filtered_by_period(name):
             # MERGE の書き込み先: ON の条件で窓 / 範囲に限る
             assert re.search(rf'AND t\.started_at >= {start} AND t\.started_at < {end}', following), (name, table)
         else:
-            assert table in TABLES, (name, table)
+            assert table in HOURLY_TABLES, (name, table)
             assert re.match(rf'\s*WHERE started_at >= {start} AND started_at < {end}', following), (name, table, following)
 
 
@@ -163,6 +168,28 @@ def test_bars_identical():
     assert re.search(r'\n\s*WHERE is_atm AND type = 2\n', read(VIEWER_ATM_IV))
 
 
+def test_mid_bars_identical():
+    """mid IV の 1 時間足（#98）: 定期クエリ・過去分の作り直し・ビューアーの補う分（1 限月・期近つなぎ）は同じ計算"""
+    hourly = between(SQL['atm_hourly.sql'], '-- mid_bars:begin', '-- mid_bars:end')
+    assert between(SQL['mid_backfill.sql'], '-- mid_bars:begin', '-- mid_bars:end') == hourly
+    for name in ('atm_mid.sql', 'atm_mid_months.sql'):
+        assert between(read(os.path.join(VIEWER_SQL, name)), '-- mid_bars:begin', '-- mid_bars:end') == hourly, name
+    # mid = bid_iv・ask_iv が両方 0 より大きいときの平均（ビューアーの分足 sql/atm_mid_minute.sql と同じ規則）
+    rule = 'IF(bid_iv > 0 AND ask_iv > 0, (bid_iv + ask_iv) / 2, NULL)'
+    assert rule in hourly and rule in read(os.path.join(VIEWER_SQL, 'atm_mid_minute.sql'))
+    # 足の切り方・OHLC の式・並べ方は iv と同じ（iv を mid に替えたもの）
+    bars = between(SQL['atm_hourly.sql'], '-- bars:begin', '-- bars:end')
+    for expr in ('ARRAY_AGG({v} IGNORE NULLS ORDER BY created_at, target_price, {v})[SAFE_OFFSET(0)] AS {v}_open',
+                 'MAX({v}) AS {v}_high', 'MIN({v}) AS {v}_low',
+                 'ARRAY_AGG({v} IGNORE NULLS ORDER BY created_at DESC, target_price DESC, {v} DESC)[SAFE_OFFSET(0)] AS {v}_close'):
+        assert expr.format(v='iv') in bars and expr.format(v='mid') in hourly, expr
+    assert 'TIMESTAMP_TRUNC(created_at, HOUR) AS started_at' in hourly and 'GROUP BY last_trading_day, started_at' in hourly
+    # 定期クエリは bars と mid_bars を同じキーでつなぐ（同じ ATM の行から作るので 1 対 1）
+    assert 'SELECT * FROM bars JOIN mid_bars USING (last_trading_day, started_at)\n-- result:end' in SQL['atm_hourly.sql']
+    for name in ('atm_hourly.sql', 'mid_backfill.sql'):
+        assert re.search(r'\n\s*WHERE is_atm AND type = 2\n', SQL[name]), name
+
+
 def merges(text):
     return re.findall(r'MERGE `\$\{project\}\.\$\{dataset\}\.(\w+)` AS t\n(.*?);', text, re.S)
 
@@ -170,8 +197,14 @@ def merges(text):
 def test_hourly_merges_replace_window():
     text = SQL['atm_hourly.sql']
     found = merges(text)
-    assert [t for t, _ in found] == list(TABLES)
-    prefix = {'atm_iv': 'iv', 'atm_option_price': 'price', 'atm_target_price': 'target_price'}
+    assert [t for t, _ in found] == list(HOURLY_TABLES)
+    prefix = {'atm_iv': 'iv', 'atm_option_price': 'price', 'atm_target_price': 'target_price', 'atm_mid_iv': 'mid'}
+    # 過去分の作り直し（#98）は atm_mid_iv だけを同じ形で範囲の中を置き換える
+    backfill = merges(SQL['mid_backfill.sql'])
+    assert [t for t, _ in backfill] == ['atm_mid_iv']
+    assert backfill[0][1] == found[-1][1].replace('win_start', 'start_at').replace('win_end', 'end_at')
+    assert re.search(r'IF EXISTS \(SELECT 1 FROM bars\) THEN\s+BEGIN TRANSACTION;.*COMMIT TRANSACTION;\s+END IF;',
+                     SQL['mid_backfill.sql'], re.S)
     for table, merge in found:
         p = prefix[table]
         assert f'SELECT {p}_open AS open, {p}_high AS high, {p}_low AS low, {p}_close AS close, ' in merge
@@ -179,7 +212,7 @@ def test_hourly_merges_replace_window():
         assert 'WHEN MATCHED THEN UPDATE SET open = s.open, high = s.high, low = s.low, close = s.close' in merge
         assert ('WHEN NOT MATCHED BY SOURCE AND t.started_at >= win_start AND t.started_at < win_end '
                 'AND t.time_frame = 3600 THEN DELETE') in merge
-    # ATM の行が無い窓では何もしない（データの無い過去の日の手動実行で消さない）。3 表は 1 つのトランザクション
+    # ATM の行が無い窓では何もしない（データの無い過去の日の手動実行で消さない）。4 表は 1 つのトランザクション
     assert re.search(r'IF EXISTS \(SELECT 1 FROM bars\) THEN\s+BEGIN TRANSACTION;.*COMMIT TRANSACTION;\s+END IF;', text, re.S)
 
 
@@ -196,17 +229,20 @@ def test_import_appends_only_before_cutover():
     assert text.index('IF cutover IS NULL') < text.index('CREATE TEMP TABLE src') < text.index('BEGIN TRANSACTION')
 
 
-@pytest.mark.parametrize('name', ['legacy_check.sql', 'compare.sql', 'import.sql'])
+@pytest.mark.parametrize('name', ['legacy_check.sql', 'compare.sql', 'import.sql', 'mid_backfill.sql'])
 def test_range_is_checked(name):
     assert re.search(r'IF start_at IS NULL OR end_at IS NULL OR start_at >= end_at THEN\s+SELECT ERROR\(', SQL[name])
 
 
-@pytest.mark.parametrize('name', ['legacy_check.sql', 'compare.sql', 'import.sql', 'export.sql', 'fingerprint.sql'])
+@pytest.mark.parametrize('name', ['legacy_check.sql', 'compare.sql', 'import.sql', 'export.sql', 'fingerprint.sql',
+                                  'mid_backfill.sql'])
 def test_manual_sql_reads_only(name):
-    """手で流す SQL のうち書き込むのは import.sql だけ（新系の 3 表への追記）"""
+    """手で流す SQL のうち書き込むのは import.sql（新系の 3 表への追記）と mid_backfill.sql（atm_mid_iv の作り直し、#98）だけ"""
     text = body(SQL[name])
     writes = re.findall(r'\b(?:INSERT INTO|MERGE|DELETE FROM|UPDATE|TRUNCATE TABLE|CREATE OR REPLACE TABLE|DROP)\s+`([^`]+)`', text)
     if name == 'import.sql':
         assert writes == [f'${{project}}.${{dataset}}.{t}' for t in TABLES]
+    elif name == 'mid_backfill.sql':
+        assert writes == ['${project}.${dataset}.atm_mid_iv']
     else:
         assert writes == []

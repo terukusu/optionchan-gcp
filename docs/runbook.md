@@ -1865,12 +1865,14 @@ vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 | jq -c '.[-1][] | {tbl, lega
 
 ## 1 時間足（#49）
 
-旧系の `insert_ohlc`（Cloud Functions、python37、毎日 00:01 UTC）の置き換え（target.md 3.2）。新系の最新版から ATM の 1 時間足を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の 3 表。旧系（`insert_ohlc`・旧 `optionchan.atm_*`）は変えない（止めるのは #14）。定義は `infra/prod/sq.tf`、SQL は `sql/ohlc/`（試験は `tests/test_ohlc.py`・`tests/test_ohlc_bq.py`）。
+旧系の `insert_ohlc`（Cloud Functions、python37、毎日 00:01 UTC）の置き換え（target.md 3.2）。新系の最新版から ATM の 1 時間足を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の 3 表（+ #98 で足した mid IV の `atm_mid_iv`。旧系に無い表）。旧系（`insert_ohlc`・旧 `optionchan.atm_*`）は変えない（止めるのは #14）。定義は `infra/prod/sq.tf`、SQL は `sql/ohlc/`（試験は `tests/test_ohlc.py`・`tests/test_ohlc_bq.py`）。
 
 | もの | 内容 |
 |---|---|
-| DTS `optionchan atm-hourly`（asia-northeast1、`sa-sq-dts`、毎日 07:40 JST = `every day 22:40` UTC） | `sql/ohlc/atm_hourly.sql`。窓は `@run_time` の JST の日付 D に対し `[D-1 07:00, D 07:00) JST`（「日次の品質チェックと新旧の突き合わせ（#40）」と同じ 1 日分）。`option_price_latest` の ATM の put（`is_atm AND type = 2`）から限月 × 1 時間（UTC の正時 = JST の正時）の OHLC を作り、3 表へ MERGE する（窓の中を置き換える。ATM の行が 1 件も無い窓では何もしない。3 表は 1 トランザクション）。#40 の 4 本（07:02〜07:30）の後で、失敗の M2 の抑制は 08:40 に終わる |
+| DTS `optionchan atm-hourly`（asia-northeast1、`sa-sq-dts`、毎日 07:40 JST = `every day 22:40` UTC） | `sql/ohlc/atm_hourly.sql`。窓は `@run_time` の JST の日付 D に対し `[D-1 07:00, D 07:00) JST`（「日次の品質チェックと新旧の突き合わせ（#40）」と同じ 1 日分）。`option_price_latest` の ATM の put（`is_atm AND type = 2`）から限月 × 1 時間（UTC の正時 = JST の正時）の OHLC を作り、4 表へ MERGE する（窓の中を置き換える。ATM の行が 1 件も無い窓では何もしない。4 表は 1 トランザクション）。#40 の 4 本（07:02〜07:30）の後で、失敗の M2 の抑制は 08:40 に終わる |
 | `optionchan_tokyo.atm_iv` / `atm_option_price` / `atm_target_price` | 列は旧系と同じ（`schema/ohlc/atm_ohlc.json`）。パーティションは月（`started_at`）、クラスタは `last_trading_day`。キーは `(last_trading_day, time_frame, started_at)`、`time_frame = 3600` |
+| `optionchan_tokyo.atm_mid_iv`（#98） | ATM の put の mid IV（気配の中値 =（`bid_iv` + `ask_iv`）/ 2。両方 0 より大きいときだけ）の 1 時間足。列・パーティション・クラスタ・キーは `atm_iv` と同じ。足の切り方・OHLC の式も `iv` と同じ（`atm_hourly.sql` の `mid_bars`）。ビューアーの `/atm_iv_bars?iv=mid` の 1 時間足・日足が読む |
+| `sql/ohlc/mid_backfill.sql`（東京、手で流す） | `atm_mid_iv` の過去分の作り直し（下の「mid IV の過去分（#98）」） |
 | `sql/ohlc/legacy_check.sql`（US、手で流す） | 旧系の同値の確認: 旧 `option_price` に同じ 1 時間足の計算を当てて旧 3 表と比べる |
 | `sql/ohlc/export.sql`（US）→ `compare.sql`（東京） | 並行稼働中の日の新旧の突き合わせ |
 | `sql/ohlc/import.sql`・`fingerprint.sql`（東京・US） | 旧系の過去分の移行と、その検証（#12 の後） |
@@ -1878,7 +1880,7 @@ vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 | jq -c '.[-1][] | {tbl, lega
 - 1 時間足の意味は旧系と同じ: `open` / `close` = その 1 時間で `created_at` が最も早い / 遅い NULL でない値、`high` / `low` = 最大 / 最小、全部 NULL なら NULL の行。1 時間の中で ATM の行使価格が変わっても分けない。同じ `created_at` の行（旧系の重複を移した行）の順は `target_price` で決める
 - 旧系は前日（UTC の日）分を 00:01 UTC に集計するので、08:45〜08:59 JST の行（JPX のページの遅れで未着）の分だけ、UTC 23 時台（08:00 JST）の 1 時間足が欠ける・違う。新系は 07:40 に前日の窓を作るので欠けない（2026-09-12〜10-12 の比較で、違いは 23 時台の各表 38〜39 件だけ）
 - 失敗は Cloud Logging の `resource.type="bigquery_dts_config"`・severity ERROR で、新系の M2 が通知する（#40 と同じ。条件は変えていない）
-- 料金: 1 日 約 65MB のスキャン（新系の 1 日の最新版の 5 列）。3 表は 1 表 1 日 約 40 行
+- 料金: 1 日 約 41 MiB のスキャン（新系の 1 日の最新版の 7 列。#98 で `bid_iv`・`ask_iv` を足した。2026-10-13 の窓の dry run）。4 表は 1 表 1 日 約 40 行
 
 ### 変数
 
@@ -2065,10 +2067,40 @@ done   # 日ごとに 3 表の bars が同じ、bars = keys
 - 結果は件数・要約だけを #49 にコメントする（フィンガープリントの値は貼らない。一致したかどうかだけ）
 - 切り戻し（移行行だけを消す。C より前は移行行だけ）: `qr "$S0_OHLC" "$C" --location=$L 'DELETE FROM optionchan_tokyo.<表> WHERE started_at >= @start_at AND started_at < @end_at'` を 3 表で。4a で作り直した窓（2019-07-01・2019-07-02）の 1 時間足も消える
 
+### mid IV の過去分（#98）
+
+`atm_mid_iv` は #98 で足した表で、定期クエリが mid を書くのは #98 のデプロイ後の窓から。それより前は `sql/ohlc/mid_backfill.sql` で最新版から作り直す（`atm_hourly.sql` の `mid_bars` と同じ計算で、範囲の中を置き換える。冪等で、何度流しても同じ）。気配の IV（`bid_iv`・`ask_iv`）は 2018 年から ATM の行の 96〜99.6% にある（2026-10-16 の確認。2018 年 96.1%・2019〜2023 年 99.2〜99.6%・2024〜2025 年 98.6〜99.0%・2026 年 93.2%）。
+
+- 範囲: 始まりは 2018-01-01（最新版の最初の日より前でよい。行の無い範囲は何もしない）。終わり E は、#98 のデプロイ後に定期クエリが最初に作った窓の始まり（JST 07:00 = UTC 22:00）。E 以降は定期クエリが作る。範囲は正時で、now より前（SQL が検査する）
+- 量: 1 年 約 6.5 GiB（2025 年の dry run で 6,980,294,851 バイト）、全部で 約 40 GiB。プロジェクトのクエリ量の上限（32 GiB/日）を超えるので、**1 日に流すのは 4 年分まで**にし、残りは翌日（太平洋時間の 0 時 = JST 16〜17 時に上限が戻った後）に流す。取り込み・定期クエリの分（1 日 数 GiB）を残す
+- 1 年ずつ流す（`--maximum_bytes_billed` は 1 年分の上限。結果の `bars`・`with_mid` だけを記録する）:
+
+```sh
+E=<定期クエリが mid を書いた最初の窓の始まり>   # 例: 2026-10-15 22:00:00+00
+for y in 2018 2019 2020 2021; do
+  s="$y-01-01 00:00:00+00"; e="$((y + 1))-01-01 00:00:00+00"
+  ro mid_backfill | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=10737418240 | jq -c '.[-1][0]'
+done
+# 翌日: 2022〜2025 年と、2026-01-01〜E
+ro mid_backfill | qr "2026-01-01 00:00:00+00" "$E" --location=$L --format=json --maximum_bytes_billed=10737418240 | jq -c '.[-1][0]'
+```
+
+- 確認: `atm_iv` と `atm_mid_iv` の 1 時間足のキーの数が年ごとに同じ（どちらも同じ ATM の行から作る）。mid の値のある足の割合は上の気配の IV の割合と同じ程度
+
+```sh
+q --location=$L --format=pretty "SELECT EXTRACT(YEAR FROM started_at) y, COUNTIF(t = 'iv') iv_keys, COUNTIF(t = 'mid') mid_keys,
+  COUNTIF(t = 'mid' AND close IS NOT NULL) mid_with_value
+FROM (SELECT 'iv' t, close, started_at FROM \`$P.optionchan_tokyo.atm_iv\` WHERE started_at >= '2018-01-01' AND started_at < '$E'
+  UNION ALL SELECT 'mid', close, started_at FROM \`$P.optionchan_tokyo.atm_mid_iv\` WHERE started_at >= '2018-01-01' AND started_at < '$E')
+GROUP BY y ORDER BY y"
+```
+
+- 結果（年ごとの件数）を #98 にコメントする（全文は貼らない）。戻すとき（作り直しが不要になったとき）は `DELETE FROM optionchan_tokyo.atm_mid_iv WHERE started_at < E`（ビューアーは過去の mid が無いと表示しないだけ）
+
 ### 停止・削除
 
 - 一時停止: `infra/prod/sq.tf` の `atm_hourly` に `disabled = true` を足す PR（急ぐときはコンソールで無効 → 同じ PR）
-- 全部を戻す（この Issue の revert）: 3 表の `deletion_protection = false` の PR → revert の PR（delete 7）。旧系の `insert_ohlc` は動いたままなので、旧ビューアーには影響しない
+- 全部を戻す（この Issue の revert）: 3 表の `deletion_protection = false` の PR → revert の PR（delete 7）。#98 の `atm_mid_iv` だけを戻すときも同じ（`deletion_protection = false` の PR → #98 の revert の PR。delete 1）。旧系の `insert_ohlc` は動いたままなので、旧ビューアーには影響しない
 - 旧系の停止（#14）: `insert_ohlc` と Scheduler `create_timeframe` を止める前に、「旧系の同値の確認」を直近 30 日でもう一度流して記録する。止めた後は新系の 3 表だけになる（旧 3 表は #15 で消すまで残る）
 
 ## ビューアー（#13）
@@ -2236,6 +2268,7 @@ Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、�
 | 分足の既定（最初） | 最新のスナップショットの前日の UTC の 0 時〜now（+ ingest_runs の 14 日） | — | 約 90〜180 MiB |
 | 1h・1d（最新を含む範囲） | 1 時間足 atm_iv + まだ 1 時間足になっていない分（最大 3 日）の生データ | 1h 100 日・1d 400 日 | 約 100 MiB（補う分。通常は 1 日分。最大 3 日 約 300 MiB） |
 | 1h・1d（過去だけの範囲 = 左への追加） | 1 時間足 atm_iv だけ（生データは読まない） | 同上 | 数 MiB 未満（最小課金 10 MiB × 2〜3 クエリ） |
+| 1h・1d の mid IV（`&iv=mid`、#98） | 上の 2 行と同じ（1 時間足は `atm_mid_iv`、補う分は `iv`・`price` の代わりに `bid_iv`・`ask_iv`） | 同上 | 上の 2 行と同じ程度（補う分は 1 日 約 100 MiB） |
 | 期近つなぎ `n=roll`（#101。分足・1h・1d） | 上の各行と同じもの（限月で絞らない全限月の足。読む列・期間は同じ）+ 取引カレンダーの休業日（読んだ範囲の前日〜40 日先。数 KiB） | 上の各行と同じ | 上の各行と同じ（2026-10-16 の dry run で分足 3 日 127.7 MiB・mid 149.4 MiB・1d の最大 139.8 MiB・過去だけ 0.4 MiB。n=0 と同値）+ 休業日の最小課金 10 MiB。行が無い範囲では休業日を読まない。日足で 2018-10 まで遡っても 1 ページ 0.5 GiB 未満 |
 | `/smile_snapshot?at=`（#79。`/smile` の 1 時点） | latest_runs の [at − 14 日, at] でスナップショットを探し（約 0.1 MiB、最小課金 10 MiB）、option_price_latest のその 1 秒を読む | 1 時点（at は探す時点を動かすだけ） | 約 120 MiB（1 日分のパーティション。2026-10-13 の最後のスナップショットの dry run で 119.9 MiB）+ 10 MiB |
 | `/smile_snapshot?at=&dir=next`（#80。`/smile` の「+」方向） | latest_runs の [at, at + 14 日) で最初のスナップショットを探す（無ければ上と同じく at 以前で最新を探す）。あとは上と同じ | 同上 | 上 + 10 MiB（最新より後のときは + 20 MiB） |

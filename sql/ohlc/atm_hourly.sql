@@ -9,7 +9,11 @@
 -- 旧系から変えた点: SAFE_OFFSET、@run_time 基準、生テーブルでなく最新版、INSERT でなく MERGE、created_at が同じ行の順序を
 -- target_price で決める（旧系の重複を移した行・ATM が 2 行の版で値が不定にならないように）。
 -- MERGE は窓の中を置き換える（再実行しても同じ結果。再処理・回収・移行で最新版が変わった日は手動実行で作り直す）。
--- 窓に ATM の行が 1 件も無ければ何もしない（休場日・週末と、データの無い過去の日の手動実行で既存の行を消さないため）。3 表は 1 つのトランザクションで書く。
+-- 窓に ATM の行が 1 件も無ければ何もしない（休場日・週末と、データの無い過去の日の手動実行で既存の行を消さないため）。4 表は 1 つのトランザクションで書く。
+-- mid IV（#98）: 同じ ATM の put の mid =（bid_iv + ask_iv）/ 2（両方 0 より大きいときだけ。apps/viewer の sql/atm_mid_minute.sql と同じ規則）の
+-- 1 時間足を atm_mid_iv に MERGE する。足の切り方・OHLC の式・並べ方は iv と同じ（-- mid_bars:begin 〜 -- mid_bars:end。
+-- sql/ohlc/mid_backfill.sql・apps/viewer の sql/atm_mid.sql・sql/atm_mid_months.sql と一字一句同じ。tests/test_ohlc.py が検査）。
+-- 旧系に mid の表は無いので、bars（旧系の同値の確認と同じ本文）とは分けて計算し、同じキーでつなぐ（行は同じ ATM の行から作るので 1 対 1）。
 -- -- source:begin 〜 -- source:end / -- result:begin 〜 -- result:end は tests/test_ohlc_bq.py が固定値の入力に差し替える印。
 -- -- bars:begin 〜 -- bars:end（1 時間足の計算）は sql/ohlc/legacy_check.sql と一字一句同じ（tests/test_ohlc.py が検査）。
 DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo');
@@ -24,7 +28,7 @@ CREATE TEMP TABLE bars AS
 WITH
 -- source:begin
 atm AS (
-  SELECT created_at, last_trading_day, target_price, iv, price
+  SELECT created_at, last_trading_day, target_price, iv, price, bid_iv, ask_iv
   FROM `${project}.${dataset}.option_price_latest`(win_start, win_end)
   WHERE is_atm AND type = 2
 ),
@@ -51,7 +55,24 @@ bars AS (
   GROUP BY last_trading_day, started_at
 )
 -- bars:end
-SELECT * FROM bars
+,
+-- mid_bars:begin
+mid_bars AS (
+  SELECT
+    last_trading_day,
+    TIMESTAMP_TRUNC(created_at, HOUR) AS started_at,
+    ARRAY_AGG(mid IGNORE NULLS ORDER BY created_at, target_price, mid)[SAFE_OFFSET(0)] AS mid_open,
+    MAX(mid) AS mid_high,
+    MIN(mid) AS mid_low,
+    ARRAY_AGG(mid IGNORE NULLS ORDER BY created_at DESC, target_price DESC, mid DESC)[SAFE_OFFSET(0)] AS mid_close
+  FROM (
+    SELECT created_at, last_trading_day, target_price, IF(bid_iv > 0 AND ask_iv > 0, (bid_iv + ask_iv) / 2, NULL) AS mid
+    FROM atm
+  )
+  GROUP BY last_trading_day, started_at
+)
+-- mid_bars:end
+SELECT * FROM bars JOIN mid_bars USING (last_trading_day, started_at)
 -- result:end
 ;
 
@@ -78,6 +99,15 @@ IF EXISTS (SELECT 1 FROM bars) THEN
 
   MERGE `${project}.${dataset}.atm_target_price` AS t
   USING (SELECT target_price_open AS open, target_price_high AS high, target_price_low AS low, target_price_close AS close, last_trading_day, time_frame, started_at FROM bars) AS s
+  ON t.last_trading_day = s.last_trading_day AND t.time_frame = s.time_frame AND t.started_at = s.started_at
+    AND t.started_at >= win_start AND t.started_at < win_end
+  WHEN MATCHED THEN UPDATE SET open = s.open, high = s.high, low = s.low, close = s.close
+  WHEN NOT MATCHED THEN INSERT (open, high, low, close, last_trading_day, time_frame, started_at)
+    VALUES (s.open, s.high, s.low, s.close, s.last_trading_day, s.time_frame, s.started_at)
+  WHEN NOT MATCHED BY SOURCE AND t.started_at >= win_start AND t.started_at < win_end AND t.time_frame = 3600 THEN DELETE;
+
+  MERGE `${project}.${dataset}.atm_mid_iv` AS t
+  USING (SELECT mid_open AS open, mid_high AS high, mid_low AS low, mid_close AS close, last_trading_day, time_frame, started_at FROM bars) AS s
   ON t.last_trading_day = s.last_trading_day AND t.time_frame = s.time_frame AND t.started_at = s.started_at
     AND t.started_at >= win_start AND t.started_at < win_end
   WHEN MATCHED THEN UPDATE SET open = s.open, high = s.high, low = s.low, close = s.close

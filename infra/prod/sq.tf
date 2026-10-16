@@ -5,7 +5,7 @@
 #   legacy-copy    07:10 JST  東京  optionchan_legacy_stage → optionchan_legacy_copy（データセットコピー）
 #   quality-daily  07:15 JST  東京  品質チェック → quality_daily。違反があれば失敗（新系の M2 で通知）。ingest の 07:00 の照合・回収の後
 #   legacy-compare 07:30 JST  東京  コピーと最新版を比べる → legacy_compare_daily。コピーの欠けは失敗、説明できない差分は下の切り替え（と日付の下限）で
-#   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price に MERGE（#49。旧系の insert_ohlc の置き換え）
+#   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price（#49。旧系の insert_ohlc の置き換え）と atm_mid_iv（#98）に MERGE
 # 時刻を 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
 # legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ。旧系の停止（#14）で legacy-* を無効にし（var.legacy_stopped）、
 # 旧系の削除（#24）で消す。品質チェックと 1 時間足は残す。
@@ -185,7 +185,7 @@ resource "google_bigquery_data_transfer_config" "legacy_compare" {
 }
 
 # ---- 1 時間足（#49、target.md 3.2）。旧系の insert_ohlc の置き換え ----
-# 列は旧系の optionchan.atm_* と同じ（正は schema/ohlc/atm_ohlc.json、3 表共通。schema/tokyo/ は取り込みのイメージの入力で、
+# 列は旧系の optionchan.atm_* と同じ（正は schema/ohlc/atm_ohlc.json、4 表共通（atm_mid_iv は #98 で足した旧系に無い表）。schema/tokyo/ は取り込みのイメージの入力で、
 # 置くとイメージのタグが変わり ingest が再デプロイされるので置かない）。1 表 1 日 約 40 行と小さいので、
 # パーティションは旧系の日ではなく月（started_at）にする（旧系の日のパーティションは 1 つ数 KB で、過去分の移行の 1 回の DML が
 # 約 1,850 パーティションを書くことになる）。クラスタリングは旧系と同じ last_trading_day。
@@ -196,6 +196,7 @@ resource "google_bigquery_table" "atm_ohlc" {
     atm_iv           = "ATM の put の IV の 1 時間足（#49。sql/ohlc/atm_hourly.sql。旧系の optionchan.atm_iv と同じ列）"
     atm_option_price = "ATM の put のプレミアムの 1 時間足（#49。sql/ohlc/atm_hourly.sql。旧系の optionchan.atm_option_price と同じ列）"
     atm_target_price = "ATM の行使価格の 1 時間足（#49。sql/ohlc/atm_hourly.sql。旧系の optionchan.atm_target_price と同じ列）"
+    atm_mid_iv       = "ATM の put の mid IV（気配の中値）の 1 時間足（#98。sql/ohlc/atm_hourly.sql。旧系に無い表。列は atm_iv と同じ）"
   }
 
   project                  = var.project_id
@@ -213,7 +214,7 @@ resource "google_bigquery_table" "atm_ohlc" {
   }
 }
 
-# 定期クエリが 3 表を MERGE する（テーブル単位。データセットは上の sq_tokyo_viewer の読み取りだけ）
+# 定期クエリが 4 表を MERGE する（テーブル単位。データセットは上の sq_tokyo_viewer の読み取りだけ）
 resource "google_bigquery_table_iam_member" "sq_atm_ohlc_editor" {
   for_each = google_bigquery_table.atm_ohlc
 

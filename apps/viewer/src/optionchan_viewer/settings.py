@@ -28,7 +28,8 @@ N_DEFAULT, N_VALUES = 0, (0, 1)  # /atm_iv_data・/atm_iv_bars の n（何番目
 # 1h・1d は 1 時間足（/atm_iv_data と同じ）から
 TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 TF_DEFAULT = "1h"
-# /atm_iv_bars の IV（#93）: trade = 約定 IV（既定）、mid = 気配の中値（(bid_iv + ask_iv) / 2。分足だけ）
+# /atm_iv_bars の IV（#93）: trade = 約定 IV（既定）、mid = 気配の中値（(bid_iv + ask_iv) / 2。
+# 1 時間足・日足は #98 から）
 IV_KINDS = ("trade", "mid")
 IV_DEFAULT = "trade"
 # /atm_iv_bars の期間（#77。画面に期間の選択は無く、チャートの表示範囲で決まる）: 足 → (既定, 1 回の最大, 遡れる上限)。
