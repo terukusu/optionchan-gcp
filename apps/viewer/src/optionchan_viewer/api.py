@@ -115,6 +115,13 @@ def parse_n(raw: str | None) -> int:
     return int(raw)
 
 
+def parse_bars_n(raw: str | None) -> int | str:
+    """/atm_iv_bars の n: parse_n の値に加え、roll（期近つなぎ、#101。完全一致）。/atm_iv_data は parse_n のまま"""
+    if raw == st.N_ROLL:
+        return st.N_ROLL
+    return parse_n(raw)
+
+
 def _utc(now: datetime) -> datetime:
     if now.tzinfo is None:
         raise ValueError("now は aware な datetime にする")
@@ -207,12 +214,15 @@ def atm_iv_data(runner, now: datetime, d: int, n: int) -> str:
     return csvfmt.atm_iv_csv(rows)
 
 
-def atm_iv_bars(runner, now: datetime, tf: str, n: int, rng=None,
+def atm_iv_bars(runner, now: datetime, tf: str, n: int | str, rng=None,
                 iv: str = st.IV_DEFAULT) -> tuple[str, datetime, datetime]:
     """/atm_iv_bars（#68・#77）: 足 tf の ATM IV の OHLC（/atm_iv_data と同じ CSV。値の無い足は除く）と、
     読んだ範囲 (start, end)。rng = parse_range の (start, end)（足の started_at が入る範囲。日足は取引日の 00:00 JST）。
-    None なら既定（settings.BARS_RANGE の既定の日数〜now）。iv = parse_iv の値（mid は分足だけ。#93）"""
+    None なら既定（settings.BARS_RANGE の既定の日数〜now）。iv = parse_iv の値（mid は分足だけ。#93）。
+    n = parse_bars_n の値。roll（期近つなぎ、#101）は _roll_bars（CSV は 6 列目に限月）"""
     now = _utc(now)
+    if n == st.N_ROLL:
+        return _roll_bars(runner, now, tf, rng, iv)
     default_days = st.BARS_RANGE[tf][0]
     if st.TIMEFRAMES[tf] < 3600:
         if rng is None:
@@ -257,3 +267,56 @@ def _daily_bars(runner, now: datetime, start: datetime, end: datetime, n: int) -
     after = bars.trading_day(read_start - timedelta(microseconds=1), holidays)
     return [r for r in bars.daily(rows, holidays, after)
             if r["started_at"] >= start and (end >= now or r["started_at"] < end)]
+
+
+def roll_hourly_params(now: datetime, last_started_at: datetime | None, start: datetime, end: datetime) -> dict:
+    """sql/atm_iv_months.sql（期近つなぎの 1 時間足、#101）のパラメータ: hourly_params の補う分・期間の値だけ
+    （限月を選ばないので months_since・today・n・hourly_start は要らない）"""
+    params = hourly_params(now, last_started_at, start, end, 0)
+    return {k: params[k] for k in ("fill_start", "fill_end", "days_start", "range_end")}
+
+
+def _roll_holidays(runner, read_start: datetime, read_end: datetime) -> frozenset:
+    """期近つなぎの休業日: 読んだ最初の取引日の前日から、最後の取引日の後の ROLL_BUSINESS_DAYS + 1 営業日目まで"""
+    rows = runner("trading_holidays", {
+        "start_date": jst_date(read_start) - timedelta(days=1),
+        "end_date": jst_date(read_end) + timedelta(days=st.ROLL_HOLIDAYS_AHEAD_DAYS),
+    })
+    return frozenset(r["calendar_date"] for r in rows)
+
+
+def _roll_bars(runner, now: datetime, tf: str, rng, iv: str) -> tuple[str, datetime, datetime]:
+    """/atm_iv_bars?n=roll（期近つなぎ、#101）: 全限月の足を読み、取引日ごとに期近の最終取引日の ROLL_BUSINESS_DAYS
+    営業日前で 2 限月へ乗り換えた足（bars.roll）。期間・既定の範囲・読むクエリの量は n=0 と同じ（+ 休業日）。
+    行が無ければ休業日を読まない（日足を左へ読み続けたときに空の要求で課金を増やさない）"""
+    default_days = st.BARS_RANGE[tf][0]
+    if st.TIMEFRAMES[tf] < 3600:
+        if rng is None:
+            [row] = runner("latest_snapshot", {"start_at": now - timedelta(days=st.SEARCH_DAYS), "end_at": now})
+            snapshot_at = row["snapshot_at"]
+            if snapshot_at is None:
+                return "", utc_day(now - timedelta(days=default_days)), now
+            rng = utc_day(snapshot_at - timedelta(days=default_days)), now
+        start, end = rng
+        read_start, read_end = start, end
+        name = "atm_mid_minute_months" if iv == "mid" else "atm_iv_minute_months"
+        rows = runner(name, {"start_at": start, "end_at": end})
+    else:
+        start, end = rng or (utc_day(now - timedelta(days=default_days)), now)
+        # 日足は _daily_bars と同じ読み方（start の DAILY_LOOKBEHIND_DAYS 日前〜end の 1 日後）
+        read_start = start if tf == "1h" else start - timedelta(days=st.DAILY_LOOKBEHIND_DAYS)
+        read_end = end if tf == "1h" else min(end + DAY, now)
+        [meta] = runner("atm_iv_meta", {"start_at": now - timedelta(days=st.SEARCH_DAYS), "end_at": now})
+        rows = runner("atm_iv_months", roll_hourly_params(now, meta["last_started_at"], read_start, read_end))
+    if not rows:
+        return "", start, end
+    holidays = _roll_holidays(runner, read_start, read_end)
+    rows = bars.roll(rows, holidays, st.ROLL_BUSINESS_DAYS)
+    if tf == "1d":
+        after = bars.trading_day(read_start - timedelta(microseconds=1), holidays)
+        rows = [r for r in bars.daily(rows, holidays, after)
+                if r["started_at"] >= start and (end >= now or r["started_at"] < end)]
+    elif tf in ("5m", "15m"):
+        # 束ねるのは乗り換えた後（違う限月の足は 1 本にしない）
+        rows = bars.resample(rows, st.TIMEFRAMES[tf])
+    return csvfmt.atm_iv_months_csv(rows), start, end

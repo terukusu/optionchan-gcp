@@ -9,6 +9,7 @@
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <title>ATM IVの推移</title>
     <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+    <script src="/static/atm_series.js" defer></script>
     <script src="/static/atm_iv.js" defer></script>
     <link rel="stylesheet" href="/static/viewer.css">
 </head>
@@ -26,10 +27,8 @@
         </select>
     </label>
     <label>限月
-        <select id="nmonth">
-            <option value="0" selected>0</option>
-            <option value="1">1</option>
-        </select>
+        <!-- 選択肢は static/atm_series.js の系列の表から atm_iv.js が作る（0・1・期近つなぎ。既定は 0） -->
+        <select id="nmonth"></select>
     </label>
     <label>IV
         <select id="ivkind">

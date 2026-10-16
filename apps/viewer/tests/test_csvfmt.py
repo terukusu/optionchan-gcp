@@ -84,3 +84,18 @@ def test_snapshot_csv():
     assert lines[2] == "2,1,25000,17.25,,,,18.0,,610,,0"
     assert all(len(line.split(",")) == len(csvfmt.SNAPSHOT_COLUMNS) == 12 for line in lines[1:-1])
     assert text.endswith("\n") and lines[-1] == ""
+
+
+def test_atm_iv_months_csv():
+    # /atm_iv_bars?n=roll（#101）: ATM_IV_COLUMNS の後ろに 6 列目 last_trading_day（その足の限月。YYYY-MM-DD）
+    rows = [
+        {"open": 18.0, "high": 19.5, "low": 17.75, "close": 19.0, "started_at": datetime(2026, 11, 4, 6, tzinfo=UTC),
+         "last_trading_day": date(2026, 11, 12)},
+        {"open": 17.0, "high": 17.5, "low": 16.5, "close": 17.25, "started_at": datetime(2026, 11, 4, 8, tzinfo=UTC),
+         "last_trading_day": date(2026, 12, 10)},
+    ]
+    assert csvfmt.atm_iv_months_csv(rows) == (
+        "18.0,19.5,17.75,19.0,2026-11-04 06:00:00+00:00,2026-11-12\n"
+        "17.0,17.5,16.5,17.25,2026-11-04 08:00:00+00:00,2026-12-10\n"
+    )
+    assert csvfmt.atm_iv_months_csv([]) == ""

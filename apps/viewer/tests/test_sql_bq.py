@@ -19,6 +19,9 @@ CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
 - /smile_snapshot?dir=next（#80）: 週末・取引の切れ目の at で次の取引の最初のスナップショット、最新より後なら最新
 - /atm_iv_bars?iv=mid（#93）: mid の 1 分足が、iv を mid に替えた atm_iv_minute と同じ（限月・空の分・OHLC の式）。
   bid・ask の片方・0 以下は使わない。3 日（4 パーティション）の dry run が 512 MiB 以下
+- /atm_iv_bars?n=roll（#101）: 全限月のクエリ（1 時間足 + 補完、分足 trade・mid）の各限月の足が、同じ入力の n=0・n=1 の
+  クエリの足と同じ（限月の列が足されただけ）。期近つなぎの API が乗り換えの無い期間で n=0 と同じ足。
+  dry run が 512 MiB 以下
 """
 import json
 import os
@@ -603,6 +606,68 @@ def test_bars_hourly_past_range_without_fill():
     assert len(want) == 6  # 10-03・10-08 の 2 本・10-12 の 3 本（10-13 の補った足と 10-12 22:00 以降は入らない）
 
 
+# ---- /atm_iv_bars?n=roll（#101 AC 6） ----
+
+MONTHS_TYPES = {"last_trading_day": date.fromisoformat}
+
+
+def months_rows(name, fx, params):
+    return fixture_runner(fx, {name: MONTHS_TYPES})(name, params)
+
+
+def of_month(rows, month):
+    return [{k: v for k, v in r.items() if k != "last_trading_day"} for r in rows if r["last_trading_day"] == month]
+
+
+def test_minute_months_same_as_one_month():
+    # 全限月の 1 分足を限月で分けると、n=0（M1）・n=1（M2）の 1 分足と同じ（値の無い分・OHLC・時刻）。
+    # 満了した M0 の行も出る（選ばないのは bars.roll）
+    fx = fixtures(BARS_OPTIONS, calendar=BARS_CALENDAR)
+    rows = months_rows("atm_iv_minute_months", fx, {"start_at": BARS_START, "end_at": NOW})
+    assert of_month(rows, M1) == minute_rows(0)
+    assert of_month(rows, M2) == minute_rows(1)
+    assert of_month(rows, M0)
+    keys = [(r["started_at"], r["last_trading_day"]) for r in rows]
+    assert keys == sorted(set(keys))
+
+
+def test_mid_minute_months_same_as_one_month():
+    fx = fixtures(mid_options(), calendar=BARS_CALENDAR)
+    rows = months_rows("atm_mid_minute_months", fx, {"start_at": BARS_START, "end_at": NOW})
+    assert of_month(rows, M1) == mid_minute_rows(0, mid_options())
+    assert of_month(rows, M2) == mid_minute_rows(1, mid_options())
+
+
+@pytest.mark.parametrize("start,end", [
+    (datetime(2026, 9, 23, tzinfo=UTC), NOW),  # 最新を含む（補う分を読む）
+    (datetime(2026, 10, 12, tzinfo=UTC), NOW),
+    (datetime(2026, 9, 23, tzinfo=UTC), datetime(2026, 10, 12, 22, tzinfo=UTC)),  # 過去だけ（生データを読まない）
+])
+def test_atm_iv_months_same_as_atm_iv(start, end):
+    # 全限月の 1 時間足（+ 補った足）を限月で分けると、同じ範囲の atm_iv（n=0・n=1）の足と同じ
+    fx = fixtures(ATM_IV_OPTIONS, ATM_IV_HOURLY)
+    last = datetime(2026, 10, 12, 23, tzinfo=UTC)
+    rows = months_rows("atm_iv_months", fx, api.roll_hourly_params(NOW, last, start, end))
+    for n, month in ((0, M1), (1, M2)):
+        want = fixture_runner(fx)("atm_iv", api.hourly_params(NOW, last, start, end, n))
+        assert of_month(rows, month) == want, n
+        assert want
+    assert all(start <= r["started_at"] < end for r in rows)
+
+
+@pytest.mark.parametrize("tf", ["1m", "15m", "1h", "1d"])
+def test_roll_api_same_as_n0_without_switch(tf):
+    # 期近（M1 = 11-12）の残存が長い期間: 期近つなぎは n=0 と同じ足（6 列目が M1）。
+    # 満了した M0・2 限月の M2 は混ざらない
+    fx = fixtures(BARS_OPTIONS, BARS_HOURLY, runs=[{"snapshot_at": utc(13, 5, 59)}], calendar=BARS_CALENDAR)
+    run = fixture_runner(fx, {"atm_iv_months": MONTHS_TYPES, "atm_iv_minute_months": MONTHS_TYPES})
+    rng = (BARS_START, NOW) if tf in ("1m", "15m") else (datetime(2026, 10, 6, tzinfo=UTC), NOW)
+    roll = api.atm_iv_bars(run, NOW, tf, "roll", rng)[0].splitlines()
+    zero = api.atm_iv_bars(run, NOW, tf, 0, rng)[0].splitlines()
+    assert roll and [line.rsplit(",", 1)[0] for line in roll] == zero
+    assert all(line.endswith(",2026-11-12") for line in roll)
+
+
 # ---- /smile_snapshot（#79 AC 6） ----
 
 def latest_body(func, start, end):
@@ -794,6 +859,17 @@ def bars_dry_run_params(end):
         "atm_iv": ("atm_iv", api.hourly_params(end, None, daily_start, end, 0)),
         # 過去だけの範囲（左への追加読み込み）: 生データを読まない
         "atm_iv_past": ("atm_iv", api.hourly_params(end, None, daily_start, end - timedelta(days=5), 0)),
+        # 期近つなぎ（#101）: 同じ期間の全限月のクエリと、乗り換えを数える先までの休業日
+        "atm_iv_minute_months": ("atm_iv_minute_months", {"start_at": end - timedelta(days=minute_max + 1, hours=-1),
+                                                          "end_at": end - timedelta(days=1, hours=-1)}),
+        "atm_mid_minute_months": ("atm_mid_minute_months", {"start_at": end - timedelta(days=minute_max + 1, hours=-1),
+                                                            "end_at": end - timedelta(days=1, hours=-1)}),
+        "atm_iv_months": ("atm_iv_months", api.roll_hourly_params(end, None, daily_start, end)),
+        "atm_iv_months_past": ("atm_iv_months", api.roll_hourly_params(end, None, daily_start,
+                                                                       end - timedelta(days=5))),
+        "trading_holidays_roll": ("trading_holidays", {
+            "start_date": api.jst_date(daily_start) - timedelta(days=1),
+            "end_date": api.jst_date(end) + timedelta(days=api.st.ROLL_HOLIDAYS_AHEAD_DAYS)}),
     }
 
 
@@ -818,7 +894,9 @@ def test_dry_run_smile_snapshot_within_512mib(name, record_property):
     assert nbytes <= 512 * MiB
 
 
-@pytest.mark.parametrize("name", ["atm_iv_minute", "atm_mid_minute", "trading_holidays", "atm_iv", "atm_iv_past"])
+@pytest.mark.parametrize("name", ["atm_iv_minute", "atm_mid_minute", "trading_holidays", "atm_iv", "atm_iv_past",
+                                  "atm_iv_minute_months", "atm_mid_minute_months", "atm_iv_months",
+                                  "atm_iv_months_past", "trading_holidays_roll"])
 def test_dry_run_bars_within_512mib(name, record_property):
     now = datetime.now(UTC)
     # UTC の 1 日（JST 09:00〜翌 08:59）は日中 + 夜間。夜間が終わった後（22:00 UTC = 07:00 JST 以降）なら

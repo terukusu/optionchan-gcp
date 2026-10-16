@@ -13,7 +13,9 @@ from importlib import resources
 from . import settings as st
 
 QUERY_NAMES = ("latest_snapshot", "next_snapshot", "smile", "smile_snapshot", "atm_iv_meta", "atm_iv",
-               "atm_iv_minute", "atm_mid_minute", "trading_holidays")
+               "atm_iv_minute", "atm_mid_minute", "trading_holidays",
+               # 期近つなぎ（n=roll、#101）: 全限月の足
+               "atm_iv_months", "atm_iv_minute_months", "atm_mid_minute_months")
 _PLACEHOLDER = re.compile(r"\$\{(\w+)\}")
 
 
