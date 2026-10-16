@@ -809,13 +809,24 @@ def test_compare_legacy_next_contradicts_new_t():
     assert samples == [('2026-10-13 05:59', '1 68000 2026-11-12'), ('2026-10-13 06:00', '1 68000 2026-11-12')]
 
 
-def stale_same_fixture(n):
-    """新系の T が直前と同じ中身（版の遅れ）で旧系だけ新しい版の先物が 1 日に n 回（直後は次の版）。spot・option は新旧一致"""
+def stale_same_fixture(n, table='future', catch_up=False):
+    """新系の T が直前と同じ中身（版の遅れ）で旧系だけ新しい版の行（table の表）が 1 日に n 回。他の表は新旧一致。
+    catch_up が偽なら新系の直後も T と同じ版（新系が止まり続ける。2026-10-14 18:52〜19:27 JST の凍結の形）、
+    真なら直後は次の版（1 分で追いつく。新系の 1 分遅れ new_behind、#89。2026-10-15 の形）"""
     d = empty()
     stale = [2 + 3 * k for k in range(n)]
+    at_fn = spot_at if table == 'spot' else future_at
     for m in range(0, 3 * n + 3):
         at = ts(m, 5)
-        put(d, 'new', at, spot_at(m), future_at(m - 1) if m in stale else future_at(m), [opt_c(m)])
+        if m in stale:
+            value = at_fn(m - 1)
+        elif not catch_up and m - 1 in stale:
+            value = at_fn(m - 2)       # 直後も T と同じ版のまま
+        else:
+            value = at_fn(m)
+        spot = value if table == 'spot' else spot_at(m)
+        future = value if table == 'future' else future_at(m)
+        put(d, 'new', at, spot, future, [opt_c(m)])
         d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
         if m in stale:
             put(d, 'legacy', at, spot_at(m), future_at(m), [opt_c(m)])
@@ -828,6 +839,194 @@ def test_compare_stale_same_limit(n, explained):
     row = run_compare(stale_same_fixture(n))
     assert counts(row, ('future_compared', 'future_new_stale', 'future_unexplained')) == {
         'future_compared': n, 'future_new_stale': n if explained else 0, 'future_unexplained': 0 if explained else n}
+
+
+@pytest.mark.parametrize('table', ['spot', 'future'])
+def test_compare_frozen_is_not_new_behind(table):
+    """新系が止まり続ける形（直後も T と同じ版）は新系の 1 分遅れ（new_behind）にしない。new_stale の上限 3 を超えて全部 unexplained"""
+    row = run_compare(stale_same_fixture(4, table))
+    assert counts(row, (f'{table}_new_behind', f'{table}_new_stale', f'{table}_unexplained')) == {
+        f'{table}_new_behind': 0, f'{table}_new_stale': 0, f'{table}_unexplained': 4}
+
+
+@pytest.mark.parametrize('table', ['spot', 'future'])
+@pytest.mark.parametrize('n, explained', [(10, True), (11, False)])
+def test_compare_new_behind_limit(table, n, explained):
+    """新系の 1 分遅れ（直後で追いつく）は 1 日に表ごと 10 行まで。超えたら全部 unexplained（系統的に遅れる不具合）"""
+    row = run_compare(stale_same_fixture(n, table, catch_up=True))
+    assert counts(row, (f'{table}_compared', f'{table}_new_behind', f'{table}_new_stale', f'{table}_unexplained')) == {
+        f'{table}_compared': n, f'{table}_new_behind': n if explained else 0, f'{table}_new_stale': 0,
+        f'{table}_unexplained': 0 if explained else n}
+
+
+def behind_fixture(table, shape):
+    """新系 14:00〜14:04（05:00〜05:04 UTC）、旧系は 14:02 だけ（table の表は 14:02 の約定。他の表は新旧一致）。
+    shape で新系の 14:01〜14:03 の table の表の版を変える"""
+    at_fn = spot_at if table == 'spot' else future_at
+    new = {m: at_fn(m) for m in range(5)}
+    legacy = at_fn(2)
+    if shape in ('time_only', 'time_only_base', 'time_only_cm'):
+        # 2026-10-15 12:16 JST の先物の形: 新系の T は約定時刻だけ直前から進んだ版で 1 分遅れ、直後で旧系より先へ進む
+        new[1] = at_fn(0)
+        new[2] = {**at_fn(0), 'price_time': jst(1, 14)}
+        if shape == 'time_only_base':
+            legacy = {**legacy, 'diff': legacy['diff'] - 5}
+        if shape == 'time_only_cm':
+            legacy = {**legacy, 'contract_month': '2027-06-01'}
+    elif shape == 'same':
+        new[2] = at_fn(1)                       # 新系の T は直前と同じ中身、直後で追いつく（2026-10-15 の形）
+    elif shape == 'frozen':
+        new[2] = new[3] = at_fn(1)              # 直後も T と同じ（止まり続ける）
+    elif shape == 'behind_next':
+        new[1] = new[2] = at_fn(0)              # 直後は進むが、まだ旧系より前（追いついていない）
+        new[3] = at_fn(1)
+    elif shape == 'freeze_end':
+        # 長い凍結の最後の行（2026-10-14 19:28 JST の形）: 新系は止まった版の後に少しだけ新しい古い版、直後で旧系の先まで飛ぶ
+        new = {0: at_fn(5), 1: at_fn(5), 2: at_fn(7), 3: at_fn(11), 4: at_fn(12)}
+        legacy = at_fn(10)
+    elif shape == 'rewind':
+        # 新系の T だけ 3 分前の版に戻る（直後は戻る前の続き）
+        new = {m: at_fn(m + 3) for m in range(5)}
+        new[2] = at_fn(2)
+        legacy = at_fn(5)
+    d = empty()
+    for m in range(5):
+        at = ts(m, 5)
+        put(d, 'new', at, new[m] if table == 'spot' else spot_at(m), new[m] if table == 'future' else future_at(m),
+            [opt_c(m)])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+    put(d, 'legacy', ts(2, 5), legacy if table == 'spot' else spot_at(2), legacy if table == 'future' else future_at(2),
+        [opt_c(2)])
+    return d
+
+
+@pytest.mark.parametrize('table, shape, behind, stale', [
+    ('spot', 'same', 1, 0), ('future', 'same', 1, 0),
+    ('spot', 'time_only', 1, 0), ('future', 'time_only', 1, 0),
+    ('spot', 'frozen', 0, 1), ('future', 'frozen', 0, 1),           # new_stale（上限 3 の中）
+    ('spot', 'behind_next', 0, 1), ('future', 'behind_next', 0, 1),
+    ('spot', 'time_only_base', 0, 0), ('future', 'time_only_base', 0, 0),  # 基準価格が違う → unexplained
+    ('spot', 'freeze_end', 0, 0), ('future', 'freeze_end', 0, 0),          # 遅れが 1 分を超える → unexplained
+    ('spot', 'rewind', 0, 0), ('future', 'rewind', 0, 0),
+    ('future', 'time_only_cm', 0, 0),                                       # 限月が違う → unexplained
+])
+def test_compare_new_behind_shapes(table, shape, behind, stale):
+    row = run_compare(behind_fixture(table, shape))
+    assert counts(row, (f'{table}_new_behind', f'{table}_new_stale', f'{table}_unexplained', 'unexplained')) == {
+        f'{table}_new_behind': behind, f'{table}_new_stale': stale, f'{table}_unexplained': 1 - behind - stale,
+        'unexplained': 1 - behind - stale}
+
+
+def long_freeze_fixture(table):
+    """4 分の凍結: 新系の 14:02〜14:05 が 14:01 の版のまま、14:06 で追いつく。旧系は 14:01〜14:06 の毎分（table の表は毎分の版）"""
+    at_fn = spot_at if table == 'spot' else future_at
+    d = empty()
+    for m in range(8):
+        at = ts(m, 5)
+        value = at_fn(1) if 2 <= m <= 5 else at_fn(m)
+        put(d, 'new', at, value if table == 'spot' else spot_at(m), value if table == 'future' else future_at(m), [opt_c(m)])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+        if 1 <= m <= 6:
+            put(d, 'legacy', at, spot_at(m), future_at(m), [opt_c(m)])
+    return d
+
+
+@pytest.mark.parametrize('table', ['spot', 'future'])
+def test_compare_long_freeze_last_row_is_not_new_behind(table):
+    """凍結の最後の行（直後で追いつく）は遅れが 1 分を超えるので new_behind にしない。凍結の 4 行が new_stale の上限 3 を超えて全部 unexplained"""
+    row = run_compare(long_freeze_fixture(table))
+    assert counts(row, (f'{table}_new_behind', f'{table}_new_stale', f'{table}_unexplained', 'unexplained')) == {
+        f'{table}_new_behind': 0, f'{table}_new_stale': 0, f'{table}_unexplained': 4, 'unexplained': 4}
+
+
+def s1_minute_fixture(table, next_kind):
+    """2026-10-14 14:58 JST の先物の形: 新系 14:55〜14:59（14:57 の版 → 14:58 の版）、旧系の 14:58 は新系の直前（14:57）と同じ分の
+    別の価格（基準価格は同じ）。旧系の次（14:59）は新系の 14:59 と同じで、next_kind で変える:
+    same_as_t = 新系の T と同じ（裏付けあり）、other_price = 新系の T と同じ分の別の価格、ahead = 新系の T より後の約定"""
+    if table == 'spot':
+        legacy_t = spot_at(57, price=157.5)
+        nx = {'same_as_t': spot_at(58), 'other_price': spot_at(58, price=158.5), 'ahead': spot_at(59)}[next_kind]
+    else:
+        legacy_t = {**future_at(57), 'price': 257.5, 'diff': 157.5}
+        nx = {'same_as_t': future_at(58), 'other_price': {**future_at(58), 'price': 258.5, 'diff': 158.5},
+              'ahead': future_at(59)}[next_kind]
+    d = empty()
+    for m in range(55, 60):
+        at = ts(m, 5)
+        spot = nx if table == 'spot' and m == 59 else spot_at(m)
+        future = nx if table == 'future' and m == 59 else future_at(m)
+        put(d, 'new', at, spot, future, [opt_c(m)])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+    put(d, 'legacy', ts(58, 5), legacy_t if table == 'spot' else spot_at(58),
+        legacy_t if table == 'future' else future_at(58), [opt_c(58)])
+    put(d, 'legacy', ts(59, 5), nx if table == 'spot' else spot_at(59), nx if table == 'future' else future_at(59),
+        [opt_c(59)])
+    return d
+
+
+@pytest.mark.parametrize('table', ['spot', 'future'])
+@pytest.mark.parametrize('next_kind, older, unconfirmed', [
+    ('same_as_t', 1, 0),       # 旧系の次が新系の T を裏付ける → legacy_older（(b) の下の境界 S1 ≤ 旧、#89）
+    ('other_price', 0, 0),     # 旧系の次が新系の T と違う（同じ分の別の価格）→ unexplained
+    ('ahead', 0, 1),           # 裏付けは無いが旧系の次が新系の T より先 → legacy_older_unconfirmed
+])
+def test_compare_older_same_minute_as_s1(table, next_kind, older, unconfirmed):
+    row = run_compare(s1_minute_fixture(table, next_kind))
+    assert counts(row, (f'{table}_legacy_older', f'{table}_legacy_older_unconfirmed', f'{table}_unexplained', 'unexplained')) == {
+        f'{table}_legacy_older': older, f'{table}_legacy_older_unconfirmed': unconfirmed,
+        f'{table}_unexplained': 1 - older - unconfirmed, 'unexplained': 1 - older - unconfirmed}
+
+
+def unconfirmed_fixture(n):
+    """裏付けの無い古い版（legacy_older_unconfirmed、#89）が 1 日に表ごと n 回。新系は毎分 14:mm の版。旧系の T（14:02 + 3k）は
+    spot・先物が新系の T と同じ約定時刻の別の価格（2026-10-14 10:15 JST の先物の形）、option は新系の 2 分前の版（2026-10-14
+    15:35 JST の C 68125 の形）。旧系の次（T の 1 分後）は新系と同じ（新系の T より先へ進んでいて、新系の T を裏付けない）"""
+    d = empty()
+    legacy_t = [2 + 3 * k for k in range(n)]
+    for m in range(0, 3 * n + 3):
+        at = ts(m, 5)
+        put(d, 'new', at, spot_at(m), future_at(m), [opt_c(m)])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+        if m in legacy_t:
+            put(d, 'legacy', at, spot_at(m, price=100.5 + m),
+                {**future_at(m), 'price': 200.5 + m, 'diff': 100.5 + m}, [opt_c(m - 2)])
+        if m - 1 in legacy_t:
+            put(d, 'legacy', at, spot_at(m), future_at(m), [opt_c(m)])
+    return d
+
+
+@pytest.mark.parametrize('n, explained', [(1, True), (3, True), (4, False)])
+def test_compare_legacy_older_unconfirmed_limit(n, explained):
+    """裏付けの無い古い版は 1 日に表ごと 3 行まで。超えたらその表の分を全部 unexplained（新系の 1 回だけの読み誤りと区別できない）"""
+    row = run_compare(unconfirmed_fixture(n))
+    expected = {}
+    for table in ('spot', 'future', 'option'):
+        expected.update({f'{table}_legacy_older': 0, f'{table}_legacy_older_unconfirmed': n if explained else 0,
+                         f'{table}_unexplained': 0 if explained else n})
+    expected['unexplained'] = 0 if explained else 3 * n
+    assert counts(row, tuple(expected)) == expected
+
+
+@pytest.mark.parametrize('ahead', [True, False])
+def test_compare_option_legacy_older_unconfirmed(ahead):
+    """option の古い版（実例 1。新系の 2 分前の版）で、新系の直後は T と違う版（裏付けなし）。旧系の次の出来高が新系の T より多ければ
+    legacy_older_unconfirmed。同じ出来高で別の値なら説明しない（旧系の次の行も新系と合わず unexplained で 2 行）"""
+    d = older_fixture(next_legacy=True)
+    _next_a_moves_on(d)
+    [r] = [r for r in d['legacy_option'] if r['created_at'] == NEXT and r['target_price'] == 68000]
+    if ahead:
+        r.update(_new_row_key(d, NEXT, 68000))
+    else:
+        r.update(price=1999, diff=1999 - 1500)
+    row = run_compare(d)
+    assert counts(row, ('option_legacy_older', 'option_legacy_older_unconfirmed', 'option_unexplained', 'unexplained')) == {
+        'option_legacy_older': 1, 'option_legacy_older_unconfirmed': int(ahead), 'option_unexplained': 0 if ahead else 2,
+        'unexplained': 0 if ahead else 2}
+
+
+def _new_row_key(d, at, strike):
+    [r] = [r for r in d['new_option'] if r['created_at'] == at and r['target_price'] == strike]
+    return {k: v for k, v in r.items() if k != 'created_at'}
 
 
 def test_compare_page2_needs_new_row():

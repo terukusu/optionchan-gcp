@@ -17,12 +17,20 @@
 --                新系の T にも行があるときだけ）
 --   new_stale    spot・future で、新系の T が直前と同じ中身（新系がその分の更新を取れなかった）で、旧系だけ新しい版
 --                （1 日に表ごと 3 行までなら説明済み、超えたらこの形の行を全部 unexplained。新系が系統的に古い版を返す不具合を
---                捕まえる。2026-10-13 08:52 JST〜10-14 01:08 JST は spot 2 行・future 2 行。上限 3 はそれに余裕を持たせた値）。
+--                捕まえる。上限 3 は #61 で 2026-10-13 の spot 2 行・future 2 行に余裕を持たせて決めた値。その 4 行は #89 で
+--                どれも new_behind（1 分で追いつく形）に移り、#89 の後にここへ残るのは 2 分以上止まる・1 分を超えて遅れる形だけ。
+--                2026-10-13〜15 の再計算では 10-14 18:52〜19:27 JST の凍結の future 14 行だけ（上限を超えて unexplained））。
 --                または新系の T が約定時刻だけ直前から進み価格の列（price・diff・diff_rate）が直前のまま（書き換え途中の版）で、
 --                旧系の行が同じ約定時刻・同じ基準価格（price − diff）・同じ hv（future は限月も）の別の価格のもの（#61）。
 --                旧系の行の版を新系も T の後 5 分の中で取っていれば裏付けあり。裏付けが無いもの（新系の価格の持ち越しの誤りと
 --                区別できない）は 1 日に表ごと 3 行までなら説明済み、超えたら全部 unexplained（系統的な持ち越しの不具合は
 --                1 日に多数出るので捕まえる。2026-10-13 は future 1 行（13:44 JST）。上限 3 はそれに余裕を持たせた値）
+--   new_behind   spot・future で新系の 1 分遅れ（#89）: 新系の T の約定時刻が旧系より前で、新系の直後が T と違う版に進み、
+--                その約定時刻が旧系と同じか後（新系が直後で追いついた）。遅れは 1 分ちょうど（旧系 ≤ 新系の T + 1 分）で、新系の T は直前より古くない（新系の直前 ≤ 新系の T。逆行は当たらない）。
+--                基準価格・hv が新系の T と同じ（future は限月も）。new_stale の判定より前に見る。長い凍結の最後の行（直後で
+--                現在まで飛ぶ）と古い版に戻る形は遅れが 1 分を超えるので当たらない。新系が止まり続ける形（直後も T と同じ版。2026-10-14 18:52〜19:27 JST の凍結）は
+--                当たらず、new_stale の上限で unexplained になる。1 日に表ごと 10 行までなら説明済み、超えたら全部 unexplained
+--                （2026-10-15 は future 5 行・spot 3 行。上限 10 はそれに余裕を持たせた値。毎分遅れる不具合は 1 日数百行になる）
 --   page2        option で新系の 2 限月ページの更新時刻が 1 限月と違うスナップショットの 2 限月の行（#11 AC 5。新系の T にも行があるときだけ）
 --   legacy_older 旧系が新系の T より古い版・途中の版を読んだ（#61）。上のどれにも当たらない行のうち、新系の T が旧系の行から
 --                進んでいて（spot・future は約定時刻が後、option は出来高が多く約定時刻が同じか後）、次のどちらか:
@@ -31,8 +39,9 @@
 --                (b) 旧系の行が新系の連続する 2 スナップショット S1 < S2（S1 は T の 10 分前以降、S2 ≤ T）の版の間:
 --                    option は出来高が S1 < 旧 < S2（約定が S1 の後・S2 の前にあった）、約定時刻が S1 ≤ 旧 ≤ S2、
 --                    基準価格（price − diff）・清算値・清算日が S1 か S2 と同じ、建玉が S1 と S2 の間。
---                    spot・future は出来高が無いので約定時刻が S1 < 旧 < S2（分の精度で間にある）、基準価格（price − diff）と
---                    hv が S1 か S2 と同じ（future は限月も）。1 分の中で途中に出た版を旧系だけが読んだ
+--                    spot・future は出来高が無いので約定時刻が S1 ≤ 旧 < S2（分の精度で間にある。S1 と同じ分は、その分の中の
+--                    別の約定を旧系が読んだ形。#89）、基準価格（price − diff）と hv が S1 か S2 と同じ（future は限月も）。
+--                    1 分の中で途中に出た版を旧系だけが読んだ
 --                どちらも新系の T の値の裏付けが要る: 旧系の次のスナップショットの同じ行が新系の T と同じ値（option は約定の列）、
 --                または (a) と S2 < T の (b) に限って新系の直後のスナップショットの同じ行が同じ値。新系の直後は新系自身の読み取りで
 --                独立の裏付けではない（同じ誤りが直後まで続けば満たす）ので、S2 = T の (b) には使わない。旧系の次に同じ行があれば、
@@ -41,6 +50,11 @@
 --                これらの条件で、新系の T の解析の誤りのうち、T だけの誤り（価格だけ違う、出来高を多く読むなど）と、旧系の次の
 --                スナップショットと矛盾する誤りは unexplained に残る。新系の同じ誤りが直後まで続き、旧系の次がその行を持たない
 --                （または矛盾しない）形の (a) と S2 < T の (b) は説明済みになりうる（tests/test_sql_bq.py）
+--   legacy_older_unconfirmed  legacy_older の裏付けだけが無いもの（#89）。旧系の次のスナップショットの同じ行が新系の T より
+--                先へ進んでいる（spot・future は約定時刻が後、option は出来高が多い）= 新系の T が旧系の T と旧系の次の間にある。
+--                spot・future は約定時刻が旧系と同じ分の別の価格も含める（新系の T が旧系 ≤ 新系、(b) は S1 ≤ 旧 ≤ S2。分の精度では
+--                どちらが先か決まらない）。新系がたまたま 1 回だけ値を読み誤った形と区別できないので、1 日に表ごと 3 行までなら
+--                説明済み、超えたら全部 unexplained（2026-10-14 は future 2 行・option 1 行、10-15 は future 1 行）
 --   unexplained  それ以外（約定の列がどの候補とも合わない行など）
 -- スナップショット: 旧系にあって新系に無い T は legacy_only（新系の取りこぼし、説明できない差分）、新系だけの T は保存条件の差
 -- （説明済み）。旧系の重複・欠けは件数だけ数えて比べない。
@@ -229,11 +243,19 @@ spot_cls0 AS (
     IFNULL(n.v = nx.v, FALSE) AS ok_nx,
     IFNULL(n.v = ln.v, FALSE) AS ok_ln,
     ln.created_at IS NULL OR IFNULL(ln.pt >= n.pt, FALSE) AS ln_ok,
+    -- legacy_older_unconfirmed の条件: 旧系の次の約定時刻が新系の T より後（#89）
+    IFNULL(ln.pt > n.pt, FALSE) AS ln_ahead,
     CASE
       WHEN l.v = n.v THEN 'match'
       WHEN l.v = pv.v OR l.v = nx.v THEN 'version'
-      -- 新系の版の遅れ（新系の T が直前と同じ中身）。旧系の版を新系が後で取ったかは問わない（2026-10-13 の実データで、
-      -- 新系がその版を一度も取らずに次の版へ進んだ例が spot・future 各 2 行あるため）。1 日の上限は *_cls で見る
+      -- 新系の 1 分遅れ（#89）: 新系の T が旧系より前の約定時刻で、新系の直後が T と違う版に進み旧系に追いついた。
+      -- 遅れは 1 分ちょうどに限る（凍結の最後の行・古い版に戻る形を説明しない）。新系が止まり続ける形（直後も T と同じ）は
+      -- 当たらず、下の new_stale_same（上限 3）に残る。1 日の上限は *_cls で見る
+      WHEN n.pt < l.pt AND l.pt <= DATETIME_ADD(n.pt, INTERVAL 1 MINUTE) AND n.pt >= pv.pt AND l.pt <= nx.pt AND nx.v != n.v
+        AND l.base = n.base AND l.hv = n.hv THEN 'new_behind'
+      -- 新系の版の遅れ（新系の T が直前と同じ中身）。旧系の版を新系が後で取ったかは問わない（#61 で 2026-10-13 の
+      -- spot・future 各 2 行を見て決めた。その 4 行は #89 で new_behind に移り、ここに残るのは 2 分以上止まる・1 分を超えて
+      -- 遅れる形）。1 日の上限は *_cls で見る
       WHEN n.v = pv.v THEN 'new_stale_same'
       -- 新系の T は約定時刻だけ進み価格の列が直前のまま（書き換え途中の版）。旧系は同じ約定時刻の価格まで書き換わった版で、
       -- 新系も後でその版を取った
@@ -249,30 +271,47 @@ spot_cls0 AS (
   LEFT JOIN legacy_spot_v AS ln ON ln.created_at = p.legacy_next_at
   LEFT JOIN spot_seen AS sn ON sn.t = p.t
 ),
--- (a) 10 分の中の前のスナップショットと全列一致、(b) 連続する 2 スナップショットの約定時刻の間（どちらも新系の T の約定時刻が旧系より後）
+-- (a) 10 分の中の前のスナップショットと全列一致、(b) 連続する 2 スナップショットの約定時刻の間。
+-- confirmed（legacy_older）: 新系の T の約定時刻が旧系より後、(b) は S1 ≤ 旧 < S2、新系の T の値の裏付けがある。
+-- それ以外で、旧系の次の約定時刻が新系の T より後（旧系 ≤ 新系 < 旧系の次）、(b) は S1 ≤ 旧 ≤ S2 のものは
+-- legacy_older_unconfirmed（#89。同じ分の別の価格を含む）。1 日の上限（n_unconfirmed）は spot_cls で見る。
+-- 1 回の走査で両方の旗を出す（分類の CTE の参照を増やさない）
 spot_older AS (
-  SELECT DISTINCT c.t
-  FROM spot_cls0 AS c
-  JOIN recent AS w ON w.t = c.t
-  JOIN spot_v AS s ON s.created_at = w.s_at
-  LEFT JOIN spot_v AS s1 ON s1.created_at = w.s1_at
-  WHERE c.cls = 'unexplained' AND c.npt > c.lpt AND c.ln_ok
-    -- 新系の直後による裏付けは S < T のときだけ（S2 = T は旧系の次による裏付けが要る。新系の誤りが直後まで続く形を説明しない）
-    AND (c.ok_ln OR (c.ok_nx AND s.created_at < c.t))
-    AND (
-      (s.created_at < c.t AND c.lv = s.v)
-      OR (c.lpt > s1.pt AND c.lpt < s.pt AND c.lbase IN (s1.base, s.base) AND c.lhv IN (s1.hv, s.hv)))
+  SELECT t, LOGICAL_OR(confirmed) AS confirmed, COUNTIF(NOT LOGICAL_OR(confirmed)) OVER () AS n_unconfirmed
+  FROM (
+    SELECT
+      c.t,
+      -- 新系の直後による裏付けは S < T のときだけ（S2 = T は旧系の次による裏付けが要る。新系の誤りが直後まで続く形を説明しない）
+      IFNULL(c.npt > c.lpt AND (c.ok_ln OR (c.ok_nx AND s.created_at < c.t))
+        AND ((s.created_at < c.t AND c.lv = s.v)
+          OR (c.lpt >= s1.pt AND c.lpt < s.pt AND c.lbase IN (s1.base, s.base) AND c.lhv IN (s1.hv, s.hv))), FALSE) AS confirmed,
+      IFNULL(c.npt >= c.lpt AND c.ln_ahead
+        AND ((s.created_at < c.t AND c.lv = s.v)
+          OR (c.lpt >= s1.pt AND c.lpt <= s.pt AND c.lbase IN (s1.base, s.base) AND c.lhv IN (s1.hv, s.hv))), FALSE) AS unconfirmed
+    FROM spot_cls0 AS c
+    JOIN recent AS w ON w.t = c.t
+    JOIN spot_v AS s ON s.created_at = w.s_at
+    LEFT JOIN spot_v AS s1 ON s1.created_at = w.s1_at
+    WHERE c.cls = 'unexplained' AND c.ln_ok
+  )
+  WHERE confirmed OR unconfirmed
+  GROUP BY t
 ),
 -- 新系の版の遅れ（new_stale_same）と裏付けの無い書き換え途中の版（new_stale_unconfirmed）は、それぞれ 1 日に表ごと 3 行までを
--- new_stale、超えたらその種類を全部 unexplained にする（新系の誤りで同じ形が系統的に出ると 1 日に多数になるので捕まえる）
+-- new_stale、超えたらその種類を全部 unexplained にする（新系の誤りで同じ形が系統的に出ると 1 日に多数になるので捕まえる）。
+-- 新系の 1 分遅れ（new_behind、#89）は 10 行まで
 spot_unconfirmed AS (
-  SELECT COUNTIF(cls = 'new_stale_same') AS n_same, COUNTIF(cls = 'new_stale_unconfirmed') AS n FROM spot_cls0
+  SELECT
+    COUNTIF(cls = 'new_stale_same') AS n_same, COUNTIF(cls = 'new_stale_unconfirmed') AS n, COUNTIF(cls = 'new_behind') AS n_behind
+  FROM spot_cls0
 ),
 spot_cls AS (
   SELECT
     c.t,
     CASE
-      WHEN c.cls = 'unexplained' AND o.t IS NOT NULL THEN 'legacy_older'
+      WHEN c.cls = 'unexplained' AND o.confirmed THEN 'legacy_older'
+      WHEN c.cls = 'unexplained' AND o.t IS NOT NULL THEN IF(o.n_unconfirmed > 3, 'unexplained', 'legacy_older_unconfirmed')
+      WHEN c.cls = 'new_behind' THEN IF(u.n_behind > 10, 'unexplained', 'new_behind')
       WHEN c.cls = 'new_stale_same' THEN IF(u.n_same > 3, 'unexplained', 'new_stale')
       WHEN c.cls = 'new_stale_unconfirmed' THEN IF(u.n > 3, 'unexplained', 'new_stale')
       ELSE c.cls
@@ -306,11 +345,15 @@ future_cls0 AS (
     IFNULL(n.v = nx.v AND n.cm = nx.cm, FALSE) AS ok_nx,
     IFNULL(n.v = ln.v AND ln.cm IN (n.cm, DATE_ADD(n.cm, INTERVAL 1 YEAR)), FALSE) AS ok_ln,
     ln.created_at IS NULL OR IFNULL(ln.pt >= n.pt, FALSE) AS ln_ok,
+    IFNULL(ln.pt > n.pt, FALSE) AS ln_ahead,
     CASE
       WHEN l.v = n.v AND l.cm = n.cm THEN 'match'
       WHEN l.v = n.v AND l.cm = DATE_ADD(n.cm, INTERVAL 1 YEAR) THEN 'contract_year'
       WHEN (l.v = pv.v AND l.cm IN (pv.cm, DATE_ADD(pv.cm, INTERVAL 1 YEAR)))
         OR (l.v = nx.v AND l.cm IN (nx.cm, DATE_ADD(nx.cm, INTERVAL 1 YEAR))) THEN 'version'
+      WHEN n.pt < l.pt AND l.pt <= DATETIME_ADD(n.pt, INTERVAL 1 MINUTE) AND n.pt >= pv.pt AND l.pt <= nx.pt AND nx.v != n.v AND n.cm = nx.cm
+        AND l.base = n.base AND l.hv = n.hv
+        AND l.cm IN (n.cm, DATE_ADD(n.cm, INTERVAL 1 YEAR)) THEN 'new_behind'
       WHEN n.v = pv.v AND n.cm = pv.cm THEN 'new_stale_same'
       WHEN n.pt > pv.pt AND n.pr = pv.pr AND n.cm = pv.cm AND l.pt = n.pt AND l.base = n.base AND l.hv = n.hv
         AND l.cm IN (n.cm, DATE_ADD(n.cm, INTERVAL 1 YEAR)) THEN IF(sn.t IS NOT NULL, 'new_stale', 'new_stale_unconfirmed')
@@ -326,28 +369,40 @@ future_cls0 AS (
 ),
 -- spot と同じ。限月は年の補完を許す
 future_older AS (
-  SELECT DISTINCT c.t
-  FROM future_cls0 AS c
-  JOIN recent AS w ON w.t = c.t
-  JOIN future_v AS s ON s.created_at = w.s_at
-  LEFT JOIN future_v AS s1 ON s1.created_at = w.s1_at
-  WHERE c.cls = 'unexplained' AND c.npt > c.lpt AND c.ln_ok
-    AND (c.ok_ln OR (c.ok_nx AND s.created_at < c.t))
-    AND (
-      (s.created_at < c.t AND c.lv = s.v AND c.lcm IN (s.cm, DATE_ADD(s.cm, INTERVAL 1 YEAR)))
-      OR (c.lpt > s1.pt AND c.lpt < s.pt AND c.lbase IN (s1.base, s.base) AND c.lhv IN (s1.hv, s.hv)
-        AND c.lcm IN (s.cm, DATE_ADD(s.cm, INTERVAL 1 YEAR))))
+  SELECT t, LOGICAL_OR(confirmed) AS confirmed, COUNTIF(NOT LOGICAL_OR(confirmed)) OVER () AS n_unconfirmed
+  FROM (
+    SELECT
+      c.t,
+      IFNULL(c.npt > c.lpt AND (c.ok_ln OR (c.ok_nx AND s.created_at < c.t))
+        AND ((s.created_at < c.t AND c.lv = s.v AND c.lcm IN (s.cm, DATE_ADD(s.cm, INTERVAL 1 YEAR)))
+          OR (c.lpt >= s1.pt AND c.lpt < s.pt AND c.lbase IN (s1.base, s.base) AND c.lhv IN (s1.hv, s.hv)
+            AND c.lcm IN (s.cm, DATE_ADD(s.cm, INTERVAL 1 YEAR)))), FALSE) AS confirmed,
+      IFNULL(c.npt >= c.lpt AND c.ln_ahead
+        AND ((s.created_at < c.t AND c.lv = s.v AND c.lcm IN (s.cm, DATE_ADD(s.cm, INTERVAL 1 YEAR)))
+          OR (c.lpt >= s1.pt AND c.lpt <= s.pt AND c.lbase IN (s1.base, s.base) AND c.lhv IN (s1.hv, s.hv)
+            AND c.lcm IN (s.cm, DATE_ADD(s.cm, INTERVAL 1 YEAR)))), FALSE) AS unconfirmed
+    FROM future_cls0 AS c
+    JOIN recent AS w ON w.t = c.t
+    JOIN future_v AS s ON s.created_at = w.s_at
+    LEFT JOIN future_v AS s1 ON s1.created_at = w.s1_at
+    WHERE c.cls = 'unexplained' AND c.ln_ok
+  )
+  WHERE confirmed OR unconfirmed
+  GROUP BY t
 ),
--- 新系の版の遅れ（new_stale_same）と裏付けの無い書き換え途中の版（new_stale_unconfirmed）は、それぞれ 1 日に表ごと 3 行までを
--- new_stale、超えたらその種類を全部 unexplained にする（新系の誤りで同じ形が系統的に出ると 1 日に多数になるので捕まえる）
+-- spot と同じ（new_stale は 3 行まで、new_behind は 10 行まで）
 future_unconfirmed AS (
-  SELECT COUNTIF(cls = 'new_stale_same') AS n_same, COUNTIF(cls = 'new_stale_unconfirmed') AS n FROM future_cls0
+  SELECT
+    COUNTIF(cls = 'new_stale_same') AS n_same, COUNTIF(cls = 'new_stale_unconfirmed') AS n, COUNTIF(cls = 'new_behind') AS n_behind
+  FROM future_cls0
 ),
 future_cls AS (
   SELECT
     c.t,
     CASE
-      WHEN c.cls = 'unexplained' AND o.t IS NOT NULL THEN 'legacy_older'
+      WHEN c.cls = 'unexplained' AND o.confirmed THEN 'legacy_older'
+      WHEN c.cls = 'unexplained' AND o.t IS NOT NULL THEN IF(o.n_unconfirmed > 3, 'unexplained', 'legacy_older_unconfirmed')
+      WHEN c.cls = 'new_behind' THEN IF(u.n_behind > 10, 'unexplained', 'new_behind')
       WHEN c.cls = 'new_stale_same' THEN IF(u.n_same > 3, 'unexplained', 'new_stale')
       WHEN c.cls = 'new_stale_unconfirmed' THEN IF(u.n > 3, 'unexplained', 'new_stale')
       ELSE c.cls
@@ -411,7 +466,9 @@ opt_cand AS (
     IFNULL(j.ntv = nx.tv, FALSE) AS ok_nx,
     IFNULL(j.ntv = ln.tv, FALSE) AS ok_ln,
     ln.created_at IS NULL OR (IFNULL(ln.vol, 0) >= IFNULL(j.nvol, 0)
-      AND IFNULL(ln.pt, DATETIME '1970-01-01') >= IFNULL(j.npt, DATETIME '1970-01-01')) AS ln_ok
+      AND IFNULL(ln.pt, DATETIME '1970-01-01') >= IFNULL(j.npt, DATETIME '1970-01-01')) AS ln_ok,
+    -- legacy_older_unconfirmed の条件: 旧系の次の同じ行の出来高が新系の T より多い（#89）
+    ln.created_at IS NOT NULL AND IFNULL(ln.vol, 0) > IFNULL(j.nvol, 0) AS ln_ahead
   FROM opt_join AS j
   JOIN pairs AS p ON p.t = j.t
   LEFT JOIN page1_month AS m ON m.created_at = j.t
@@ -428,6 +485,7 @@ opt_cand AS (
 opt_cls0 AS (
   SELECT
     t, last_trading_day, type, target_price, in_legacy, in_new, ltv, lqd, lpt, lvol, lbase, lpos, lquo, npt, nvol, ok_nx, ok_ln, ln_ok,
+    ln_ahead,
     CASE
       WHEN in_legacy AND in_new AND ltv = ntv AND lqv = nqv AND lqd IS NOT DISTINCT FROM nqd THEN 'match'
       -- 版の差: 直前か直後と全列一致（旧系の行は新系の T にもあること。T の行の欠けは説明しない）。
@@ -450,39 +508,51 @@ opt_cls0 AS (
   FROM opt_cand
 ),
 -- 古い版・途中の版。新系の T は旧系の行より出来高が多く、約定時刻が同じか後（約定が無い行は出来高 0・約定時刻は最小とみなす）。
--- (a) 10 分の中の前のスナップショット S と約定の列が一致、(b) 連続する S1 < S2 の間（出来高は狭い不等号。同じ出来高なら同じ版のはず）
+-- (a) 10 分の中の前のスナップショット S と約定の列が一致、(b) 連続する S1 < S2 の間（出来高は狭い不等号。同じ出来高なら同じ版のはず）。
+-- 新系の T の約定の列の裏付けがあれば confirmed（legacy_older）。裏付けが無くても旧系の次の出来高が新系の T より多い
+-- （旧系 < 新系 < 旧系の次）ものは legacy_older_unconfirmed（#89。1 日の上限 n_unconfirmed は opt_cls で見る）
 opt_older AS (
-  SELECT DISTINCT c.t, c.last_trading_day, c.type, c.target_price
-  FROM opt_cls0 AS c
-  JOIN recent AS w ON w.t = c.t
-  JOIN new_opt AS s
-    ON s.created_at = w.s_at AND s.last_trading_day = c.last_trading_day AND s.type = c.type AND s.target_price = c.target_price
-  LEFT JOIN new_opt AS s1
-    ON s1.created_at = w.s1_at AND s1.last_trading_day = c.last_trading_day AND s1.type = c.type
-    AND s1.target_price = c.target_price
-  WHERE c.cls = 'unexplained' AND c.in_legacy AND c.in_new AND c.ln_ok
-    AND (c.ok_ln OR (c.ok_nx AND s.created_at < c.t))
-    AND IFNULL(c.nvol, 0) > IFNULL(c.lvol, 0)
-    AND IFNULL(c.npt, DATETIME '1970-01-01') >= IFNULL(c.lpt, DATETIME '1970-01-01')
-    AND (
-      (s.created_at < c.t AND c.ltv = s.tv
-        AND (c.lqd IS NOT DISTINCT FROM s.qd OR c.lqd IN (DATE_ADD(s.qd, INTERVAL 1 YEAR), DATE_SUB(s.qd, INTERVAL 1 YEAR))))
-      OR (
-        s1.created_at IS NOT NULL AND c.lpt IS NOT NULL
-        AND IFNULL(s1.vol, 0) < c.lvol AND c.lvol < s.vol
-        AND IFNULL(s1.pt, DATETIME '1970-01-01') <= c.lpt AND c.lpt <= s.pt
-        AND (c.lbase IS NOT DISTINCT FROM s1.base OR c.lbase IS NOT DISTINCT FROM s.base)
-        AND (c.lpos BETWEEN LEAST(s1.pos, s.pos) AND GREATEST(s1.pos, s.pos)
-          OR (c.lpos IS NULL AND (s1.pos IS NULL OR s.pos IS NULL)))
-        AND (c.lquo IS NOT DISTINCT FROM s1.quo OR c.lquo IS NOT DISTINCT FROM s.quo)
-        AND (c.lqd IS NOT DISTINCT FROM s1.qd OR c.lqd IS NOT DISTINCT FROM s.qd
-          OR c.lqd IN (DATE_ADD(s1.qd, INTERVAL 1 YEAR), DATE_SUB(s1.qd, INTERVAL 1 YEAR),
-                       DATE_ADD(s.qd, INTERVAL 1 YEAR), DATE_SUB(s.qd, INTERVAL 1 YEAR)))))
+  SELECT
+    t, last_trading_day, type, target_price, LOGICAL_OR(confirmed) AS confirmed,
+    COUNTIF(NOT LOGICAL_OR(confirmed)) OVER () AS n_unconfirmed
+  FROM (
+    SELECT c.t, c.last_trading_day, c.type, c.target_price, c.ok_ln OR (c.ok_nx AND s.created_at < c.t) AS confirmed
+    FROM opt_cls0 AS c
+    JOIN recent AS w ON w.t = c.t
+    JOIN new_opt AS s
+      ON s.created_at = w.s_at AND s.last_trading_day = c.last_trading_day AND s.type = c.type AND s.target_price = c.target_price
+    LEFT JOIN new_opt AS s1
+      ON s1.created_at = w.s1_at AND s1.last_trading_day = c.last_trading_day AND s1.type = c.type
+      AND s1.target_price = c.target_price
+    WHERE c.cls = 'unexplained' AND c.in_legacy AND c.in_new AND c.ln_ok
+      AND (c.ok_ln OR (c.ok_nx AND s.created_at < c.t) OR c.ln_ahead)
+      AND IFNULL(c.nvol, 0) > IFNULL(c.lvol, 0)
+      AND IFNULL(c.npt, DATETIME '1970-01-01') >= IFNULL(c.lpt, DATETIME '1970-01-01')
+      AND (
+        (s.created_at < c.t AND c.ltv = s.tv
+          AND (c.lqd IS NOT DISTINCT FROM s.qd OR c.lqd IN (DATE_ADD(s.qd, INTERVAL 1 YEAR), DATE_SUB(s.qd, INTERVAL 1 YEAR))))
+        OR (
+          s1.created_at IS NOT NULL AND c.lpt IS NOT NULL
+          AND IFNULL(s1.vol, 0) < c.lvol AND c.lvol < s.vol
+          AND IFNULL(s1.pt, DATETIME '1970-01-01') <= c.lpt AND c.lpt <= s.pt
+          AND (c.lbase IS NOT DISTINCT FROM s1.base OR c.lbase IS NOT DISTINCT FROM s.base)
+          AND (c.lpos BETWEEN LEAST(s1.pos, s.pos) AND GREATEST(s1.pos, s.pos)
+            OR (c.lpos IS NULL AND (s1.pos IS NULL OR s.pos IS NULL)))
+          AND (c.lquo IS NOT DISTINCT FROM s1.quo OR c.lquo IS NOT DISTINCT FROM s.quo)
+          AND (c.lqd IS NOT DISTINCT FROM s1.qd OR c.lqd IS NOT DISTINCT FROM s.qd
+            OR c.lqd IN (DATE_ADD(s1.qd, INTERVAL 1 YEAR), DATE_SUB(s1.qd, INTERVAL 1 YEAR),
+                         DATE_ADD(s.qd, INTERVAL 1 YEAR), DATE_SUB(s.qd, INTERVAL 1 YEAR)))))
+  )
+  GROUP BY t, last_trading_day, type, target_price
 ),
 opt_cls AS (
   SELECT
     c.t, c.last_trading_day, c.type, c.target_price,
-    IF(c.cls = 'unexplained' AND o.t IS NOT NULL, 'legacy_older', c.cls) AS cls
+    CASE
+      WHEN c.cls = 'unexplained' AND o.confirmed THEN 'legacy_older'
+      WHEN c.cls = 'unexplained' AND o.t IS NOT NULL THEN IF(o.n_unconfirmed > 3, 'unexplained', 'legacy_older_unconfirmed')
+      ELSE c.cls
+    END AS cls
   FROM opt_cls0 AS c
   LEFT JOIN opt_older AS o
     ON o.t = c.t AND o.last_trading_day = c.last_trading_day AND o.type = c.type AND o.target_price = c.target_price
@@ -523,6 +593,11 @@ cls_counts AS (
     COUNTIF(kind = 'spot' AND cls = 'legacy_older') AS spot_legacy_older,
     COUNTIF(kind = 'future' AND cls = 'legacy_older') AS future_legacy_older,
     COUNTIF(kind = 'option' AND cls = 'legacy_older') AS option_legacy_older,
+    COUNTIF(kind = 'spot' AND cls = 'new_behind') AS spot_new_behind,
+    COUNTIF(kind = 'future' AND cls = 'new_behind') AS future_new_behind,
+    COUNTIF(kind = 'spot' AND cls = 'legacy_older_unconfirmed') AS spot_legacy_older_unconfirmed,
+    COUNTIF(kind = 'future' AND cls = 'legacy_older_unconfirmed') AS future_legacy_older_unconfirmed,
+    COUNTIF(kind = 'option' AND cls = 'legacy_older_unconfirmed') AS option_legacy_older_unconfirmed,
     ARRAY_AGG(IF(cls = 'unexplained', STRUCT(kind, t AS created_at, detail), NULL) IGNORE NULLS
       ORDER BY t, kind, detail LIMIT 20) AS row_samples
   FROM cls_all
@@ -593,7 +668,13 @@ SELECT
   -- #61 で足した列（表の列は後ろにしか足せず、MERGE の INSERT ROW は位置で入るので最後に置く）
   spot_legacy_older,
   future_legacy_older,
-  option_legacy_older
+  option_legacy_older,
+  -- #89 で足した列
+  spot_new_behind,
+  future_new_behind,
+  spot_legacy_older_unconfirmed,
+  future_legacy_older_unconfirmed,
+  option_legacy_older_unconfirmed
 FROM counts
 -- result:end
 ;
