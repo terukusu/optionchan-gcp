@@ -215,7 +215,7 @@
     "name": "spot_legacy_older",
     "type": "INTEGER",
     "mode": "NULLABLE",
-    "description": "spot で旧系が新系の T より古い版（T の 10 分前〜T の前のスナップショットと全列一致）か、T までの連続する 2 スナップショットの途中の版（約定時刻が間）を読んだ行数。新系の T の値が旧系の次のスナップショット（または古い版と S2 < T の途中の版に限り新系の直後）で裏付けられ、旧系の次と矛盾しないものだけ（説明済み。#61。列を足す前の日は NULL）"
+    "description": "spot で旧系が新系の T より古い版（T の 10 分前〜T の前のスナップショットと全列一致）か、T までの連続する 2 スナップショット S1 < S2 の途中の版（約定時刻が S1 ≤ 旧 < S2。S1 と同じ分は #89 から）を読んだ行数。新系の T の値が旧系の次のスナップショット（または古い版と S2 < T の途中の版に限り新系の直後）で裏付けられ、旧系の次と矛盾しないものだけ（説明済み。#61。列を足す前の日は NULL）"
   },
   {
     "name": "future_legacy_older",
@@ -228,5 +228,35 @@
     "type": "INTEGER",
     "mode": "NULLABLE",
     "description": "option で旧系が新系の T より古い版（T の 10 分前〜T の前のスナップショットと約定の列が一致）か、T までの連続する 2 スナップショットの途中の版（出来高・約定時刻が間）を読んだキーの数。新系の T の約定の列が旧系の次のスナップショット（または古い版と S2 < T の途中の版に限り新系の直後）で裏付けられ、旧系の次と矛盾しない（出来高・約定時刻が新系の T 以上）ものだけ（説明済み。#61。列を足す前の日は NULL）"
+  },
+  {
+    "name": "spot_new_behind",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "spot で新系の 1 分遅れ: 新系の T の約定時刻が旧系より前で、新系の直後が T と違う版に進みその約定時刻が旧系と同じか後（直後で追いついた）、遅れが 1 分ちょうど（旧系 ≤ 新系の T + 1 分）、基準価格（price − diff）・hv が同じ行数。新系が止まり続ける形（直後も T と同じ）は含まない。1 日に 10 行を超えたら全部 spot_unexplained（説明済み。#89。列を足す前の日は NULL）"
+  },
+  {
+    "name": "future_new_behind",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "future で spot_new_behind と同じ（限月も同じ。年の補完を許す。説明済み。#89。列を足す前の日は NULL）"
+  },
+  {
+    "name": "spot_legacy_older_unconfirmed",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "spot で legacy_older の裏付けだけが無い行数: 旧系の行が新系の T より前の版（古い版か S1 ≤ 旧 ≤ S2 の途中の版。新系の T と同じ約定時刻の別の価格を含む）で、旧系の次のスナップショットの約定時刻が新系の T より後（旧系 ≤ 新系 < 旧系の次）。1 日に 3 行を超えたら全部 spot_unexplained（説明済み。#89。列を足す前の日は NULL）"
+  },
+  {
+    "name": "future_legacy_older_unconfirmed",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "future で spot_legacy_older_unconfirmed と同じ（限月の年の補完を許す。説明済み。#89。列を足す前の日は NULL）"
+  },
+  {
+    "name": "option_legacy_older_unconfirmed",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "option で legacy_older の裏付けだけが無いキーの数: 旧系の行が新系の T より前の版（option_legacy_older の (a)・(b)）で、旧系の次のスナップショットの同じ行の出来高が新系の T より多い（旧系 < 新系 < 旧系の次）。1 日に 3 行を超えたら全部 option_unexplained（説明済み。#89。列を足す前の日は NULL）"
   }
 ]
