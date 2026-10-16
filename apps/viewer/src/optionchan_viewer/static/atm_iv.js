@@ -9,6 +9,9 @@
 //   データの無い範囲が続いたら（EMPTY_LIMIT 回）それより前は無いとみなす
 // - 足・限月を切り替えても表示していた時間の範囲を保つ（その範囲を読み直す。分足は 1 回の上限まで）
 // - 5分・15分足は 1 分足を読んでこの画面で束ねる（1 分・5 分・15 分の切り替えで BigQuery を読み直さない）
+// - IV は約定（既定）か mid（気配の中値。&iv=mid。#93）。mid は分足だけ（1 時間足・日足の集計に mid が無い）なので、
+//   mid のときは 1 時間・日足を選べなくし、1 時間・日足を見ているときに mid を選ぶと 15 分足に切り替える
+// - サーバーの 1 日のクエリ量の上限（#95）に達すると 429 が返る。そのときは上限に達したことを出す
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
@@ -38,7 +41,9 @@ var currentTf = null;
 var shownTf = '1h';  // 描いている足（読み込み中は currentTf と違う）
 var currentN = null;
 var shownN = null;
-var entries = {};  // "src|n" → { bars, start, end, leftDone, rightDone, empty, note }
+var currentIv = 'trade';
+var shownIv = 'trade';
+var entries = {};  // "src|n|iv" → { bars, start, end, leftDone, rightDone, empty, note }
 var inflight = null;  // { ctrl, gen, mode }
 var gen = 0;  // 足・限月を選び直すたびに増やす（古い応答を捨てる）
 var retry = null;  // 失敗した読み込みをやり直す関数
@@ -76,7 +81,7 @@ function showLegend(bar) {
     el('legend').textContent = '';
     return;
   }
-  el('legend').textContent = formatTime(bar.time) + '  O ' + bar.open.toFixed(2) + '  H ' + bar.high.toFixed(2) +
+  el('legend').textContent = (shownIv === 'mid' ? 'mid  ' : '') + formatTime(bar.time) + '  O ' + bar.open.toFixed(2) + '  H ' + bar.high.toFixed(2) +
     '  L ' + bar.low.toFixed(2) + '  C ' + bar.close.toFixed(2);
 }
 
@@ -132,12 +137,20 @@ function resample(bars, seconds) {
   return out;
 }
 
-function entryKey(tf, n) {
-  return TF[tf].src + '|' + n;
+function entryKey(tf, n, iv) {
+  return TF[tf].src + '|' + n + '|' + iv;
 }
 
 function currentEntry() {
-  return entries[entryKey(currentTf, currentN)];
+  return entries[entryKey(currentTf, currentN, currentIv)];
+}
+
+// 読み込みの失敗の表示。429 はサーバーの 1 日の上限（#95）
+function failText(reason) {
+  if (reason === 'HTTP 429') {
+    return '今日の読み込みの上限に達しました（日本時間の 0 時に戻ります）';
+  }
+  return 'データを取得できませんでした (' + reason + ')';
 }
 
 // ---- 読み込み中・エラーの表示 ----
@@ -186,7 +199,7 @@ function visibleTimeRange() {
   var last = shown.length - 1;
   var from = shown[Math.min(last, Math.max(0, Math.ceil(lr.from)))].time;
   var to = shown[Math.min(last, Math.max(0, Math.floor(lr.to)))].time + TF[shownTf].seconds;
-  var entry = entries[entryKey(shownTf, shownN)];
+  var entry = entries[entryKey(shownTf, shownN, shownIv)];
   return { from: from, to: to, atRight: lr.to >= last && !!(entry && entry.rightDone) };
 }
 
@@ -229,6 +242,7 @@ function render(view, keep) {
   shown = displayBars(entry);
   shownTf = currentTf;
   shownN = currentN;
+  shownIv = currentIv;
   chart.applyOptions({ timeScale: { timeVisible: currentTf !== '1d' } });
   series.setData(shown.map(toChart));
   if (lr && oldFirst !== null) {
@@ -253,8 +267,11 @@ function render(view, keep) {
 
 // ---- 読み込み ----
 
-function barsUrl(src, n, start, end) {
+function barsUrl(src, n, iv, start, end) {
   var url = '/atm_iv_bars?tf=' + encodeURIComponent(src) + '&n=' + encodeURIComponent(n);
+  if (iv === 'mid') {
+    url += '&iv=mid';
+  }
   if (start !== null) {
     url += '&start=' + start + '&end=' + end;
   }
@@ -262,7 +279,7 @@ function barsUrl(src, n, start, end) {
 }
 
 // /atm_iv_bars を読む。成功で onData(bars, start, end)、失敗で onFail(message)。中断（新しい選択）なら何もしない
-function request(mode, src, n, start, end, onData, onFail) {
+function request(mode, src, n, iv, start, end, onData, onFail) {
   if (inflight) {
     inflight.ctrl.abort();
   }
@@ -274,7 +291,7 @@ function request(mode, src, n, start, end, onData, onFail) {
   if (src === '1m' && start !== null) {
     minuteDays += (end - start) / DAY;
   }
-  fetch(barsUrl(src, n, start, end), { signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' })
+  fetch(barsUrl(src, n, iv, start, end), { signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' })
     .then(function(res) {
       if (!res.ok) {
         throw new Error('HTTP ' + res.status);
@@ -308,8 +325,9 @@ function request(mode, src, n, start, end, onData, onFail) {
     });
 }
 
-// 足・限月を選んだとき・最初: view（保つ時間の範囲）を読み込み済みなら描くだけ、無ければ読む
-function select(view) {
+// 足・限月・IV を選んだとき・最初: view（保つ時間の範囲）を読み込み済みなら描くだけ、無ければ読む。
+// first: 最初に出す説明（IV の切り替えで足を変えたとき）
+function select(view, first) {
   gen++;
   if (inflight) {
     inflight.ctrl.abort();
@@ -319,12 +337,13 @@ function select(view) {
   clearError();
   var tf = el('tf').value;
   var n = el('nmonth').value;
+  var iv = el('ivkind').value;
   var conf = TF[tf];
-  var key = entryKey(tf, n);
+  var key = entryKey(tf, n, iv);
   var entry = entries[key];
   var start = null;
   var end = null;
-  var msg = '';
+  var msg = first || '';
   if (view) {
     // 表示していた範囲の右端から 1 回分まで（分足は遡れる範囲の中）
     end = view.atRight ? utcDay(nowSec()) + DAY : view.to;
@@ -346,6 +365,7 @@ function select(view) {
   }
   currentTf = tf;
   currentN = n;
+  currentIv = iv;
   if (entry && (start === null ? entry.rightDone :
     entry.start <= start && (entry.end >= Math.min(end, nowSec() - 60) || entry.rightDone))) {
     render(view, false);
@@ -364,7 +384,7 @@ function select(view) {
   }
   var myGen = gen;
   // 読んでいる間は前の足を薄く見せたまま（失敗したら消す）
-  request('main', conf.src, n, start, end, function(bars, s, e) {
+  request('main', conf.src, n, iv, start, end, function(bars, s, e) {
     entries[key] = {
       bars: bars, start: s, end: e, leftDone: s <= EPOCH, rightDone: start === null || e < end,
       empty: bars.length ? 0 : 1, note: '',
@@ -383,7 +403,7 @@ function select(view) {
     series.setData([]);
     showLegend(undefined);
     note('');
-    showError('データを取得できませんでした (' + reason + ')', function() { select(view); }, true);
+    showError(failText(reason), function() { select(view, first); }, true);
   });
 }
 
@@ -457,8 +477,8 @@ function loadMore(entry, side) {
     stop(entry, side, '分足の読み込みの上限（この画面で ' + MINUTE_BUDGET_DAYS + ' 日分）に達しました');
     return;
   }
-  var key = entryKey(currentTf, currentN);
-  request(side, conf.src, currentN, start, end, function(bars, s, e) {
+  var key = entryKey(currentTf, currentN, currentIv);
+  request(side, conf.src, currentN, currentIv, start, end, function(bars, s, e) {
     if (entries[key] !== entry) {
       return;
     }
@@ -481,7 +501,7 @@ function loadMore(entry, side) {
     // データの無い範囲（週末・休日）なら続けて次を読む（EMPTY_LIMIT 回まで）
     scheduleCheck(bars.length ? DEBOUNCE_MS : 0);
   }, function(reason) {
-    showError('データを取得できませんでした (' + reason + ')', function() {
+    showError(failText(reason), function() {
       clearError();
       checkEdges();
     }, false);
@@ -515,8 +535,32 @@ function onSelect() {
   select(visibleTimeRange());
 }
 
+// mid のときは 1 時間・日足を選べなくする（mid は分足だけ）
+function updateTfOptions() {
+  var mid = el('ivkind').value === 'mid';
+  Array.prototype.forEach.call(el('tf').options, function(o) {
+    o.disabled = mid && TF[o.value].seconds >= 3600;
+  });
+}
+
+// mid で 1 時間・日足なら 15 分足にする（ブラウザが前の選択を戻したときも）。変えたら説明を返す
+function fixTf() {
+  if (el('ivkind').value === 'mid' && TF[el('tf').value].seconds >= 3600) {
+    el('tf').value = '15m';
+    return 'mid は分足（1分・5分・15分）だけです。15分足に切り替えました';
+  }
+  return '';
+}
+
+function onIvChange() {
+  var first = fixTf();
+  updateTfOptions();
+  select(visibleTimeRange(), first);
+}
+
 el('tf').addEventListener('change', onSelect);
 el('nmonth').addEventListener('change', onSelect);
+el('ivkind').addEventListener('change', onIvChange);
 el('chart-retry').addEventListener('click', function() {
   if (retry) {
     retry();
@@ -524,4 +568,6 @@ el('chart-retry').addEventListener('click', function() {
 });
 
 createChart();
-select(null);
+var initialNote = fixTf();
+updateTfOptions();
+select(null, initialNote);

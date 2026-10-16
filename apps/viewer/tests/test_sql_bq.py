@@ -16,6 +16,9 @@ CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
   新しいクエリの dry run が 512 MiB 以下
 - /smile_snapshot（#79 AC 6・7）: 再取り込み（同じスナップショットに 2 回の実行）で新しい実行の値だけ、週末の at で
   金曜の最後のスナップショット、限月の割り当てが smile.sql と同じ。dry run が 512 MiB 以下
+- /smile_snapshot?dir=next（#80）: 週末・取引の切れ目の at で次の取引の最初のスナップショット、最新より後なら最新
+- /atm_iv_bars?iv=mid（#93）: mid の 1 分足が、iv を mid に替えた atm_iv_minute と同じ（限月・空の分・OHLC の式）。
+  bid・ask の片方・0 以下は使わない。3 日（4 パーティション）の dry run が 512 MiB 以下
 """
 import json
 import os
@@ -403,6 +406,49 @@ def minute_rows(n, options=BARS_OPTIONS, start=BARS_START):
     return fixture_runner(fx)("atm_iv_minute", params)
 
 
+def mid_options(options=BARS_OPTIONS):
+    """iv を bid_iv・ask_iv（mid = 元の iv）に移し、iv は使われたら分かる値（77）にした行"""
+    out = []
+    for r in options:
+        iv = r["iv"]
+        out.append({**r, "iv": 77.0, "bid_iv": None if iv is None else iv - 0.25,
+                    "ask_iv": None if iv is None else iv + 0.25})
+    return out
+
+
+def mid_minute_rows(n, options):
+    fx = fixtures(options, calendar=BARS_CALENDAR)
+    params = {"start_at": BARS_START, "end_at": NOW, "today": api.jst_date(NOW), "n": n}
+    return fixture_runner(fx)("atm_mid_minute", params)
+
+
+@pytest.mark.parametrize("n", [0, 1, 2])
+def test_bars_mid_same_as_trade_logic(n):
+    # #93 AC 1: mid の 1 分足は、iv を mid に替えた atm_iv_minute と同じ（限月の選び方・空の分・OHLC・同じ created_at の順）
+    got = mid_minute_rows(n, mid_options())
+    want = minute_rows(n)
+    assert [r["started_at"] for r in got] == [r["started_at"] for r in want]
+    for g, w in zip(got, want, strict=True):
+        for k in ("open", "high", "low", "close"):
+            assert (g[k] is None) == (w[k] is None) and (g[k] is None or g[k] == pytest.approx(w[k])), (g, w)
+    assert all(r["high"] != 77.0 for r in got)
+
+
+def test_bars_mid_needs_both_positive_quotes():
+    at = jt(13, 10, 0)
+    options = [
+        opt(at, 2, 25000, M1, 50.0, 1, is_atm=True, bid_iv=20.0, ask_iv=None),
+        opt(at, 2, 25125, M1, 50.0, 1, is_atm=True, bid_iv=0.0, ask_iv=21.0),
+        opt(jt(13, 10, 1), 2, 25000, M1, 50.0, 1, is_atm=True, bid_iv=20.0, ask_iv=21.0),
+        opt(jt(13, 10, 1), 2, 25125, M1, 50.0, 1, is_atm=True, bid_iv=-1.0, ask_iv=22.0),
+    ]
+    rows = mid_minute_rows(0, options)
+    assert [(r["started_at"], r["open"], r["high"], r["low"], r["close"]) for r in rows] == [
+        (jdt(13, 10, 0), None, None, None, None),
+        (jdt(13, 10, 1), 20.5, 20.5, 20.5, 20.5),
+    ]
+
+
 def hourly_bars_block():
     text = (REPO_ROOT / "sql" / "ohlc" / "atm_hourly.sql").read_text(encoding="utf-8")
     # 印は行頭の行（先頭のコメントの説明文中の「-- bars:begin 〜 -- bars:end」は飛ばす）
@@ -654,6 +700,28 @@ def test_smile_snapshot_weekend_at_returns_friday_last():
     assert snapshot_csv(fx, jdt(13, 8, 45) + timedelta(days=14, seconds=1)) == ""
 
 
+def test_smile_snapshot_next_crosses_gaps():
+    # #80: dir=next は at 以後で最初のスナップショット（at ちょうどを含む）。週末・引け後の at から次の取引の最初へ。
+    # 最新より後なら at 以前で最新
+    snaps = [(9, 15, 44), (9, 17, 0), (10, 6, 0), (13, 8, 45)]  # JST の (日, 時, 分)
+    options = [quote(jt(*s), 2, 25000, M1, 20.0 + i, 19.0 + i, 21.0 + i, f"r{i}", is_atm=True)
+               for i, s in enumerate(snaps)]
+    runs = [{"snapshot_at": jt(*s), "ingest_run_id": f"r{i}", "finished_at": jt(*s)} for i, s in enumerate(snaps)]
+    fx = fixtures(options, runs=runs)
+
+    def head(at):
+        return api.smile_snapshot(snapshot_runner(fx), at, True).split(",")[0]
+
+    for at, want in [
+        (jdt(9, 15, 45), jdt(9, 17, 0)),  # 日中の引けの後 → 夜間の始まり
+        (jdt(9, 17, 0), jdt(9, 17, 0)),  # ちょうど
+        (jdt(10, 6, 1), jdt(13, 8, 45)),  # 土曜の朝 → 休み明けの火曜
+        (jdt(11, 12, 0), jdt(13, 8, 45)),
+        (jdt(13, 8, 46), jdt(13, 8, 45)),  # 最新より後 → 最新
+    ]:
+        assert head(at) == str(int(want.timestamp())), at
+
+
 def test_smile_snapshot_months_same_as_smile_sql():
     # 限月の割り当て（1 限月 = last_trading_day の最小、2 限月 = 最大）と約定の IV・時刻が smile.sql と同じ
     fx = fixtures(SMILE_OPTIONS, runs=[{"snapshot_at": utc(13, 5, 58)}, {"snapshot_at": SNAP}])
@@ -715,6 +783,9 @@ def bars_dry_run_params(end):
         "atm_iv_minute": ("atm_iv_minute", {"start_at": end - timedelta(days=minute_max + 1, hours=-1),
                                             "end_at": end - timedelta(days=1, hours=-1), "today": api.jst_date(end),
                                             "n": 0}),
+        "atm_mid_minute": ("atm_mid_minute", {"start_at": end - timedelta(days=minute_max + 1, hours=-1),
+                                              "end_at": end - timedelta(days=1, hours=-1), "today": api.jst_date(end),
+                                              "n": 0}),
         "trading_holidays": ("trading_holidays", {
             "start_date": api.jst_date(daily_start) - timedelta(days=1),
             "end_date": api.jst_date(end) + timedelta(days=api.st.HOLIDAYS_AHEAD_DAYS)}),
@@ -731,13 +802,14 @@ def completed_day_end(now):
     return api.utc_day(now) + timedelta(days=1 if now.hour >= 22 else 0)
 
 
-@pytest.mark.parametrize("name", ["smile_snapshot", "latest_snapshot"])
+@pytest.mark.parametrize("name", ["smile_snapshot", "latest_snapshot", "next_snapshot"])
 def test_dry_run_smile_snapshot_within_512mib(name, record_property):
     # #79 AC 7: 最新の完了した日の最後のスナップショット（23:59 UTC）を at にした /smile_snapshot の 2 クエリ
     at = completed_day_end(datetime.now(UTC)) - timedelta(minutes=1)
     params = {
         "latest_snapshot": {"start_at": at - timedelta(days=api.st.SEARCH_DAYS), "end_at": at + timedelta(seconds=1)},
         "smile_snapshot": {"start_at": at, "end_at": at + timedelta(seconds=1)},
+        "next_snapshot": {"start_at": at - timedelta(days=api.st.SEARCH_DAYS), "end_at": at},
     }[name]
     nbytes = bq(real_sql(name), params, dry_run=True, maximum_bytes=GiB)
     record_property("bytes", nbytes)
@@ -745,7 +817,7 @@ def test_dry_run_smile_snapshot_within_512mib(name, record_property):
     assert nbytes <= 512 * MiB
 
 
-@pytest.mark.parametrize("name", ["atm_iv_minute", "trading_holidays", "atm_iv", "atm_iv_past"])
+@pytest.mark.parametrize("name", ["atm_iv_minute", "atm_mid_minute", "trading_holidays", "atm_iv", "atm_iv_past"])
 def test_dry_run_bars_within_512mib(name, record_property):
     now = datetime.now(UTC)
     # UTC の 1 日（JST 09:00〜翌 08:59）は日中 + 夜間。夜間が終わった後（22:00 UTC = 07:00 JST 以降）なら

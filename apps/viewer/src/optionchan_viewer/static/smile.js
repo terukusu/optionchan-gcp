@@ -10,6 +10,8 @@
 //   カーソルだけなら chart.draw。縦線は overlay が描く）
 // - 時点の移動（最新・前後のステップ・日時の入力）は DEBOUNCE_MS でまとめてから 1 回だけ要求し、前の要求は AbortController で
 //   中断する。読んだスナップショットと「at → どのスナップショットか」の区間を覚え、同じ時点ではサーバーに要求しない
+// - 「+」方向は &dir=next（at 以後で最初のスナップショット。#80）で読む。取引の切れ目（引け〜次の取引の開始・週末・休業日）を
+//   1 回で越える。それより新しいものが無ければサーバーは at 以前で最新を返すので、「これより新しいデータはありません」を出す
 // - 取りすぎ防止: この画面で出す要求は MAX_REQUESTS 回まで（1 回 約 130 MiB のスキャン。中断・再試行も数える）
 // - 表示の切り替えは hidden 属性・classList・disabled だけ（CSP の style-src 'self'）
 // - 約定 IV の点は約定からの経過（smile_age.js の SmileAge。#82）で段ごとに塗り・枠・大きさを変える（Chart.js の点ごとの配列）。
@@ -46,13 +48,12 @@ var COLUMNS = ['month', 'type', 'target_price', 'iv', 'price', 'price_time', 'bi
 var chart = null;
 var snapshots = {};  // スナップショットの時刻 → 解析した 1 時点
 var known = [];  // { lo, hi, s }: at が [lo, hi] なら答えは s（null はデータなし）
+// { lo, hi, s }: at が [lo, hi] なら dir=next の答えは s（null はデータなし。s < lo はそれより新しいものが無く、s は最新）
+var knownNext = [];
 var latest = null;  // { s, fetched }: 最後に「最新」を読んだ結果と、読んだ時刻（ms）
 var shown = null;  // 表示中の 1 時点（null は未表示・データなし）
 var position = null;  // 時点の移動の基準（表示中のスナップショットの時刻。データなしなら要求した at）
-// 最後に見せた時点として求めた at（最新は求めた時刻）。+ 方向の移動は max(position, asked) から足す: スナップショットの
-// 無い時間帯（日中の引け〜夜間、夜間の引け〜日中、週末・休業日）の手前では、at を進めても同じスナップショット S が返るので、
-// S から足すと同じ時点に戻り続けて先に進めない
-var asked = null;
+var noNewer = false;  // 「+」で求めた時点より新しいスナップショットが無かった（表示中のものが最新）
 var limitReached = false;  // 要求の上限に達した（理由を出し続ける）
 var EPOCH = Date.UTC(2010, 0, 1) / 1000;  // サーバーの at の下限（settings.BARS_EPOCH）
 var pinned = null;  // 比較用に固定した 1 時点
@@ -61,7 +62,7 @@ var cursorStrike = null;
 var inflight = null;  // { ctrl }
 var requests = 0;
 var retry = null;
-var pending;  // まとめている時点（undefined: なし、null: 最新、数値: at）
+var pending;  // まとめている時点（undefined: なし、{ at, next }。at は null: 最新、数値: at。next は dir=next で読む）
 var debounceTimer = null;
 var pointers = new Map();  // pointerId → { x, y, x0, y0 }（x は canvas の左端から、y は clientY）
 // 操作中の状態: pan（マウスのドラッグ・タッチ 1 本の横のドラッグ）、press（タッチ 1 本の押下。長押しか、パンか縦かを待つ。
@@ -551,6 +552,9 @@ function renderNotes(extra) {
   if (position !== null && !shown) {
     lines.push('データがありません');
   }
+  if (shown && noNewer) {
+    lines.push('これより新しいデータはありません');
+  }
   if (shown && !shown.hasQuote) {
     lines.push('気配がありません（取引時間外）。約定の IV の点だけを表示しています');
   }
@@ -654,19 +658,20 @@ function createChart() {
 
 // ---- 読み込み ----
 
-function lookup(at) {
-  for (var i = 0; i < known.length; i++) {
-    if (known[i].lo <= at && at <= known[i].hi) {
-      return known[i];
+function lookup(list, at) {
+  for (var i = 0; i < list.length; i++) {
+    if (list[i].lo <= at && at <= list[i].hi) {
+      return list[i];
     }
   }
   return null;
 }
 
-function show(snap, at) {
+// newest: 「+」で求めた時点より新しいものが無かった
+function show(snap, at, newest) {
   shown = snap;
   position = snap ? snap.s : at;
-  asked = at;
+  noNewer = !!newest;
   if (snap && cursorStrike !== null) {
     cursorStrike = nearestStrike(cursorStrike);
   }
@@ -681,10 +686,11 @@ function abortInflight() {
   setBusy(false);
 }
 
-// at（null は最新）の時点を見せる。読んだことがあれば要求しない
-function go(at) {
+// at（null は最新）の時点を見せる。next: at 以後で最初のもの（「+」方向）。読んだことがあれば要求しない
+function go(at, next) {
   if (at !== null && at >= nowSec()) {
     at = null;  // 未来は最新（サーバーも now に縮める）
+    next = false;
   }
   if (at === null && latest && Date.now() - latest.fetched < LATEST_FRESH_MS) {
     abortInflight();
@@ -693,18 +699,18 @@ function go(at) {
     return;
   }
   if (at !== null) {
-    var hit = lookup(at);
+    var hit = lookup(next ? knownNext : known, at);
     if (hit) {
       abortInflight();
       clearError();
-      show(hit.s === null ? null : snapshots[hit.s], at);
+      show(hit.s === null ? null : snapshots[hit.s], at, next && hit.s !== null && hit.s < at);
       return;
     }
   }
-  request(at);
+  request(at, next);
 }
 
-function request(at) {
+function request(at, next) {
   abortInflight();
   clearError();
   if (requests >= MAX_REQUESTS) {
@@ -717,7 +723,7 @@ function request(at) {
   var mine = { ctrl: ctrl };
   inflight = mine;
   setBusy(true);
-  var url = '/smile_snapshot' + (at === null ? '' : '?at=' + at);
+  var url = '/smile_snapshot' + (at === null ? '' : '?at=' + at + (next ? '&dir=next' : ''));
   fetch(url, { signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' })
     .then(function(res) {
       if (!res.ok) {
@@ -733,17 +739,29 @@ function request(at) {
       inflight = null;
       setBusy(false);
       var when = at === null ? nowSec() : at;
+      var newest = false;
       if (snap) {
         snapshots[snap.s] = snap;
-        // [S, at] にはほかのスナップショットが無い（最新は at が分からないので S だけ）
+      }
+      if (next && snap && snap.s >= at) {
+        // [at, S] の at' の次は S。S の時点の答えも S
+        knownNext.push({ lo: at, hi: snap.s, s: snap.s });
+        known.push({ lo: snap.s, hi: snap.s, s: snap.s });
+      } else if (snap) {
+        // [S, at] にはほかのスナップショットが無い（最新は at が分からないので S だけ）。dir=next で S が at より前なら
+        // at 以後にも無い（S が最新）
         known.push({ lo: snap.s, hi: at === null ? snap.s : at, s: snap.s });
+        if (next) {
+          knownNext.push({ lo: snap.s + 1, hi: at, s: snap.s });
+          newest = true;
+        }
       } else {
         known.push({ lo: when - SEARCH_DAYS * DAY, hi: when, s: null });
       }
       if (at === null) {
         latest = { s: snap ? snap.s : null, fetched: Date.now() };
       }
-      show(snap, when);
+      show(snap, when, newest);
     })
     .catch(function(err) {
       if (inflight !== mine) {
@@ -754,32 +772,35 @@ function request(at) {
       var message = err && err.message ? err.message : '';
       var reason = message.indexOf('HTTP ') === 0 || message === 'invalid response' ? message : 'network';
       // 前のチャートを残して薄くし、その上にエラーと「再試行」（同じ時点）
-      showError('データを取得できませんでした (' + reason + ')', function() { request(at); }, true);
+      // 429 はサーバーの 1 日の上限（#95）
+      var text = reason === 'HTTP 429' ? '今日の読み込みの上限に達しました（日本時間の 0 時に戻ります）' :
+        'データを取得できませんでした (' + reason + ')';
+      showError(text, function() { request(at, next); }, true);
     });
 }
 
 // 時点の移動をまとめる（DEBOUNCE_MS の間の操作は最後の時点の 1 回にする）
-function schedule(at) {
-  pending = at;
+function schedule(at, next) {
+  pending = { at: at, next: !!next };
   clearTimeout(debounceTimer);
   debounceTimer = setTimeout(function() {
     var target = pending;
     pending = undefined;
-    go(target);
+    go(target.at, target.next);
   }, DEBOUNCE_MS);
 }
 
+// 表示中の時刻（まとめている間はその時点）から seconds 秒動かす。+ 方向は dir=next（その時刻以後で最初のスナップショット）
 function step(seconds) {
   var base;
   if (pending !== undefined) {
-    base = pending === null ? nowSec() : pending;
+    base = pending.at === null ? nowSec() : pending.at;
   } else if (position !== null) {
-    // − 方向は表示中の時刻から、+ 方向は表示中の時刻と最後に求めた at の遅い方から（スナップショットの無い時間帯を越える）
-    base = seconds > 0 && asked !== null ? Math.max(position, asked) : position;
+    base = position;
   } else {
     return;
   }
-  schedule(Math.max(EPOCH, Math.min(base + seconds, nowSec())));
+  schedule(Math.max(EPOCH, Math.min(base + seconds, nowSec())), seconds > 0);
 }
 
 // ---- 操作（拡大縮小・スクロール・カーソル。サーバーに要求しない） ----

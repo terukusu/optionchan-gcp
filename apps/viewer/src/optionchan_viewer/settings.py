@@ -28,6 +28,9 @@ N_DEFAULT, N_VALUES = 0, (0, 1)  # /atm_iv_data・/atm_iv_bars の n（何番目
 # 1h・1d は 1 時間足（/atm_iv_data と同じ）から
 TIMEFRAMES = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "1d": 86400}
 TF_DEFAULT = "1h"
+# /atm_iv_bars の IV（#93）: trade = 約定 IV（既定）、mid = 気配の中値（(bid_iv + ask_iv) / 2。分足だけ）
+IV_KINDS = ("trade", "mid")
+IV_DEFAULT = "trade"
 # /atm_iv_bars の期間（#77。画面に期間の選択は無く、チャートの表示範囲で決まる）: 足 → (既定, 1 回の最大, 遡れる上限)。
 #   既定 = start・end を省いたときの日数（分足は最新のスナップショットの、1h・1d は now の、
 #     その日数前の UTC の 0 時〜now）
@@ -57,6 +60,8 @@ class Settings:
     dataset: str = "optionchan_tokyo"
     location: str = "asia-northeast1"
     maximum_bytes_billed: int = GiB
+    # JST の 1 日に BigQuery で課金されるバイト数の上限（インスタンスごと。#95。budget.py）
+    daily_bytes_billed: int = 4 * GiB
 
     def __post_init__(self):
         if not _PROJECT_RE.match(self.project):
@@ -67,6 +72,8 @@ class Settings:
             raise ValueError("BQ_LOCATION の形式が不正")
         if not 0 < self.maximum_bytes_billed <= 10 * GiB:
             raise ValueError("MAX_BYTES_BILLED は 1〜10 GiB のバイト数")
+        if not 0 < self.daily_bytes_billed <= 100 * GiB:
+            raise ValueError("DAILY_BYTES_BILLED は 100 GiB 以下の正のバイト数")
 
 
 def from_env(env=None) -> Settings:
@@ -81,4 +88,6 @@ def from_env(env=None) -> Settings:
         kwargs["location"] = env["BQ_LOCATION"]
     if env.get("MAX_BYTES_BILLED"):
         kwargs["maximum_bytes_billed"] = int(env["MAX_BYTES_BILLED"])
+    if env.get("DAILY_BYTES_BILLED"):
+        kwargs["daily_bytes_billed"] = int(env["DAILY_BYTES_BILLED"])
     return Settings(**kwargs)

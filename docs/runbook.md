@@ -2217,19 +2217,23 @@ gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.serv
 
 ### コスト
 
-Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、利用者 1 人ならほぼ 0 円。IAP（Cloud Run への直接設定）は追加費用なし。BigQuery は 1 ページの表示で 1〜3 クエリ（各 `maximum_bytes_billed` 1 GiB、最小課金 10 MiB）。`/atm_iv`（#77）は表示範囲に応じて `/atm_iv_bars?tf=&n=&start=&end=` を 1 回分ずつ読む。1 回のクエリのスキャン量の見積もり（option_price の生データは 1 日 約 90 MiB を読む。2026-10 の dry run で 1 日分 91 MiB）:
+Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、利用者 1 人ならほぼ 0 円。IAP（Cloud Run への直接設定）は追加費用なし。BigQuery は 1 ページの表示で 1〜3 クエリ（各 `maximum_bytes_billed` 1 GiB、最小課金 10 MiB）。`/atm_iv`（#77）は表示範囲に応じて `/atm_iv_bars?tf=&n=&start=&end=` を 1 回分ずつ読む。1 回のクエリのスキャン量の見積もり（option_price の生データは 1 日 約 90 MiB を読む。#96 で丸 1 日のパーティション（2026-10-13〜15）を dry run で測り直し、約定 IV の分足の列で 86.6〜89.7 MiB、mid IV の分足の列（bid_iv・ask_iv）で 98.2〜101.3 MiB）:
 
 | 要求 | 読むもの | 1 回の上限（サーバーの検査） | 1 回のスキャン量の見積もり |
 | --- | --- | --- | --- |
 | 分足 1m・5m・15m（画面は 1m だけを読み、5m・15m は画面で束ねる） | option_price_latest の [start, end) | 3 日（日の境目に揃えないと 4 日分のパーティション）。start は now の 31 日前の UTC の 0 時まで | 3 日分 約 270 MiB、最大 約 360 MiB（1 クエリ 512 MiB 以下） |
+| 分足の mid IV（`&iv=mid`、#93。分足だけ） | 同上（`iv` の代わりに `bid_iv`・`ask_iv`） | 同上 | 3 日分 約 300 MiB、最大 約 405 MiB（1 クエリ 512 MiB 以下） |
 | 分足の既定（最初） | 最新のスナップショットの前日の UTC の 0 時〜now（+ ingest_runs の 14 日） | — | 約 90〜180 MiB |
 | 1h・1d（最新を含む範囲） | 1 時間足 atm_iv + まだ 1 時間足になっていない分（最大 3 日）の生データ | 1h 100 日・1d 400 日 | 約 100 MiB（補う分。通常は 1 日分。最大 3 日 約 300 MiB） |
 | 1h・1d（過去だけの範囲 = 左への追加） | 1 時間足 atm_iv だけ（生データは読まない） | 同上 | 数 MiB 未満（最小課金 10 MiB × 2〜3 クエリ） |
 | `/smile_snapshot?at=`（#79。`/smile` の 1 時点） | latest_runs の [at − 14 日, at] でスナップショットを探し（約 0.1 MiB、最小課金 10 MiB）、option_price_latest のその 1 秒を読む | 1 時点（at は探す時点を動かすだけ） | 約 120 MiB（1 日分のパーティション。2026-10-13 の最後のスナップショットの dry run で 119.9 MiB）+ 10 MiB |
+| `/smile_snapshot?at=&dir=next`（#80。`/smile` の「+」方向） | latest_runs の [at, at + 14 日) で最初のスナップショットを探す（無ければ上と同じく at 以前で最新を探す）。あとは上と同じ | 同上 | 上 + 10 MiB（最新より後のときは + 20 MiB） |
 
-取りすぎ防止（画面）: 同時に読むのは 1 本、連続するスクロール・拡縮は 250 ms まとめる、足・限月ごとに読んだ範囲を覚えて読み直さない。足・限月ごとに覚える日数は分足 9 日・1 時間足 400 日、分足をこの画面で読む日数の合計は 24 日（約 2 GiB）まで。データの無い範囲が 3 回続いたらそれより前は無いとみなす。1 ページを開いて分足を上限まで動かすと 約 2 GiB、1 時間足・日足だけなら 数十〜数百 MiB。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。画面側の上限（分足 24 日分など）は 1 ページの中だけのもので、ページを読み直すとリセットされる（サーバー側は 1 回の範囲と遡れる日数だけを検査し、1 日の合計は制限しない）。
+取りすぎ防止（画面）: 同時に読むのは 1 本、連続するスクロール・拡縮は 250 ms まとめる、足・限月ごとに読んだ範囲を覚えて読み直さない。足・限月ごとに覚える日数は分足 9 日・1 時間足 400 日、分足をこの画面で読む日数の合計は 24 日（約 2 GiB）まで。データの無い範囲が 3 回続いたらそれより前は無いとみなす。1 ページを開いて分足を上限まで動かすと 約 2 GiB、1 時間足・日足だけなら 数十〜数百 MiB。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。画面側の上限（分足 24 日分など）は 1 ページの中だけのもので、ページを読み直すとリセットされる。
 
-`/smile`（#79）: 拡大縮小・スクロール・表示の切り替え・比較用の固定ではサーバーに要求しない。時点の移動は 250 ms まとめて 1 本、前の要求は中断（BigQuery のジョブは止まらないので、中断・再試行も要求の数に数える）、一度読んだ時点は画面で覚えて読み直さない（「最新」は 60 秒まで）。1 ページで出す要求は 20 本まで（20 × 約 130 MiB = 約 2.6 GiB）。取引の切れ目（15:45〜17:00・06:00〜08:45・週末・休業日）の中を「+1分」「+10分」で進むと、同じスナップショットを返す要求を 1 本ずつ出して上限を使う。切れ目は「+1日」か日時の入力で越える（「次のスナップショットへ」は #80）。`/atm_iv` と `/smile` を両方上限まで使うと 1 ページずつで 約 4.6 GiB になり、何度も読み直すと目安の 8 GiB/日 を超えうる（上限は画面だけで、ページを読み直すとリセット）。
+1 日の上限（サーバー、#95）: ビューアーのプロセスが JST の 1 日に BigQuery で課金されたバイト数（ジョブの `total_bytes_billed`）を数え、環境変数 `DAILY_BYTES_BILLED`（既定 4 GiB）に達したら、それ以降の API（`/smile_data`・`/smile_snapshot`・`/atm_iv_data`・`/atm_iv_bars`）は BigQuery を呼ばずに 429 を返す（ログは `daily_limit`。画面は「今日の読み込みの上限に達しました」）。JST の 0 時に数え直す。上限はクエリを出す前に見るので、超えた後の 1 本（最大 `maximum_bytes_billed`）までは通る。数えるのはインスタンスごとで、ほかのインスタンスの分・止まる前の分は数えない（最大 2 インスタンスで 1 日 最大 約 8 GiB + 2 本。インスタンスが止まると 0 から数え直す）。プロジェクト全体の合計（`INFORMATION_SCHEMA`・`jobs.list`）は `sa-viewer` に `bigquery.jobs.list` が無い（`jobUser` だけ）ので使わない。読み込みが続く間はインスタンスは止まらないので、画面の不具合などによる繰り返しの読み込みは止まり、プロジェクトのクエリ量上限（32 GiB/日）を取り込み・定期クエリに残す。2026-10 の `sa-viewer` の利用は 1 日 最大 0.6 GiB。上限を変えるときは `infra/prod/viewer.tf` の env に `DAILY_BYTES_BILLED`（バイト数。100 GiB 以下）を足す。429 が出ていないかは `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND jsonPayload.event="daily_limit"' --project=$P --freshness=1d --limit=5 --format='value(timestamp,jsonPayload.endpoint)'`。
+
+`/smile`（#79）: 拡大縮小・スクロール・表示の切り替え・比較用の固定ではサーバーに要求しない。時点の移動は 250 ms まとめて 1 本、前の要求は中断（BigQuery のジョブは止まらないので、中断・再試行も要求の数に数える）、一度読んだ時点は画面で覚えて読み直さない（「最新」は 60 秒まで）。1 ページで出す要求は 20 本まで（20 × 約 130 MiB = 約 2.6 GiB）。「+」方向（+1分〜+1日）は「その時刻以後で最初のスナップショット」を読む（`&dir=next`、#80）ので、取引の切れ目（15:45〜17:00・06:00〜08:45・週末・休業日）の手前から「+1分」を押すと、1 本で次の取引の最初の時点に移る。それより新しいものが無ければ最新を見せ、「これより新しいデータはありません」を出す。`/atm_iv` と `/smile` を両方上限まで使うと 1 ページずつで 約 4.6 GiB になり、何度も読み直すと目安の 8 GiB/日 を超えうる（画面の上限はページを読み直すとリセット。サーバーの 1 日の上限は上の段落）。
 
 #77・#79 のデプロイ後（ブラウザで上の `/atm_iv`・`/smile` の確認を行った後）に、1 クエリの最大と 1 日の合計を確かめる（値・件数だけを記録する。ジョブの一覧は貼らない。確認した時間帯だけを見るときは `creation_time` の下限をその時刻にする）。あわせてログの `query_failed` が 0 件であること（`gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND jsonPayload.event="query_failed"' --project=$P --freshness=1h --limit=20 --format='value(timestamp,jsonPayload.endpoint,jsonPayload.error_type)'`）:
 

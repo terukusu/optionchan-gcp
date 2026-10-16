@@ -621,3 +621,101 @@ def test_atm_iv_bars_params_types(make):
     # 値は TIMESTAMP / DATE / INT64 のパラメータだけ（足の秒数は SQL に渡さない）
     for _, params in runner.calls:
         assert all(type(v) in (datetime, date, int) for v in params.values())
+
+
+# ---- /smile_snapshot?dir=next（#80） ----
+
+def test_smile_snapshot_next(make):
+    results = ok_results()
+    nxt = datetime(2026, 10, 13, 8, 0, tzinfo=UTC)
+    results["next_snapshot"] = [{"snapshot_at": nxt}]
+    client, runner = make(results)
+    at = datetime(2026, 10, 12, 6, 45, tzinfo=UTC)
+    res = client.get(f"/smile_snapshot?at={int(at.timestamp())}&dir=next")
+    assert res.status_code == 200
+    assert res.get_data(as_text=True).split("\n")[0].split(",")[0] == str(int(nxt.timestamp()))
+    # at 以後 14 日で最初（at ちょうどを含む）。見つかれば at 以前は探さない
+    assert runner.calls == [
+        ("next_snapshot", {"start_at": at, "end_at": at + timedelta(days=14)}),
+        ("smile_snapshot", {"start_at": nxt, "end_at": nxt + SEC}),
+    ]
+
+
+def test_smile_snapshot_next_none_falls_back_to_latest(make):
+    # at より後に無ければ at 以前で最新（画面は時刻が at より前なのを見て「これより新しいデータは無い」と分かる）
+    results = ok_results()
+    results["next_snapshot"] = [{"snapshot_at": None}]
+    client, runner = make(results)
+    at = NOW - timedelta(minutes=1)
+    res = client.get(f"/smile_snapshot?at={int(at.timestamp())}&dir=next")
+    assert res.status_code == 200
+    assert res.get_data(as_text=True).split("\n")[0].split(",")[0] == str(int(SNAP.timestamp()))
+    assert [name for name, _ in runner.calls] == ["next_snapshot", "latest_snapshot", "smile_snapshot"]
+    assert runner.calls[1][1] == {"start_at": at - timedelta(days=14), "end_at": at + SEC}
+
+
+@pytest.mark.parametrize("query", ["dir=prev", "dir=", "dir=NEXT", "dir=next%0A", "at=1760000000&dir=1"])
+def test_smile_snapshot_bad_dir(make, query, capsys):
+    client, runner = make()
+    res = client.get(f"/smile_snapshot?{query}")
+    assert res.status_code == 400
+    assert runner.calls == []
+    record = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert record["param"] == "dir"
+
+
+# ---- /atm_iv_bars?iv=mid（#93） ----
+
+def mid_results():
+    results = bars_results()
+    results["atm_mid_minute"] = [
+        minute(5, 50, 18.1, 18.6, 18.0, 18.3),
+        minute(5, 52, None, None, None, None),
+        minute(5, 53, 18.3, 18.4, 18.2, 18.4),
+    ]
+    return results
+
+
+@pytest.mark.parametrize("tf,want", [
+    ("1m", ["18.1,18.6,18.0,18.3,2026-10-13 05:50:00+00:00", "18.3,18.4,18.2,18.4,2026-10-13 05:53:00+00:00"]),
+    ("5m", ["18.1,18.6,18.0,18.4,2026-10-13 05:50:00+00:00"]),
+])
+def test_atm_iv_bars_mid(make, tf, want):
+    client, runner = make(mid_results())
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=1&iv=mid&start={ep(utc(12))}&end={ep(utc(13))}")
+    assert res.status_code == 200
+    assert res.get_data(as_text=True).splitlines() == want
+    assert runner.calls == [("atm_mid_minute", {"start_at": utc(12), "end_at": utc(13), "today": date(2026, 10, 13),
+                                                "n": 1})]
+
+
+def test_atm_iv_bars_trade_is_default(make):
+    client, runner = make(mid_results())
+    assert client.get("/atm_iv_bars?tf=1m&iv=trade").get_data(as_text=True) == client.get(
+        "/atm_iv_bars?tf=1m").get_data(as_text=True)
+    assert [name for name, _ in runner.calls].count("atm_mid_minute") == 0
+
+
+@pytest.mark.parametrize("query", ["tf=1h&iv=mid", "iv=mid", "tf=1d&iv=mid", "tf=1m&iv=", "tf=1m&iv=MID",
+                                   "tf=1m&iv=bid", "tf=1m&iv=mid%0A"])
+def test_atm_iv_bars_bad_iv(make, query, capsys):
+    # mid は分足だけ（既定の tf は 1h）
+    client, runner = make(mid_results())
+    res = client.get(f"/atm_iv_bars?{query}")
+    assert res.status_code == 400
+    assert runner.calls == []
+    record = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert record["param"] == "iv"
+
+
+# ---- favicon（#94） ----
+
+def test_favicon(make):
+    client, runner = make()
+    assert client.get("/favicon.ico").status_code == 204
+    res = client.get("/static/favicon.svg")
+    assert res.status_code == 200
+    assert res.content_type.startswith("image/svg+xml")
+    for path in ("/", "/smile", "/atm_iv"):
+        assert '<link rel="icon" href="/static/favicon.svg"' in client.get(path).get_data(as_text=True)
+    assert runner.calls == []

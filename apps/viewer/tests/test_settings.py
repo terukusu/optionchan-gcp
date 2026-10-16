@@ -13,6 +13,12 @@ def test_project_is_required():
 def test_defaults():
     cfg = st.from_env({"GCP_PROJECT": "example-project"})
     assert (cfg.dataset, cfg.location, cfg.maximum_bytes_billed) == ("optionchan_tokyo", "asia-northeast1", 1024**3)
+    assert cfg.daily_bytes_billed == 4 * 1024**3
+
+
+def test_daily_bytes_billed_from_env():
+    cfg = st.from_env({"GCP_PROJECT": "example-project", "DAILY_BYTES_BILLED": str(8 * 1024**3)})
+    assert cfg.daily_bytes_billed == 8 * 1024**3
 
 
 @pytest.mark.parametrize("project", ["example-project", "example.com:my-project", "a-b.example.co.jp:proj-1"])
@@ -31,6 +37,8 @@ def test_project_forms(project):
     {"GCP_PROJECT": "example-project", "BQ_DATASET": "a`b"},
     {"GCP_PROJECT": "example-project", "MAX_BYTES_BILLED": "0"},
     {"GCP_PROJECT": "example-project", "MAX_BYTES_BILLED": str(11 * 1024**3)},
+    {"GCP_PROJECT": "example-project", "DAILY_BYTES_BILLED": "-1"},
+    {"GCP_PROJECT": "example-project", "DAILY_BYTES_BILLED": str(101 * 1024**3)},
 ])
 def test_rejects_bad_values(env):
     with pytest.raises(ValueError):

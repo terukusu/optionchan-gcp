@@ -3,6 +3,7 @@
 - SQL は sql/*.sql にだけ置く。ファイル中の識別子は ${project}・${dataset} だけで、起動時に設定（環境変数）から埋める
   （リクエストの値は入らない）。値はすべてクエリパラメータ（ScalarQueryParameter）で渡す
 - すべてのジョブに maximum_bytes_billed・location を付ける
+- 終わったジョブの total_bytes_billed を on_billed に渡す（1 日の上限。budget.py）
 """
 
 import re
@@ -11,8 +12,8 @@ from importlib import resources
 
 from . import settings as st
 
-QUERY_NAMES = ("latest_snapshot", "smile", "smile_snapshot", "atm_iv_meta", "atm_iv", "atm_iv_minute",
-               "trading_holidays")
+QUERY_NAMES = ("latest_snapshot", "next_snapshot", "smile", "smile_snapshot", "atm_iv_meta", "atm_iv",
+               "atm_iv_minute", "atm_mid_minute", "trading_holidays")
 _PLACEHOLDER = re.compile(r"\$\{(\w+)\}")
 
 
@@ -46,10 +47,11 @@ def param_type(value) -> str:
 class BigQueryRunner:
     """名前（sql/<name>.sql）とパラメータの dict を受け取り、行（dict）のリストを返す。"""
 
-    def __init__(self, cfg: st.Settings, client=None):
+    def __init__(self, cfg: st.Settings, client=None, on_billed=None):
         self.cfg = cfg
         self.sql = {name: load_sql(name, cfg) for name in QUERY_NAMES}
         self._client = client
+        self._on_billed = on_billed
 
     @property
     def client(self):
@@ -71,4 +73,6 @@ class BigQueryRunner:
     def __call__(self, name: str, params: dict) -> list[dict]:
         job = self.client.query(self.sql[name], job_config=self.job_config(params), location=self.cfg.location)
         rows = job.result(timeout=st.QUERY_TIMEOUT_SECONDS)
+        if self._on_billed is not None:
+            self._on_billed(job.total_bytes_billed)
         return [dict(row.items()) for row in rows]

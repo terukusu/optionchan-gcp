@@ -19,6 +19,7 @@ class FakeJob:
     def __init__(self, rows):
         self.rows = rows
         self.timeout = None
+        self.total_bytes_billed = 10 * 1024**2
 
     def result(self, timeout=None):
         self.timeout = timeout
@@ -41,11 +42,13 @@ class FakeClient:
 # 各クエリが受け取るパラメータ（api.py が渡すものと同じ名前・型）
 PARAMS = {
     "latest_snapshot": {"start_at": NOW, "end_at": NOW},
+    "next_snapshot": {"start_at": NOW, "end_at": NOW},
     "smile": {"start_at": NOW, "end_at": NOW},
     "smile_snapshot": {"start_at": NOW, "end_at": NOW},
     "atm_iv_meta": {"start_at": NOW, "end_at": NOW},
     "atm_iv": atm_iv_params(NOW, None, 7, 0),
     "atm_iv_minute": {"start_at": NOW, "end_at": NOW, "today": date(2026, 10, 13), "n": 0},
+    "atm_mid_minute": {"start_at": NOW, "end_at": NOW, "today": date(2026, 10, 13), "n": 0},
     "trading_holidays": {"start_date": date(2026, 10, 1), "end_date": date(2026, 10, 28)},
 }
 
@@ -81,3 +84,12 @@ def test_names_come_from_settings():
     runner = bq.BigQueryRunner(settings.Settings(project="other-project", dataset="ds_x"), client=FakeClient())
     for sql in runner.sql.values():
         assert "`other-project.ds_x." in sql
+
+
+def test_billed_bytes_go_to_callback():
+    # 1 日の上限（#95）: 終わったジョブの total_bytes_billed を渡す
+    billed = []
+    runner = bq.BigQueryRunner(CFG, client=FakeClient(), on_billed=billed.append)
+    runner("latest_snapshot", PARAMS["latest_snapshot"])
+    runner("latest_snapshot", PARAMS["latest_snapshot"])
+    assert billed == [10 * 1024**2, 10 * 1024**2]
