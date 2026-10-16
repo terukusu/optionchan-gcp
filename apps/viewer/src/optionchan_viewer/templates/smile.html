@@ -9,6 +9,7 @@
     <title>スマイルカーブ</title>
     <script src="/static/vendor/chart.umd.min.js"></script>
     <script src="/static/smile_age.js" defer></script>
+    <script src="/static/smile_touch.js" defer></script>
     <script src="/static/smile.js" defer></script>
     <link rel="stylesheet" href="/static/viewer.css">
 </head>
@@ -47,6 +48,8 @@
     </div>
 </div>
 <div id="legend" class="smile-legend"></div>
+<!-- 詳細（#cursor）はチャートが画面にある間は画面の上に残す（position: sticky。スマートフォンでなぞっている間も読めるように） -->
+<div class="smile-stage">
 <div id="cursor" class="smile-cursor"></div>
 <div id="chart-wrap" class="chart-wrap" aria-busy="true">
     <div class="chart-box">
@@ -63,11 +66,13 @@
         </div>
     </div>
 </div>
+</div>
 <div id="message" class="chart-note"></div>
 <p class="chart-help">
     線: 気配の仲値（mid）の IV、縦のひげ: 買い気配（bid）〜売り気配（ask）の IV、点: 約定の IV（濃いほど最近の約定。段の区切りは凡例）。
     「経過時間」をオンにすると、約定からの経過（分）を右軸に点線で描きます。
-    ホイール・ドラッグ（スマートフォンはピンチ・スワイプ）で拡大縮小・スクロール。
+    マウス: ホバーで行使価格の詳細、ドラッグでスクロール、ホイールで拡大縮小。
+    スマートフォン: 1 本指で左右になぞると行使価格を選び（端まで行くと表示範囲を送ります）、2 本指で移動・ピンチで拡大縮小、縦のスワイプでページをスクロール。
 </p>
 </body>
 </html>

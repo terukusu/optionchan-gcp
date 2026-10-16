@@ -200,8 +200,8 @@ def test_today_is_jst():
 
 
 @pytest.mark.parametrize("path", ["/", "/smile", "/atm_iv", "/smile_data", "/atm_iv_data?d=0", "/static/smile.js",
-                                  "/static/smile_age.js", "/static/viewer.css", "/nonexistent", "/smile_snapshot",
-                                  "/smile_snapshot?at=abc"])
+                                  "/static/smile_age.js", "/static/smile_touch.js", "/static/viewer.css",
+                                  "/nonexistent", "/smile_snapshot", "/smile_snapshot?at=abc"])
 def test_security_headers(make, path):
     # N2: すべての応答（ページ・CSV・400・静的ファイル・404）に付ける
     client, _ = make()

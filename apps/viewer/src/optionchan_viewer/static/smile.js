@@ -1,7 +1,12 @@
 // スマイルカーブ（#79。Chart.js 4 の canvas）。/smile_snapshot?at=（UTC の UNIX 秒。省略で最新）で 1 時点を読んで描く。
 // - 曲線の規則（OTM 合成・mid IV・IV の 0 の扱い）はサーバー（smile.py）が CSV の列（mid_iv・otm）にする。ここは列で絞るだけ
-// - 横軸は行使価格（値に比例）。拡大縮小・スクロール（ホイール・ドラッグ・ピンチ・スワイプ）はこのファイルの pointer events で
-//   横軸の min / max を書き換えるだけで、サーバーに要求しない。縦軸は表示範囲の点から Chart.js が決める
+// - 横軸は行使価格（値に比例）。拡大縮小・スクロールはこのファイルの pointer events で横軸の min / max を書き換えるだけで、
+//   サーバーに要求しない。縦軸は表示範囲の点から Chart.js が決める
+// - 操作（#84）: マウスはホバーでカーソル・ドラッグでパン・ホイールで拡縮。タッチは 1 本指の横のなぞりでカーソル
+//   （一番近い行使価格に吸い付き、描画領域の端では表示範囲を送る）、2 本指でパン・ピンチ、縦のスワイプはページのスクロール
+//   （canvas は touch-action: pan-y）。判定・吸い付き・送りの量は smile_touch.js の SmileTouch（純粋関数）
+// - 操作中の描き直しは requestAnimationFrame で 1 フレーム 1 回にまとめる（表示範囲が変われば chart.update、
+//   カーソルだけなら chart.draw。縦線は overlay が描く）
 // - 時点の移動（最新・前後のステップ・日時の入力）は DEBOUNCE_MS でまとめてから 1 回だけ要求し、前の要求は AbortController で
 //   中断する。読んだスナップショットと「at → どのスナップショットか」の区間を覚え、同じ時点ではサーバーに要求しない
 // - 取りすぎ防止: この画面で出す要求は MAX_REQUESTS 回まで（1 回 約 130 MiB のスキャン。中断・再試行も数える）
@@ -57,8 +62,12 @@ var requests = 0;
 var retry = null;
 var pending;  // まとめている時点（undefined: なし、null: 最新、数値: at）
 var debounceTimer = null;
-var pointers = new Map();
+var pointers = new Map();  // pointerId → { x, y, x0, y0 }（x は canvas の左端から、y は clientY）
+// 操作中の状態: pan（マウスのドラッグ）、pending（タッチ 1 本。縦か横かを待つ）、cursor（なぞり。px は指の位置）、
+// scroll（縦。ページのスクロールに渡した）、pinch（2 本指）、none（ピンチの後に残った指。すべて離すまで何もしない）
 var gesture = null;
+var frame = { id: null, update: false, draw: false, cursor: false };  // 次のフレームで行う描き直し
+var auto = null;  // 端での自動送り中 { last: 前のフレームの時刻（ms） }
 
 function el(id) {
   return document.getElementById(id);
@@ -378,7 +387,7 @@ function setView(min, max) {
   }
   view = clampView(min, max);
   applyView();
-  chart.update('none');
+  requestFrame('update');
 }
 
 // ---- 描画 ----
@@ -474,18 +483,16 @@ function renderLegend() {
 }
 
 function nearestStrike(x) {
-  var best = null;
   if (!shown) {
     return null;
   }
+  var strikes = [];
   shownMonths().forEach(function(m) {
     shown.byMonth[m].forEach(function(r) {
-      if (best === null || Math.abs(r.target_price - x) < Math.abs(best - x)) {
-        best = r.target_price;
-      }
+      strikes.push(r.target_price);
     });
   });
-  return best;
+  return SmileTouch.nearest(strikes, x);
 }
 
 function field(row, name, label, value) {
@@ -769,10 +776,75 @@ function step(seconds) {
   schedule(Math.max(EPOCH, Math.min(base + seconds, nowSec())));
 }
 
-// ---- 操作（拡大縮小・スクロール。サーバーに要求しない） ----
+// ---- 操作（拡大縮小・スクロール・カーソル。サーバーに要求しない） ----
 
+// 描き直しを次のフレームの 1 回にまとめる。kind: 'update'（表示範囲が変わった）/ 'draw'（カーソルの縦線だけ）
+function requestFrame(kind) {
+  if (kind === 'update') {
+    frame.update = true;
+  } else if (kind === 'draw') {
+    frame.draw = true;
+  }
+  if (frame.id === null) {
+    frame.id = requestAnimationFrame(onFrame);
+  }
+}
+
+function onFrame(ts) {
+  frame.id = null;
+  if (gesture && gesture.kind === 'cursor') {
+    stepAuto(ts);
+  } else {
+    auto = null;
+  }
+  if (frame.cursor) {
+    renderCursor();
+  }
+  if (frame.update) {
+    chart.update('none');
+  } else if (frame.draw) {
+    chart.draw();
+  }
+  frame.update = false;
+  frame.draw = false;
+  frame.cursor = false;
+  if (auto) {
+    requestFrame();
+  }
+}
+
+// なぞっている指が端の帯にあれば、前のフレームからの時間の分だけ表示範囲を送り、カーソルを吸い付け直す。
+// 帯の外・データの端（送れない）では止める
+function stepAuto(ts) {
+  var area = chart.chartArea;
+  var factor = SmileTouch.edgeFactor(gesture.px, area.left, area.right, SmileTouch.EDGE_PX);
+  if (!factor || !view) {
+    auto = null;
+    return;
+  }
+  var dt = auto ? Math.min(ts - auto.last, 50) / 1000 : 0;
+  auto = { last: ts };
+  if (dt <= 0) {
+    return;
+  }
+  var next = SmileTouch.shiftView(view, SmileTouch.edgeDelta(factor, view.max - view.min, dt), bounds());
+  if (next === view) {
+    auto = null;
+    return;
+  }
+  view = next;
+  applyView();
+  frame.update = true;
+  setCursorAt(SmileTouch.clampPx(gesture.px, area.left, area.right));
+}
+
+// px → 行使価格。表示範囲（view）から計算する（同じフレームの中で、まだ描き直していない scale を読まない）
 function valueAt(px) {
-  return chart.scales.x.getValueForPixel(px);
+  var area = chart.chartArea;
+  if (!view || !area) {
+    return chart.scales.x.getValueForPixel(px);
+  }
+  return SmileTouch.valueAt(px, area.left, area.right, view);
 }
 
 function canvasX(e) {
@@ -799,61 +871,83 @@ function setCursorAt(px) {
   var strike = nearestStrike(valueAt(px));
   if (strike !== cursorStrike) {
     cursorStrike = strike;
-    renderCursor();
-    chart.update('none');
+    frame.cursor = true;
+    requestFrame('draw');
   }
 }
 
-function startGesture() {
+// なぞり: 指を描画領域に収めて吸い付け、端の帯なら自動送りを始める（次のフレームの stepAuto）
+function scrub(px) {
+  var area = chart.chartArea;
+  gesture.px = px;
+  setCursorAt(SmileTouch.clampPx(px, area.left, area.right));
+  if (SmileTouch.edgeFactor(px, area.left, area.right, SmileTouch.EDGE_PX)) {
+    requestFrame();
+  }
+}
+
+function pinchGesture() {
   var pts = Array.from(pointers.values());
-  if (!view || !pts.length) {
-    gesture = null;
-    return;
+  if (!view) {
+    return { kind: 'none' };
   }
   var area = chart.chartArea;
-  if (pts.length === 1) {
-    gesture = { kind: 'pan', x: pts[0].x, view: { min: view.min, max: view.max }, perPx: (view.max - view.min) /
-      (area.right - area.left) };
-  } else {
-    var mid = (pts[0].x + pts[1].x) / 2;
-    gesture = { kind: 'pinch', dist: Math.max(1, Math.abs(pts[0].x - pts[1].x)), center: valueAt(mid),
-      width: view.max - view.min, areaWidth: area.right - area.left };
-  }
+  var mid = (pts[0].x + pts[1].x) / 2;
+  return { kind: 'pinch', dist: Math.max(1, Math.abs(pts[0].x - pts[1].x)), center: valueAt(mid),
+    width: view.max - view.min, areaWidth: area.right - area.left };
 }
 
 function onPointerDown(e) {
   if (!shown) {
     return;
   }
+  var px = canvasX(e);
   el('chart').setPointerCapture(e.pointerId);
-  pointers.set(e.pointerId, { x: canvasX(e) });
-  if (e.pointerType !== 'mouse' || pointers.size === 1) {
-    setCursorAt(canvasX(e));
+  pointers.set(e.pointerId, { x: px, y: e.clientY, x0: px, y0: e.clientY });
+  if (e.pointerType === 'mouse') {
+    setCursorAt(px);
+    el('chart').classList.add('dragging');
+    var area = chart.chartArea;
+    gesture = view ? { kind: 'pan', x: px, view: { min: view.min, max: view.max },
+      perPx: (view.max - view.min) / (area.right - area.left) } : null;
+    return;
   }
-  el('chart').classList.add('dragging');
-  startGesture();
+  auto = null;
+  // タッチ・ペン: 1 本目は縦か横かを待つ。2 本目からはパン + ピンチ（最初の 2 本）
+  gesture = pointers.size === 1 ? { kind: 'pending' } : pinchGesture();
 }
 
 function onPointerMove(e) {
   var px = canvasX(e);
-  if (!pointers.has(e.pointerId)) {
+  var p = pointers.get(e.pointerId);
+  if (!p) {
     if (e.pointerType === 'mouse') {
       setCursorAt(px);
     }
     return;
   }
-  pointers.get(e.pointerId).x = px;
+  p.x = px;
+  p.y = e.clientY;
   if (!gesture) {
     return;
   }
-  var pts = Array.from(pointers.values());
-  if (gesture.kind === 'pan' && pts.length === 1) {
+  if (gesture.kind === 'pan') {
     var dv = (px - gesture.x) * gesture.perPx;
     setView(gesture.view.min - dv, gesture.view.max - dv);
-    if (e.pointerType === 'mouse') {
-      setCursorAt(px);
+    setCursorAt(px);
+  } else if (gesture.kind === 'pending') {
+    var kind = SmileTouch.classify(px - p.x0, e.clientY - p.y0, SmileTouch.SLOP_PX);
+    if (kind === 'cursor') {
+      gesture = { kind: 'cursor', px: px };
+      scrub(px);
+    } else if (kind === 'scroll') {
+      gesture = { kind: 'scroll' };
     }
-  } else if (gesture.kind === 'pinch' && pts.length >= 2) {
+  } else if (gesture.kind === 'cursor') {
+    scrub(px);
+  } else if (gesture.kind === 'pinch' && pointers.size >= 2) {
+    // 最初の 2 本の中点の値を指の中点に保ち、幅を指の間隔に反比例させる（2 本指のドラッグで移動、ピンチで拡縮）
+    var pts = Array.from(pointers.values());
     var dist = Math.max(1, Math.abs(pts[0].x - pts[1].x));
     var width = gesture.width * gesture.dist / dist;
     var mid = (pts[0].x + pts[1].x) / 2;
@@ -863,16 +957,23 @@ function onPointerMove(e) {
   }
 }
 
+// pointerup と pointercancel（縦のスワイプでブラウザがスクロールを始めた等）。カーソルは最後のものを残す
 function onPointerUp(e) {
   if (!pointers.has(e.pointerId)) {
     return;
   }
   pointers.delete(e.pointerId);
+  if (e.type === 'pointerup' && e.pointerType !== 'mouse' && gesture && gesture.kind === 'pending') {
+    setCursorAt(canvasX(e));  // タップ（動かさずに離した）: 今までどおりその位置で選ぶ
+  }
+  auto = null;
   if (!pointers.size) {
     el('chart').classList.remove('dragging');
     gesture = null;
+  } else if (pointers.size >= 2) {
+    gesture = pinchGesture();
   } else {
-    startGesture();
+    gesture = { kind: 'none' };
   }
 }
 
@@ -893,6 +994,12 @@ function bind() {
   canvas.addEventListener('pointerup', onPointerUp);
   canvas.addEventListener('pointercancel', onPointerUp);
   canvas.addEventListener('wheel', onWheel, { passive: false });
+  // 念のため（touch-action に頼れないブラウザ）: 2 本指・なぞりの間はページの拡大・スクロールを止める
+  canvas.addEventListener('touchmove', function(e) {
+    if (e.cancelable && (e.touches.length >= 2 || (gesture && gesture.kind === 'cursor'))) {
+      e.preventDefault();
+    }
+  }, { passive: false });
   el('latest').addEventListener('click', function() { schedule(null); });
   Array.from(document.querySelectorAll('button.step')).forEach(function(b) {
     b.addEventListener('click', function() { step(Number(b.dataset.step)); });

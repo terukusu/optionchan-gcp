@@ -164,6 +164,20 @@
     min-height: 3em;
     font-family: monospace;
 }
+/* 詳細はチャート（.smile-stage の中）が画面にある間、画面の上に残す（#84。なぞっている指の上に見えるように） */
+.smile-stage .smile-cursor {
+    position: sticky;
+    top: 0;
+    z-index: 12;
+    margin: 0;
+    padding: 0.3em 0;
+    background: #fff;
+}
+@media (max-width: 600px) {
+    .smile-stage .smile-cursor {
+        font-size: 0.75em;
+    }
+}
 .cursor-row {
     margin: 0.1em 0;
 }
@@ -230,8 +244,9 @@
 .dot-t3 {
     border-color: rgba(66, 66, 66, 0.35);
 }
+/* タッチ: 縦のスワイプはページのスクロール、横のなぞり・2 本指は smile.js（#84） */
 .smile-canvas {
-    touch-action: none;
+    touch-action: pan-y;
     cursor: crosshair;
 }
 .smile-canvas.dragging {
