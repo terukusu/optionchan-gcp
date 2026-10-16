@@ -170,7 +170,8 @@
     top: 0;
     z-index: 12;
     margin: 0;
-    padding: 0.3em 0;
+    /* 左は選択モード（#86）の橙の線（3px）から文字を離す。常に同じ余白にして、モードの出入りで文字が動かないようにする */
+    padding: 0.3em 0.5em 0.3em 0.7em;
     background: #fff;
 }
 @media (max-width: 600px) {
