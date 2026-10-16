@@ -1,5 +1,7 @@
 """I/O 層（JPX・GCS・BigQuery）を偽物のクライアントで検査する。実際の通信はしない"""
 
+import http.server
+import threading
 from datetime import UTC, datetime
 
 import google.auth.exceptions
@@ -12,7 +14,7 @@ from optionchan_ingest import io_bq, settings
 from optionchan_ingest.io_bq import BigQueryQuery, BigQueryWriter, QueryFailed, WriteFailed
 from optionchan_ingest.io_gcs import AlreadyExists, RawStore, StorageFailed
 from optionchan_ingest.io_jpx import fetch_page
-from optionchan_ingest.parser import JpxUnavailable
+from optionchan_ingest.parser import JpxTransient, JpxUnavailable
 
 # --- JPX ---
 
@@ -59,6 +61,109 @@ def test_fetch_page_timeout_total_within_budget(timeout, expected):
 def test_fetch_page_failures_are_unavailable(result):
     with pytest.raises(JpxUnavailable):
         fetch_page(1, 10, FakeSession(result))
+
+
+@pytest.mark.parametrize(
+    "result, detail",
+    [
+        (FakeResponse(500), "page 1: HTTP 500"),
+        (FakeResponse(502), "page 1: HTTP 502"),
+        (FakeResponse(503), "page 1: HTTP 503"),
+        (requests.ConnectionError(), "page 1: ConnectionError"),
+        (requests.ConnectTimeout(), "page 1: ConnectTimeout"),
+        (requests.ReadTimeout(), "page 1: ReadTimeout"),
+        (requests.exceptions.ChunkedEncodingError(), "page 1: ChunkedEncodingError"),
+    ],
+)
+def test_fetch_page_transient_failures(result, detail):
+    """5xx・接続エラー・タイムアウトは取り直しの対象（#88）"""
+    with pytest.raises(JpxTransient, match=f"^{detail}$"):
+        fetch_page(1, 10, FakeSession(result))
+
+
+@pytest.mark.parametrize(
+    "result", [FakeResponse(400), FakeResponse(403), FakeResponse(404), FakeResponse(304), requests.TooManyRedirects()]
+)
+def test_fetch_page_other_failures_are_not_transient(result):
+    """4xx などは取り直さない"""
+    with pytest.raises(JpxUnavailable) as e:
+        fetch_page(1, 10, FakeSession(result))
+    assert not isinstance(e.value, JpxTransient)
+
+
+class _KeepAliveHandler(http.server.BaseHTTPRequestHandler):
+    """HTTP/1.1 の keep-alive に応じる JPX の代わり。接続ごとのクライアントのポートを記録する"""
+
+    protocol_version = "HTTP/1.1"
+    ports: list
+
+    def do_GET(self):
+        self.ports.append(self.client_address[1])
+        body = b"<html></html>"
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args):
+        pass
+
+
+@pytest.fixture
+def local_jpx(monkeypatch):
+    """127.0.0.1 の一時ポートの HTTP サーバーに JPX_URLS を向ける。戻り値は要求ごとのクライアントのポート"""
+    ports = []
+    handler = type("Handler", (_KeepAliveHandler,), {"ports": ports})
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    monkeypatch.setattr(settings, "JPX_URLS", {1: f"{base}/", 2: f"{base}/1"})
+    try:
+        yield ports
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_fetch_page_new_connection_per_request(local_jpx):
+    """セッションを渡さない取得（本番の経路）は、要求ごとに新しい接続になる（#88。keep-alive の接続を使い回さない）"""
+    for page in (1, 2, 1):
+        assert fetch_page(page, 5).http_status == 200
+    assert len(local_jpx) == 3
+    assert len(set(local_jpx)) == 3  # クライアントのポートがすべて違う = 接続が 3 本
+
+
+def test_shared_session_would_reuse_connection(local_jpx):
+    """検査自体の確認: 同じセッションを使い回すと、このサーバーでは 1 本の接続に乗る（#88 の前の取り方）"""
+    with requests.Session() as session:
+        for page in (1, 2, 1):
+            fetch_page(page, 5, session)
+    assert len(local_jpx) == 3
+    assert len(set(local_jpx)) == 1
+
+
+def test_real_deps_do_not_share_jpx_session(monkeypatch):
+    """本番の依存の JPX の取得は io_jpx.fetch_page そのもの（セッションを閉じ込めた関数ではない）"""
+    from optionchan_ingest import app as app_module
+    from optionchan_ingest import io_jpx
+
+    monkeypatch.setenv("RAW_BUCKET", "b")
+    monkeypatch.delenv("INGEST_DRY_RUN", raising=False)
+    monkeypatch.setattr(app_module, "_cfg", None)
+    monkeypatch.setattr(app_module, "_deps", None)
+    monkeypatch.setattr(app_module, "_holder", None)
+    monkeypatch.setattr(app_module, "_clients", lambda cfg: (_FakeStore(), _FakeWriter()))
+    monkeypatch.setattr(app_module, "_load_latest_calendar", lambda timeout: None)
+    assert app_module._real_deps().fetch_page is io_jpx.fetch_page
+
+
+class _FakeStore:
+    exists = create = list = None
+
+
+class _FakeWriter:
+    append = None
 
 
 # --- GCS ---

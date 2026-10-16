@@ -48,10 +48,19 @@ MIN_REMAINING_SECONDS = 2
 #   timeout を超えうるため。待つのをやめた呼び出しはスレッドに残り、下の各タイムアウトで終わる）。
 # BigQuery は gRPC の deadline が開始から応答までの全体にかかるので、スレッドに出さない
 CALL_GRACE_SECONDS = 1
-# JPX: リトライなし（次の分に任せる）。1 回 15 秒（残り時間で頭打ち）を接続（最大 5 秒）と読み取りに配分し、
-# 合計が timeout を超えないようにする
+# JPX: 1 回 15 秒（残り時間で頭打ち）を接続（最大 5 秒）と読み取りに配分し、合計が timeout を超えないようにする。
+# 接続は要求ごとに張り直す（#88。io_jpx.fetch_page）
 JPX_TIMEOUT_SECONDS = 15
 JPX_CONNECT_TIMEOUT_SECONDS = 5
+# JPX の取り直し（#88）: HTTP 5xx・接続エラー・タイムアウト（io_jpx の JpxTransient）のときだけ、1 リクエストで 1 回まで
+# （1 限月・2 限月の合計）、JPX_RETRY_WAIT_SECONDS 秒待ってから取り直す。4xx・空ページは取り直さない（次の分に任せる）。
+# 期限: 予算 = 残り − 待ち − JPX_RETRY_RESERVE_SECONDS（取り直しの後の GCS・BigQuery の分。実測 p50 3.8 秒）が
+# JPX_RETRY_MIN_TIMEOUT_SECONDS 以上のときだけ取り直し、取り直しのタイムアウトは min(JPX_TIMEOUT_SECONDS, 予算)。
+# 8 秒目の即時の 502 は取り直し、15 秒の読み取りタイムアウトの後（23 秒目）は取り直さない。
+# 待ち 3 秒: 毎日 04:00 JST 前後の 502 は 8 秒目に返り、旧系は同じ分の 2〜9 秒目に取れていた（#88 の調査）
+JPX_RETRY_WAIT_SECONDS = 3
+JPX_RETRY_RESERVE_SECONDS = 15
+JPX_RETRY_MIN_TIMEOUT_SECONDS = 5
 # GCS: timeout（10 秒、残り時間で頭打ち）を (接続, 読み取り) の組で渡す。
 # 存在確認（読み取り・冪等）は 1 回 GCS_EXISTS_ATTEMPT_TIMEOUT_SECONDS 秒の試行を、最後の試行が timeout 内に
 # 終わる範囲でだけ再試行する。作成はリトライしない（再送で自分の作成に 412 を受けて skipped_locked になるのを避ける。
@@ -106,6 +115,13 @@ MIN_STRIKES = 10
 # 鮮度のしきい値（分）。min(実時刻, セッション終了) − max(ページ更新時刻, セッション開始)
 STALE_DAY_MINUTES = 30
 STALE_NIGHT_MINUTES = 40
+
+# 本文の凍結（#88）: 取引時間中（ページの更新時刻が立会の [開始, 終了)）に、option の本文
+# （snapshot.OPTION_BODY_COLUMNS）が直前のスナップショットと同じことがこの回数続いたら WARNING body_frozen。
+# ヘッダの更新時刻だけ進み本文が止まる形（2026-10-14 18:52〜19:27 JST の 36 回）は鮮度（stale）では見えない。
+# 2026-10-13〜10-15 の取引時間中は、凍結を除くと最長 1 回（静かな時間の 1 分）。寄り前・引け後は数えない。
+# 品質チェック（sql/quality/quality_daily.sql の body_frozen）も同じ回数・列・時間帯（tests/test_sql.py が一致を検査）
+BODY_FROZEN_REPEATS = 3
 
 # --- 取引カレンダーの固定の値（#75。休業日・covered_until は BigQuery の最新版だけが正で、ここには持たない） ---
 # 立会時間（JST の実時刻）。出典: 大阪取引所「祝日取引」のページの「取引時間/取引日」（HOLIDAY_TRADING_URL）。

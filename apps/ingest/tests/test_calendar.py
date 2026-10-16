@@ -4,7 +4,7 @@ import pytest
 from calgen import CAL
 
 from optionchan_ingest import settings
-from optionchan_ingest.calendar import DAY, NIGHT, build_calendar, session_at
+from optionchan_ingest.calendar import DAY, NIGHT, build_calendar, in_session, session_at
 from optionchan_ingest.parser import jst
 
 
@@ -133,3 +133,25 @@ def test_no_night_session_before(monkeypatch):
     custom = build_calendar(CAL.closed_dates, CAL.covered_until)
     assert session_at(jst(2026, 10, 14, 20, 0), custom) is None
     assert session_at(jst(2026, 10, 15, 20, 0), custom).kind == NIGHT
+
+
+@pytest.mark.parametrize(
+    "t, expected",
+    [
+        (jst(2026, 10, 14, 8, 44), False),  # 寄り前
+        (jst(2026, 10, 14, 8, 45), True),  # 日中の開始は含む
+        (jst(2026, 10, 14, 15, 44), True),
+        (jst(2026, 10, 14, 15, 45), False),  # 日中の終了は含めない（引け後・余裕の時間帯）
+        (jst(2026, 10, 14, 16, 59), False),  # 夜間の寄り前
+        (jst(2026, 10, 14, 17, 0), True),
+        (jst(2026, 10, 15, 5, 59), True),
+        (jst(2026, 10, 15, 6, 0), False),  # 夜間の終了は含めない
+        (jst(2026, 10, 15, 6, 14), False),
+        (jst(2026, 11, 23, 10, 0), False),  # 休業日
+        (jst(2026, 10, 17, 10, 0), False),  # 土曜
+        (datetime(2026, 10, 14, 1, 0, tzinfo=UTC), True),  # UTC で渡しても JST で判定
+    ],
+)
+def test_in_session(cal, t, expected):
+    """本文の凍結（#88）の取引時間: 立会の [開始, 終了)"""
+    assert in_session(t, cal) is expected

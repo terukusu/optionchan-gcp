@@ -908,6 +908,35 @@ curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" -G \
   | jq '[.timeSeries[].points[].value.doubleValue] | add'   # × 23（月の取引日）× 0.5 が 18 万未満
 ```
 
+### JPX の接続・取り直し・本文の凍結（#88）
+
+#11 の並行稼働の調査（2026-10-16）で見つかった 2 つの問題への対策。設定は `apps/ingest` の `settings.py`（`JPX_RETRY_*`・`BODY_FROZEN_REPEATS`）。
+
+- **接続を使い回さない**: JPX への要求ごとに接続を張り直す（`io_jpx.fetch_page`。旧系の `requests.get` と同じ取り方）。2026-10-14 18:52〜19:27 JST の 36 分間、新系はヘッダの更新時刻だけ進み本文が 18:50〜18:51 の版のまま止まったページを受け続けた（旧系は同じ時間に止まった版と新しい版を交互に受けた）。インスタンスの中で使い回していた keep-alive の接続が、止まった返す元に張り付いた疑い（証明はできていない）
+- **取り直し**: HTTP 5xx・接続エラー・タイムアウトのときだけ、1 リクエストで 1 回まで（1 限月・2 限月の合計）、3 秒待ってから取り直す。4xx・空ページは取り直さない（次の分に任せる）。期限 45 秒の残りから待ちと 15 秒（取り直しの後の GCS・BigQuery の分）を引いて 5 秒以上あるときだけ取り直し、取り直しのタイムアウトはその秒数で頭打ち（8 秒目の即時の 502 は取り直し、15 秒の読み取りタイムアウトの後は取り直さない）。JPX は毎日 04:00 JST 前後に 502 を返す傾向があり（2026-10-13〜10-15 に 1 回ずつ）、取り直しが無いとその分が欠けた
+- **本文の凍結の検知**: 取引時間中（ページの更新時刻が立会の [開始, 終了)。寄り前・引け後・余裕の時間帯は数えない）に、option の本文（約定・気配・建玉の列。iv・ギリシャ指標は凍結中も変わるので入れない）が直前のスナップショットと同じことが 3 回続いたら、毎分 WARNING `body_frozen`。データはそのまま書く。判定はインスタンスのメモリなので、インスタンスが変わると数え直す。翌朝の品質チェックの `body_frozen` が必ず数える（「日次の品質チェックと新旧の突き合わせ（#40）」）。2026-10-13〜10-15 の取引時間中に本文が直前と同じだったのは、凍結を除くと静かな時間の 1 回（1 分）だけ
+
+ログ（`jsonPayload.event`）:
+
+| event | severity | 意味 |
+|---|---|---|
+| `jpx_retry` | INFO | 取り直す前（`page`・`detail` は 1 回目の失敗・`retry_wait_ms`） |
+| （各ログの項目）`jpx_retry` | — | 取り直した（か期限で取り直さなかった）リクエストの以降のログに `{page, first, result}`。`result` は `ok`（取り直しで取れた）・`failed`（2 回目も失敗。`jpx_unavailable` の `detail` は 2 回目の失敗）・`skipped_deadline`（期限に余裕が無く取り直さなかった） |
+| `body_frozen` | WARNING | 取引時間中に本文が直前と同じことが 3 回以上続いている（`body_repeats`・`body_since` = 本文が最後に変わったスナップショット・`snapshot_at`）。M2 では通知しない |
+
+`body_frozen` を受けたら（ログか品質チェックの違反）: その時間の生 HTML（`source_object`）を 2〜3 分おきに開き、ヘッダの更新時刻・先物・option の約定時刻を見る。本文が止まっていれば JPX 側（返す元の一部が止まっている）で、取り込みの誤りではない。データは止まった版のまま入っていて直せない（JPX のページは今の値だけ）。時刻と件数を #11 に記録する。接続を張り直しているのに再発したら、凍結のときに取り直す（接続を変えて取り直す）対策を Issue にする。
+
+確認（「ログ」と同じ `$LF`）:
+
+```sh
+gcloud logging read "$LF AND jsonPayload.jpx_retry.result:*" --project $P --format=json \
+  | jq -c '.[].jsonPayload | {event, schedule_time, snapshot_at, r: .jpx_retry}'   # 04:00 JST 前後の 502 は result "ok" と ingested
+gcloud logging read "$LF AND jsonPayload.event=\"body_frozen\"" --project $P --format='value(jsonPayload.snapshot_at,jsonPayload.body_repeats)' | wc -l   # 0
+# JPX の取得時間（1 限月 + 存在確認 + 2 限月）の中央値。#88 の前後の取引時間中の同じ時間帯で比べ、#11 に記録する
+gcloud logging read "$LF AND jsonPayload.event=\"ingested\"" --project $P --format=json \
+  | jq '[.[].jsonPayload.jpx_fetch_ms] | sort | {n: length, p50: .[(length / 2 | floor)], max: .[-1]}'
+```
+
 ### 回収と照合（#34）
 
 毎時 0 分（JST。Scheduler の予定時刻 `X-CloudScheduler-ScheduleTime`、無ければ実時刻）のリクエストは、通常の処理（取引時間中は #38 の待ち 8 秒 + 取得・書き込み）の後に、同じ期限 45 秒の残りで次を行う。応答（status・outcome）は通常の処理の結果のまま（回収の失敗は応答を変えない）。
@@ -1039,7 +1068,7 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 - M2 から `recovery_failed`（毎時の回収の一覧・クエリの失敗）を除くのは、一時的な失敗で毎時単発に出て次の 0 分で回復するため。回収だけが続けて失敗しても、取り込み自体が成功していれば取りこぼしが残らないので通知は来ない。取りこぼしが実際に残っているか、照合のクエリも失敗したときに、07:00 の照合が `raw_unrecovered` か `reconcile_failed`（どちらも ERROR）を出して通知される
 - gunicorn の起動・終了の行は stderr のテキストで severity が付かない（DEFAULT）ので M2 に当たらない（2026-10-13 のデプロイ 3 回で確認）。デプロイ直後の IAM 伝播待ちの 403 はリクエストログが WARNING、Scheduler 側のログ（`cloud_scheduler_job`）が ERROR だが、M2 の対象外（続けば M1 が鳴る）
 - 定期クエリ（BigQuery Data Transfer Service、#40）の失敗は `resource.type="bigquery_dts_config"` で入れている（プロジェクトの DTS は「日次の品質チェックと新旧の突き合わせ（#40）」の 4 本だけ。DTS を足すと同じく通知される）
-- `jpx_unavailable`（WARNING。空ページ・接続断）は単発では通知しない（旧系の 2026-09-15〜10-12 のログで、空ページは 04:00 / 04:20 台を中心に 1 日 1〜2 回、すべて 1 分だけ）。取引時間中に続いたときは ERROR `jpx_unavailable_stale`（#42）で M2 に乗る。判定は `stale` と同じしきい値（日中 30 分 / 夜間 40 分）で、`jpx_unavailable` の分に生 HTML のバケットを直近のしきい値分だけ一覧し、最後に保存できたスナップショットがそれより古ければ出す。JPX の改版で更新時刻・行の要素が無くなった場合（空ページと区別できない）や、JPX からの拒否・障害の継続を、最大 30〜40 分遅れで拾う。このとき生 HTML は保存されないので、ページは通知を受けてから直接見る
+- `jpx_unavailable`（WARNING。空ページ・接続断）は単発では通知しない（HTTP 5xx・接続エラー・タイムアウトは同じ分の中で 1 回取り直した後。#88、「JPX の接続・取り直し・本文の凍結（#88）」。旧系の 2026-09-15〜10-12 のログで、空ページは 04:00 / 04:20 台を中心に 1 日 1〜2 回、すべて 1 分だけ）。取引時間中に続いたときは ERROR `jpx_unavailable_stale`（#42）で M2 に乗る。判定は `stale` と同じしきい値（日中 30 分 / 夜間 40 分）で、`jpx_unavailable` の分に生 HTML のバケットを直近のしきい値分だけ一覧し、最後に保存できたスナップショットがそれより古ければ出す。JPX の改版で更新時刻・行の要素が無くなった場合（空ページと区別できない）や、JPX からの拒否・障害の継続を、最大 30〜40 分遅れで拾う。このとき生 HTML は保存されないので、ページは通知を受けてから直接見る
 
 料金（2027-09-01 以降。公式の価格ページで 2026-10-13 に確認）: メトリクス参照 1 件 $0.35 / 月。ログ一致の条件も 1 件と数え、点の料金は無い。M1 の点の料金は系列 1 本分（月 $0.1 未満の見込み）。並行稼働中は旧系 3 件 + 新系 2 件の 5 件で月 約 $1.9（約 290 円、税抜き。旧系の点の料金を含む）、#14 で旧系を消すと 2 件で月 約 $0.75。アラートの本数は一時的に 4 本（target.md 3.4 の「1〜2 本」は #14 の後）。
 
@@ -1180,7 +1209,7 @@ BigQuery Data Transfer Service（DTS）の 4 本。実行 SA は `sa-sq-dts`（t
 - 失敗は Cloud Logging の `resource.type="bigquery_dts_config"`・severity ERROR で、新系の M2（「新しい取り込みの監視（#35）」）が通知する。DTS の失敗メール（実行 SA 宛て）は使わない
 - 時刻を 07 時台に寄せているのは、M2 の通知が 1 時間に 1 回までのため。07:15 / 07:30 の失敗で始まる抑制は 08:15 / 08:30 に終わり、08:45 の寄り付き以降の ingest の ERROR は通知される。それでも DTS の失敗の通知の後の 1 時間は、ingest の ERROR が通知されないことがある（「M2 を受けたとき」のとおり直近の ERROR をすべて見る）
 - 休場日・週末も毎日動く（データが無い窓は件数 0・違反 0 の行になる）
-- 品質チェックの項目（`quality_daily` の列。説明は `schema/tokyo/quality_daily.json`）: `rowcount_mismatch`（`ingest_runs` の行数とテーブルの実件数）、`missing_table`（3 テーブルに同じスナップショット）、`dup_keys`（最新版のキーの重複）、`months_not_2`、`atm_not_1`（限月 × 種別で ATM が 1 行）、`price_time_future`（ページの更新時刻より後）、`price_time_too_old`（30 日以上前）、`sunday`。`orphan_rows`（書き込み途中の残骸）は情報で違反にしない
+- 品質チェックの項目（`quality_daily` の列。説明は `schema/tokyo/quality_daily.json`）: `rowcount_mismatch`（`ingest_runs` の行数とテーブルの実件数）、`missing_table`（3 テーブルに同じスナップショット）、`dup_keys`（最新版のキーの重複）、`months_not_2`、`atm_not_1`（限月 × 種別で ATM が 1 行）、`price_time_future`（ページの更新時刻より後）、`price_time_too_old`（30 日以上前）、`sunday`、`body_frozen`（#88。取引時間中に option の本文が直前と同じことが 3 回以上続いたスナップショット。ヘッダの更新時刻だけ進み本文が止まった形。寄り前・引け後は数えない。2026-10-14 の窓は 34、10-13・10-15 は 0。#88 より前の行は NULL）。`orphan_rows`（書き込み途中の残骸）は情報で違反にしない
 - 突き合わせの分類（`legacy_compare_daily` の列。説明は `schema/tokyo/legacy_compare_daily.json`、方法は `sql/legacy/compare.sql` の先頭）: 行単位（spot・future は `created_at` = T、option は T と `(last_trading_day, type, target_price)`）。JPX のページは各行が 1 分の中でばらばらに書き換わり、旧系は更新時刻の表示が変わった直後に取得するので、旧系の T の行を新系の T → 直前・直後のスナップショットの同じ行と比べる。説明済み: 直前か直後と全列一致（`*_version`、版の差）、option で約定の列（price・price_time・diff・diff_rate・volume・positions・quotation・quotation_date と、約定価格から求める iv・ギリシャ指標）が T・直前・直後のどれかと一致し気配と表示の列（bid・ask とその数量・IV、is_atm）だけ違う（`option_quote_only`、1 分の中の版の差）。option の `version`・`quote_only` は旧系の行が新系の T にもあるときだけ（新系の T の行の欠けは説明しない）、spot・future で新系の T が直前と同じ中身で旧系だけ新しい、または新系の T が約定時刻だけ進み価格の列（price・diff・diff_rate）が直前のままで、旧系が同じ約定時刻・同じ基準価格（price − diff）・同じ hv の別の価格のもの（`*_new_stale`、新系の版の遅れ・書き換え途中の版）。新系の版の遅れ（新系の T が直前と同じ中身）は 1 日に表ごと 3 行までなら説明済み、超えたらその形の行を全部 `unexplained` に数える（新系が系統的に古い版を返す不具合を捕まえる。2026-10-13 08:52 JST〜10-14 01:08 JST は spot 2 行・future 2 行で、上限 3 はそれに余裕を持たせた値）。書き換え途中の版は、旧系の版を新系も T の後 5 分の中で取っていれば裏付けあり。裏付けが無いもの（新系の価格の持ち越しの誤りと区別できない）は 1 日に表ごと 3 行までなら説明済み、超えたらその表の裏付けの無い行を全部 `unexplained` に数える（系統的な持ち越しの不具合は 1 日に多数出るので捕まえる。2026-10-13 は future 1 行で、上限 3 はそれに余裕を持たせた値）、旧系が新系の T より古い版・途中の版を読んだ（`*_legacy_older`、#61。下）、年の補完の修正（`future_contract_year`・`option_quotation_year`）、2 限月ページの版（`option_page2`。新系の T にも行があるときだけ）、新系のみ（`new_only_snapshots`、保存条件の差）。`unexplained` = 旧系のみ（新系の取りこぼし）+ 各表の説明できない行（約定の列がどの候補とも合わないなど）。例は `unexplained_samples`（先頭 20 件）
 - `*_legacy_older`（#61）: 上のどれにも当たらない行のうち、次をすべて満たすもの。(1) 新系の T が旧系の行から進んでいる（spot・future は約定時刻が後、option は出来高が多く約定時刻が同じか後）。(2) 旧系の行が新系の T より前の版と合う: (a) T の 10 分前〜T の前のスナップショットの同じ行と一致（spot・future は全列、option は約定の列。気配と表示の列は問わない）= 旧系が古い版を読んだ、または (b) 新系の連続する 2 スナップショット S1 < S2（S1 は T の 10 分前以降、S2 ≤ T）の版の間 = 途中に出た版を旧系だけが読んだ。(b) は option なら出来高が S1 < 旧 < S2（狭い不等号）・約定時刻が S1 ≤ 旧 ≤ S2・基準価格（price − diff）と清算値・清算日が S1 か S2 と同じ・建玉が S1 と S2 の間。spot・future は出来高が無いので約定時刻が S1 < 旧 < S2・基準価格と hv が S1 か S2 と同じ（future は限月も）。(3) 新系の T の値の裏付け: 旧系の次のスナップショットの同じ行が新系の T と同じ値（spot・future は全列、option は約定の列）。または (a) と S2 < T の (b) に限り、新系の直後のスナップショットの同じ行が同じ値。新系の直後は新系自身の読み取りで独立ではない（同じ誤りが直後まで続けば満たす）ので、S2 = T の (b) には使わない。比べる相手が無ければ説明しない。(4) 旧系の次に同じ行があれば新系の T と矛盾しない（option は出来高・約定時刻が新系の T 以上、spot・future は約定時刻が新系の T 以後）。10 分は 2026-10-13 の実データで見た最も古い版（2 分前）に余裕を持たせた上限。限界: 新系の T の誤りが直後のスナップショットにも続き、旧系の次がそれと矛盾しない形は (a) と S2 < T の (b) で説明済みになりうる。また旧系の行が新系の直後と一致すると `version` になるので、新系の T だけが 1 回誤り旧系が正しい値を読んだ形は検出できない（#61 の前からの `version` の性質）。`tests/test_sql_bq.py` で検出できる形・できない形を確かめている
 - 2026-10-13 09:32〜11:58 JST の実データ（旧系 103 スナップショット）で手元で再現した分類: spot 一致 35・版の差 66・新系の版の遅れ 2、future 一致 34・版の差 67・新系の版の遅れ 2、option 一致 97,107・版の差 227・気配と表示だけの差 13,596、説明できない差分 0
@@ -1235,7 +1264,7 @@ done   # 東京 3 本・US 1 本（#49 の後は東京に atm-hourly（22:40）�
 ```sh
 bq query --location=$L --use_legacy_sql=false --format=pretty '
 SELECT window_date, snapshots, violations, rowcount_mismatch, missing_table, dup_keys, months_not_2, atm_not_1,
-  price_time_future, price_time_too_old, sunday, orphan_rows
+  price_time_future, price_time_too_old, sunday, body_frozen, orphan_rows
 FROM optionchan_tokyo.quality_daily ORDER BY window_date DESC LIMIT 7'
 bq query --location=$L --use_legacy_sql=false --format=pretty '
 SELECT compare_date, copy_complete, legacy_snapshots, new_snapshots, new_only_snapshots, legacy_only_snapshots,
@@ -1279,6 +1308,7 @@ bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json \
 - `rowcount_mismatch` / `missing_table`: 書き込みの途中失敗が最新版に入った可能性。`ingest_runs` と各テーブルを `ingest_run_id` ごとに数えて差のある実行を探し、生 HTML から「再処理ジョブ」で作り直す（新しい `ingest_run_id` が最新版になる）
 - `dup_keys` / `months_not_2` / `atm_not_1`: パーサーか JPX のページの変化。取り込み時の構造の検査（`parse_failed`）をすり抜けたので、パーサーを直す PR（`PARSER_VERSION` を上げる）→ 再処理
 - `price_time_*` / `sunday`: 約定日時の年・日付の補完（`price_time_raw` と比べる）。祝日取引の日付は違反にしていない。JPX の表示の変化ならパーサーを直す
+- `body_frozen`（#88）: JPX が本文の止まったページを返した（「JPX の接続・取り直し・本文の凍結（#88）」の「`body_frozen` を受けたら」）。時間帯は窓の `option_price_latest` を本文の列でスナップショットごとにまとめ、直前と同じものを並べて探す（`created_at` で窓に絞る。1 日 数百 MB）。データは直せないので、その日は違反のまま記録を残す（品質チェックの定義の誤りでなければ再実行しない）。過去の日（2026-10-14 など）を再実行すると違反として記録されるので、#88 より前の日は再実行しない。#88 を戻すとき、`quality_daily` の `body_frozen` 列と品質チェックの SQL は戻さない（テーブルは削除保護つきで列を消せず、SQL だけ戻すと INSERT の列数が合わずに品質チェックが毎日失敗する）。誤検知なら、違反の合計から `body_frozen` を外す PR にする
 - 誤検知（品質チェックの定義の誤り）なら、`sql/quality/quality_daily.sql` と `tests/test_sql_bq.py` を直す PR
 
 結果を #11 にコメントする（項目と件数、原因の分類）。
@@ -1328,6 +1358,7 @@ bq ls --transfer_run --run_attempt=LATEST --max_results=1 --format=json "$(tc le
 ### #11 の判定に使う数
 
 - **連続 10 営業日（AC 5）**: `legacy_snapshots > 0` の日を営業日として、`unexplained = 0`（かつ `copy_complete`）の日が途切れずに 10 日続いたら満たす。「説明できない差分」の定義は行単位（上の「突き合わせの分類」。#11 にコメントで明記）。突き合わせのデプロイ後の日から数える（#11）。行の無い営業日（実行が無かった日）は「再実行」で埋めてから数える
+  - **#88 の対策（JPX の接続を要求ごとに張り直す・5xx 等の取り直し・本文の凍結の検知。「JPX の接続・取り直し・本文の凍結（#88）」）のデプロイ後の最初の営業日から数え直す**（下の `WHERE` に `compare_date >= '<デプロイ後の最初の営業日>'` を足す）。それより前の日は、2026-10-14 の本文の凍結（unexplained 190。本物の欠損なので説明済みにしない）と 04:00 JST の 502 の取りこぼし（2026-10-15 の `legacy_only` 1）の原因が残っていた期間として、数に入れない。数え直した後も、`quality_daily` の `body_frozen` が 1 以上の日はその日の `unexplained` の原因として #11 に記録する
 
   ```sh
   bq query --location=$L --use_legacy_sql=false --format=pretty '

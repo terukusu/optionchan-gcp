@@ -121,3 +121,10 @@ def session_at(now: datetime, cal: Calendar) -> Session | None:
         if start <= now <= end + cal.grace:
             return Session(NIGHT, d, start, end)
     return None
+
+
+def in_session(t: datetime, cal: Calendar) -> bool:
+    """t（ページの更新時刻など）が立会の時間 [開始, 終了) の中か（余裕の時間帯・終了時刻は含めない）。
+    本文の凍結の判定（#88、snapshot.BodyWatch）が使う。寄り前・引け後のページは本文が動かないので数えない"""
+    session = session_at(t, cal)
+    return session is not None and session.start <= _jst(t) < session.end

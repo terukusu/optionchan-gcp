@@ -93,12 +93,18 @@
     "name": "violations",
     "type": "INTEGER",
     "mode": "REQUIRED",
-    "description": "違反の合計（orphan_rows を除く）。1 以上なら定期クエリは記録の後に ERROR() で失敗する"
+    "description": "違反の合計（orphan_rows を除く。body_frozen を含む）。1 以上なら定期クエリは記録の後に ERROR() で失敗する"
   },
   {
     "name": "checked_at",
     "type": "TIMESTAMP",
     "mode": "REQUIRED",
     "description": "検査した時刻"
+  },
+  {
+    "name": "body_frozen",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "違反（#88）: 取引時間中（ページの更新時刻が立会の [開始, 終了)）に、option の本文（約定・気配・建玉の列）が直前のスナップショットと同じことが 3 回以上続いたスナップショットの数（ヘッダの更新時刻だけ進み本文が止まった形）。#88 より前の行は NULL"
   }
 ]

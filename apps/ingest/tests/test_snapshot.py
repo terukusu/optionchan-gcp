@@ -2,6 +2,7 @@ import gzip
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
+from calgen import CAL
 from conftest import read_fixture
 from htmlgen import page_html
 
@@ -10,12 +11,15 @@ from optionchan_ingest.bq_proto import load_schema
 from optionchan_ingest.calendar import DAY, NIGHT, Session
 from optionchan_ingest.parser import jst, parse_page
 from optionchan_ingest.snapshot import (
+    OPTION_BODY_COLUMNS,
+    BodyWatch,
     FetchedPage,
     RunMeta,
     build_rows,
     decode_raw,
     encode_raw,
     is_stale,
+    option_body_hash,
     raw_object_name,
     unavailable_window,
     validate_rows,
@@ -261,3 +265,93 @@ def test_unavailable_window_agrees_with_is_stale():
 def test_unavailable_window_requires_aware():
     with pytest.raises(ValueError):
         unavailable_window(datetime(2026, 10, 14, 11, 0), DAY_SESSION)
+
+
+# --- 本文の凍結（#88） ---
+
+
+def option_rows():
+    p1, p2 = pages()
+    return build_rows(p1, p2, RUN)["option_price"]
+
+
+def test_option_body_columns_are_option_price_columns():
+    names = {c["name"] for c in load_schema(settings.DEFAULT_SCHEMA_DIR, "option_price")}
+    assert set(OPTION_BODY_COLUMNS) <= names
+
+
+def test_option_body_hash_ignores_order_and_non_body_columns():
+    rows = option_rows()
+    h = option_body_hash(rows)
+    assert option_body_hash(list(reversed(rows))) == h
+    changed = [dict(r) for r in rows]
+    for r in changed:
+        r.update(iv=1.0, delta=0.1, bid_iv=2.0, created_at=None, ingest_run_id="other", is_atm=not r["is_atm"])
+    assert option_body_hash(changed) == h
+
+
+@pytest.mark.parametrize("column", OPTION_BODY_COLUMNS[3:])
+def test_option_body_hash_changes_with_body(column):
+    rows = option_rows()
+    changed = [dict(r) for r in rows]
+    changed[3][column] = None if changed[3][column] is not None else 1
+    assert option_body_hash(changed) != option_body_hash(rows)
+
+
+def watch_minutes(times, hashes):
+    watch = BodyWatch()
+    return [watch.observe(t, h, CAL) for t, h in zip(times, hashes, strict=True)]
+
+
+def minutes(start, n):
+    return [start + timedelta(minutes=i) for i in range(n)]
+
+
+N = settings.BODY_FROZEN_REPEATS
+
+
+def test_body_watch_counts_repeats_in_session():
+    """取引時間中に本文が N 分同じなら N に達し、N − 1 分なら達しない"""
+    day = jst(2026, 10, 14, 10, 0)
+    assert watch_minutes(minutes(day, N + 1), ["a"] * (N + 1)) == list(range(N + 1))
+    assert max(watch_minutes(minutes(day, N), ["a"] * N)) == N - 1
+    night = jst(2026, 10, 14, 18, 52)  # 2026-10-14 の凍結と同じ時間帯（夜間）
+    assert watch_minutes(minutes(night, 37), ["x"] * 37)[-1] == 36
+
+
+def test_body_watch_resets_on_change():
+    t = minutes(jst(2026, 10, 14, 10, 0), 6)
+    assert watch_minutes(t, ["a", "a", "a", "b", "b", "b"]) == [0, 1, 2, 0, 1, 2]
+
+
+@pytest.mark.parametrize(
+    "start",
+    [
+        jst(2026, 10, 14, 8, 31),  # 日中の寄り前（〜08:44）
+        jst(2026, 10, 14, 15, 45),  # 日中の引け後（15:45〜）
+        jst(2026, 10, 14, 16, 46),  # 夜間の寄り前（〜16:59）
+        jst(2026, 10, 15, 6, 0),  # 夜間の引け後（06:00〜）
+    ],
+)
+def test_body_watch_ignores_outside_session(start):
+    """寄り前・引け後は本文が止まっていても数えない（2026-10-13〜10-15 の寄り前は最長 5 分、引け後は 13 分）"""
+    assert set(watch_minutes(minutes(start, 14), ["a"] * 14)) == {0}
+
+
+def test_body_watch_crossing_open_counts_from_open():
+    """寄り前から同じ本文が続いても、数えるのは開始後の 2 つ目のスナップショットから"""
+    t = minutes(jst(2026, 10, 14, 8, 42), 6)  # 08:42〜08:47
+    assert watch_minutes(t, ["a"] * 6) == [0, 0, 0, 0, 1, 2]
+
+
+def test_body_watch_ignores_not_advanced_snapshot():
+    watch = BodyWatch()
+    t = jst(2026, 10, 14, 10, 0)
+    assert [watch.observe(t + timedelta(minutes=i), "a", CAL) for i in range(3)] == [0, 1, 2]
+    assert watch.observe(t, "b", CAL) == 2  # 古いスナップショットは無視
+    assert watch.since == t
+
+
+def test_body_watch_rejects_naive():
+    with pytest.raises(ValueError):
+        BodyWatch().observe(datetime(2026, 10, 14, 10, 0), "a", CAL)
