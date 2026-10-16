@@ -48,6 +48,26 @@ def parse_tf(raw: str | None) -> str:
     return raw
 
 
+def parse_iv(raw: str | None, tf: str) -> str:
+    """/atm_iv_bars の iv（#93）。省略は trade。mid は分足（1 時間未満の足）だけ（1 時間足 atm_iv に mid は無い）"""
+    if raw is None:
+        return st.IV_DEFAULT
+    if raw not in st.IV_KINDS:
+        raise BadRequest("iv")
+    if raw == "mid" and st.TIMEFRAMES[tf] >= 3600:
+        raise BadRequest("iv")
+    return raw
+
+
+def parse_dir(raw: str | None) -> bool:
+    """/smile_snapshot の dir（#80）。省略は at 以前で最新（False）、next は at 以後で最初（True）"""
+    if raw is None:
+        return False
+    if raw != "next":
+        raise BadRequest("dir")
+    return True
+
+
 def parse_range(raw_start: str | None, raw_end: str | None, tf: str, now: datetime):
     """/atm_iv_bars の start・end（UTC の UNIX 秒、#77）→ (start, end)（aware な UTC）。両方省くと None（既定の範囲）。
     end は now を超えたら now に縮める。片方だけ・形が不正・start >= end・1 回の最大を超える・遡れる上限より前は
@@ -128,15 +148,24 @@ def smile_data(runner, now: datetime) -> str:
     return csvfmt.smile_csv(snapshot_at, atm, rows)
 
 
-def smile_snapshot(runner, at: datetime) -> str:
+def smile_snapshot(runner, at: datetime, nxt: bool = False) -> str:
     """/smile_snapshot（#79）: at 以前 SEARCH_DAYS 日（[at − 14 日, at]。at ちょうどを含む）で最新の完了した
     スナップショットの 1 時点を、限月 × 行使価格 × call / put の縦持ちの CSV にする（csvfmt.snapshot_csv）。
+    nxt（dir=next、#80）なら at 以後 SEARCH_DAYS 日（[at, at + 14 日)）で最初のもの。無ければ（at が最新より後）
+    at 以前で最新のもの（画面は時刻が at より前なのを見て「これより新しいデータは無い」と分かる）。
+    取引の切れ目を「+」の 1 回で越える。
     スナップショットが無ければ空（/atm_iv_bars の「行が無ければ空の 200」と同じ。5xx と区別できる）"""
     at = _utc(at)
-    # latest_runs は [start, end) なので、at ちょうどのスナップショットを含めるために 1 秒足す（snapshot_at は分の頭）
-    [row] = runner("latest_snapshot", {"start_at": at - timedelta(days=st.SEARCH_DAYS),
-                                       "end_at": at + timedelta(seconds=1)})
-    snapshot_at = row["snapshot_at"]
+    snapshot_at = None
+    if nxt:
+        [row] = runner("next_snapshot", {"start_at": at, "end_at": at + timedelta(days=st.SEARCH_DAYS)})
+        snapshot_at = row["snapshot_at"]
+    if snapshot_at is None:
+        # latest_runs は [start, end) なので、at ちょうどのスナップショットを含めるために 1 秒足す
+        # （snapshot_at は分の頭）
+        [row] = runner("latest_snapshot", {"start_at": at - timedelta(days=st.SEARCH_DAYS),
+                                           "end_at": at + timedelta(seconds=1)})
+        snapshot_at = row["snapshot_at"]
     if snapshot_at is None:
         return ""
     rows = runner("smile_snapshot", {"start_at": snapshot_at, "end_at": snapshot_at + timedelta(seconds=1)})
@@ -178,10 +207,11 @@ def atm_iv_data(runner, now: datetime, d: int, n: int) -> str:
     return csvfmt.atm_iv_csv(rows)
 
 
-def atm_iv_bars(runner, now: datetime, tf: str, n: int, rng=None) -> tuple[str, datetime, datetime]:
+def atm_iv_bars(runner, now: datetime, tf: str, n: int, rng=None,
+                iv: str = st.IV_DEFAULT) -> tuple[str, datetime, datetime]:
     """/atm_iv_bars（#68・#77）: 足 tf の ATM IV の OHLC（/atm_iv_data と同じ CSV。値の無い足は除く）と、
     読んだ範囲 (start, end)。rng = parse_range の (start, end)（足の started_at が入る範囲。日足は取引日の 00:00 JST）。
-    None なら既定（settings.BARS_RANGE の既定の日数〜now）"""
+    None なら既定（settings.BARS_RANGE の既定の日数〜now）。iv = parse_iv の値（mid は分足だけ。#93）"""
     now = _utc(now)
     default_days = st.BARS_RANGE[tf][0]
     if st.TIMEFRAMES[tf] < 3600:
@@ -194,7 +224,7 @@ def atm_iv_bars(runner, now: datetime, tf: str, n: int, rng=None) -> tuple[str, 
             rng = utc_day(snapshot_at - timedelta(days=default_days)), now
         start, end = rng
         params = {"start_at": start, "end_at": end, "today": jst_date(now), "n": n}
-        rows = bars.drop_empty(runner("atm_iv_minute", params))
+        rows = bars.drop_empty(runner("atm_mid_minute" if iv == "mid" else "atm_iv_minute", params))
         if tf != "1m":
             rows = bars.resample(rows, st.TIMEFRAMES[tf])
     else:
