@@ -51,7 +51,28 @@ BARS_EPOCH = datetime(2010, 1, 1, tzinfo=UTC)  # start の下限（これより�
 # [start, end) に 00:00 JST が入る取引日を完全に作るため、1 時間足を start の 10 日前〜end の 1 日後まで読む
 DAILY_LOOKBEHIND_DAYS = 10
 HOLIDAYS_AHEAD_DAYS = 15  # 日足の取引日の判定に読む休業日の先（今日の夜間が属する休み明けの日まで。年末年始を含む）
+# /atm_iv_bars の n=roll（期近つなぎ、#101）: 取引日が期近の最終取引日の ROLL_BUSINESS_DAYS 営業日前に達したら
+# 2 限月へ乗り換える（残存営業日数 <= ROLL_BUSINESS_DAYS の取引日から。bars.roll）。日数は限月の間隔（約 20 営業日）より
+# 十分小さい値（0〜ROLL_BUSINESS_DAYS_MAX）にする
+N_ROLL = "roll"
+ROLL_BUSINESS_DAYS = 5
+ROLL_BUSINESS_DAYS_MAX = 10
+# n=roll で読む休業日の先（読んだ上端の JST の日付から。最後の取引日の後の ROLL_BUSINESS_DAYS + 1 営業日目まで数える。
+# 実カレンダー（2018〜2027）で足の日付から 11 営業日目までは最大 25 暦日（年末年始）。日足は上端が end + 1 日）
+ROLL_HOLIDAYS_AHEAD_DAYS = 40
 QUERY_TIMEOUT_SECONDS = 30  # BigQuery の結果を待つ上限（gunicorn の --timeout 60 より短く）
+
+
+def check_roll(n_days, ahead_days) -> None:
+    """n=roll の設定の検査（範囲外は ValueError。import 時に設定値で呼ぶ）。休業日は取引日の判定の分
+    （HOLIDAYS_AHEAD_DAYS）に加え、営業日 n_days + 1 日分を土日込みで数えられる日数（2 倍）だけ先まで読む"""
+    if isinstance(n_days, bool) or not isinstance(n_days, int) or not 0 <= n_days <= ROLL_BUSINESS_DAYS_MAX:
+        raise ValueError("ROLL_BUSINESS_DAYS は 0〜ROLL_BUSINESS_DAYS_MAX の整数")
+    if ahead_days < HOLIDAYS_AHEAD_DAYS + 2 * (n_days + 1):
+        raise ValueError("ROLL_HOLIDAYS_AHEAD_DAYS が足りない")
+
+
+check_roll(ROLL_BUSINESS_DAYS, ROLL_HOLIDAYS_AHEAD_DAYS)
 
 
 @dataclass(frozen=True)

@@ -51,3 +51,22 @@ def test_app_import_does_not_need_settings(monkeypatch):
     import optionchan_viewer.app as app_module
 
     assert callable(app_module.create_app)
+
+
+def test_roll_business_days():
+    # #101: 期近の最終取引日の 5 営業日前に乗り換える（設定で変えられる）
+    assert st.ROLL_BUSINESS_DAYS == 5
+    assert st.N_ROLL == "roll"
+    st.check_roll(st.ROLL_BUSINESS_DAYS, st.ROLL_HOLIDAYS_AHEAD_DAYS)
+
+
+@pytest.mark.parametrize("n_days,ahead_days", [(0, 40), (10, 40), (5, 40)])
+def test_check_roll_accepts(n_days, ahead_days):
+    st.check_roll(n_days, ahead_days)
+
+
+@pytest.mark.parametrize("n_days,ahead_days", [(-1, 40), (11, 40), (True, 40), (5.0, 40), ("5", 40), (10, 36)])
+def test_check_roll_rejects(n_days, ahead_days):
+    # 範囲外（import 時に例外になる値）
+    with pytest.raises(ValueError):
+        st.check_roll(n_days, ahead_days)

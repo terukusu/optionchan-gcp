@@ -97,6 +97,37 @@ def test_atm_iv_minute_same_rules_as_hourly():
     assert "ORDER BY started_at" in text
 
 
+def test_months_sql_same_rules_as_one_month():
+    # #101: 期近つなぎの全限月のクエリは、限月で絞らない（限月の列を足して限月ごとに束ねる）だけで、
+    # 読む表・列・OHLC の式は n=0/1 のクエリと同じ
+    hourly = (REPO_ROOT / "sql" / "ohlc" / "atm_hourly.sql").read_text(encoding="utf-8")
+    exprs = ("ARRAY_AGG(iv IGNORE NULLS ORDER BY created_at, target_price, iv)[SAFE_OFFSET(0)] AS open",
+             "MAX(iv) AS high", "MIN(iv) AS low",
+             "ARRAY_AGG(iv IGNORE NULLS ORDER BY created_at DESC, target_price DESC, iv DESC)[SAFE_OFFSET(0)] AS close")
+    for name, base in (("atm_iv_minute_months", "atm_iv_minute"), ("atm_mid_minute_months", "atm_mid_minute")):
+        text = SQL[name]
+        assert re.search(r"\n\s*WHERE is_atm AND type = 2\n", text)
+        for expr in exprs:
+            assert expr in text and expr in SQL[base], (name, expr)
+        assert "GROUP BY last_trading_day, started_at" in text
+        assert "ORDER BY started_at, last_trading_day" in text
+        assert "SAFE_OFFSET(@n)" not in text and "@today" not in text
+        assert not re.search(r"\bprice\b", body(text))
+        # 読む列（option_price_latest の SELECT）は n=0/1 のクエリと同じ
+        cols = re.compile(r"SELECT ([^\n]+)\n\s*FROM `\$\{project\}\.\$\{dataset\}\.option_price_latest`")
+        assert cols.search(text).group(1) == cols.search(SQL[base]).group(1), name
+    assert "IF(bid_iv > 0 AND ask_iv > 0, (bid_iv + ask_iv) / 2, NULL) AS iv" in SQL["atm_mid_minute_months"]
+    for expr in exprs:
+        assert expr.rsplit(" AS ", 1)[0] in hourly
+    # 1 時間足: bars の区間は sql/ohlc/atm_hourly.sql と一字一句同じ（tests/test_ohlc.py も検査）
+    text = SQL["atm_iv_months"]
+    block = text[text.index("\n-- bars:begin\n") + 1:text.index("\n-- bars:end\n") + 1]
+    assert block == hourly[hourly.index("\n-- bars:begin\n") + 1:hourly.index("\n-- bars:end\n") + 1]
+    assert "month AS" not in text and "@today" not in text and "@n" not in text
+    assert "ORDER BY started_at, last_trading_day" in text
+    assert "WHERE started_at >= @days_start AND started_at < @range_end\n" in text
+
+
 def test_trading_holidays_reads_latest_calendar():
     text = body(SQL["trading_holidays"])
     assert "`${project}.${dataset}.trading_calendar_latest`" in text

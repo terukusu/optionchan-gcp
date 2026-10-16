@@ -12,6 +12,9 @@
 // - IV は約定（既定）か mid（気配の中値。&iv=mid。#93）。mid は分足だけ（1 時間足・日足の集計に mid が無い）なので、
 //   mid のときは 1 時間・日足を選べなくし、1 時間・日足を見ているときに mid を選ぶと 15 分足に切り替える
 // - サーバーの 1 日のクエリ量の上限（#95）に達すると 429 が返る。そのときは上限に達したことを出す
+// - 限月の選択肢は static/atm_series.js の系列の表（AtmSeries.SERIES）から作る。「期近つなぎ」（n=roll。#101）は
+//   取引日ごとに期近の最終取引日の 5 営業日前で 2 限月へ乗り換えてつないだ足で、乗り換えた足に印（新しい限月）を付け、
+//   凡例にカーソルの足の限月を出す。CSV・束ね・つなぎ・印の純粋関数は atm_series.js
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
@@ -33,9 +36,12 @@ var MINUTE_BUDGET_DAYS = 24;  // 分足をこの画面で読む日数の合計�
 var EDGE_BARS = 10;  // 表示範囲の端と読み込んだ範囲の端の距離（本）がこれ未満なら追加で読む
 var DEBOUNCE_MS = 250;
 var RIGHT_OFFSET = 3;  // 最新の足の右の余白（本）
+var MARKER_COLOR = '#2962ff';  // 乗り換えの印（チャートの canvas に描く）
 
 var chart = null;
 var series = null;
+var markers = null;  // 乗り換えの印（createSeriesMarkers）
+var monthAt = new Map();  // チャートの time → その足の限月（期近つなぎのときだけ）
 var shown = [];  // 描いている足（UTC 秒の time）
 var currentTf = null;
 var shownTf = '1h';  // 描いている足（読み込み中は currentTf と違う）
@@ -43,7 +49,7 @@ var currentN = null;
 var shownN = null;
 var currentIv = 'trade';
 var shownIv = 'trade';
-var entries = {};  // "src|n|iv" → { bars, start, end, leftDone, rightDone, empty, note }
+var entries = {};  // "src|<系列の value>|iv" → { bars, start, end, leftDone, rightDone, empty, note }
 var inflight = null;  // { ctrl, gen, mode }
 var gen = 0;  // 足・限月を選び直すたびに増やす（古い応答を捨てる）
 var retry = null;  // 失敗した読み込みをやり直す関数
@@ -81,60 +87,13 @@ function showLegend(bar) {
     el('legend').textContent = '';
     return;
   }
+  var month = monthAt.get(bar.time);
   el('legend').textContent = (shownIv === 'mid' ? 'mid  ' : '') + formatTime(bar.time) + '  O ' + bar.open.toFixed(2) + '  H ' + bar.high.toFixed(2) +
-    '  L ' + bar.low.toFixed(2) + '  C ' + bar.close.toFixed(2);
+    '  L ' + bar.low.toFixed(2) + '  C ' + bar.close.toFixed(2) + (month ? '  ' + AtmSeries.monthLegend(month) : '');
 }
 
 function toChart(bar) {
   return { time: bar.time + JST_OFFSET, open: bar.open, high: bar.high, low: bar.low, close: bar.close };
-}
-
-function parseCsv(text) {
-  var out = [];
-  var lines = text.split('\n');
-  for (var i = 0; i < lines.length; i++) {
-    var cells = lines[i].split(',');
-    if (cells.length < 5 || cells[1] === '') {
-      continue;
-    }
-    out.push({
-      // started_at は "YYYY-MM-DD HH:MM:SS+00:00"。ISO 8601 の形にしてから読む
-      time: Date.parse(cells[4].replace(' ', 'T')) / 1000,
-      open: Number(cells[0]),
-      high: Number(cells[1]),
-      low: Number(cells[2]),
-      close: Number(cells[3]),
-    });
-  }
-  return out;
-}
-
-// 時刻順の 2 つの足の列をつなぐ（同じ時刻は b を使う）
-function mergeBars(a, b) {
-  var map = new Map();
-  a.forEach(function(x) { map.set(x.time, x); });
-  b.forEach(function(x) { map.set(x.time, x); });
-  return Array.from(map.values()).sort(function(x, y) { return x.time - y.time; });
-}
-
-// 1 分足を seconds 秒の足に束ねる（サーバーの bars.resample と同じ: UNIX 秒で区切る。open / close = 最初 / 最後）
-function resample(bars, seconds) {
-  if (seconds === 60) {
-    return bars;
-  }
-  var out = [];
-  bars.forEach(function(b) {
-    var t = Math.floor(b.time / seconds) * seconds;
-    var last = out[out.length - 1];
-    if (last && last.time === t) {
-      last.high = Math.max(last.high, b.high);
-      last.low = Math.min(last.low, b.low);
-      last.close = b.close;
-    } else {
-      out.push({ time: t, open: b.open, high: b.high, low: b.low, close: b.close });
-    }
-  });
-  return out;
 }
 
 function entryKey(tf, n, iv) {
@@ -184,7 +143,24 @@ function note(text) {
 // ---- 描画 ----
 
 function displayBars(entry) {
-  return entry ? resample(entry.bars, TF[currentTf].seconds) : [];
+  return entry ? AtmSeries.resample(entry.bars, TF[currentTf].seconds) : [];
+}
+
+// 期近つなぎの乗り換えの印と凡例の限月。印は描く足の全体（左・右に読み足してつないだ後）から作り直す
+function renderMonths() {
+  monthAt = new Map();
+  if (!AtmSeries.seriesOf(shownN).months) {
+    markers.setMarkers([]);
+    return;
+  }
+  shown.forEach(function(b) {
+    if (b.month !== undefined) {
+      monthAt.set(b.time + JST_OFFSET, b.month);
+    }
+  });
+  markers.setMarkers(AtmSeries.rollMarkers(shown).map(function(m) {
+    return { time: m.time + JST_OFFSET, position: 'aboveBar', shape: 'arrowDown', color: MARKER_COLOR, text: m.text };
+  }));
 }
 
 // 表示している時間の範囲（UTC 秒）。atRight は最新の足が見えているか
@@ -245,6 +221,7 @@ function render(view, keep) {
   shownIv = currentIv;
   chart.applyOptions({ timeScale: { timeVisible: currentTf !== '1d' } });
   series.setData(shown.map(toChart));
+  renderMonths();
   if (lr && oldFirst !== null) {
     var shift = 0;
     while (shift < shown.length && shown[shift].time < oldFirst) {
@@ -267,17 +244,6 @@ function render(view, keep) {
 
 // ---- 読み込み ----
 
-function barsUrl(src, n, iv, start, end) {
-  var url = '/atm_iv_bars?tf=' + encodeURIComponent(src) + '&n=' + encodeURIComponent(n);
-  if (iv === 'mid') {
-    url += '&iv=mid';
-  }
-  if (start !== null) {
-    url += '&start=' + start + '&end=' + end;
-  }
-  return url;
-}
-
 // /atm_iv_bars を読む。成功で onData(bars, start, end)、失敗で onFail(message)。中断（新しい選択）なら何もしない
 function request(mode, src, n, iv, start, end, onData, onFail) {
   if (inflight) {
@@ -291,14 +257,14 @@ function request(mode, src, n, iv, start, end, onData, onFail) {
   if (src === '1m' && start !== null) {
     minuteDays += (end - start) / DAY;
   }
-  fetch(barsUrl(src, n, iv, start, end), { signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' })
+  fetch(AtmSeries.barsUrl(AtmSeries.seriesOf(n), src, iv, start, end), { signal: ctrl.signal, cache: 'no-store', credentials: 'same-origin' })
     .then(function(res) {
       if (!res.ok) {
         throw new Error('HTTP ' + res.status);
       }
       return res.text().then(function(text) {
         return {
-          bars: parseCsv(text),
+          bars: AtmSeries.parseCsv(text),
           start: Number(res.headers.get('X-Bars-Start')),
           end: Number(res.headers.get('X-Bars-End')),
         };
@@ -378,6 +344,7 @@ function select(view, first) {
   if (conf.src === '1m' && start !== null && minuteDays + (end - start) / DAY > MINUTE_BUDGET_DAYS) {
     shown = [];
     series.setData([]);
+    renderMonths();
     showLegend(undefined);
     note('分足の読み込みの上限（この画面で ' + MINUTE_BUDGET_DAYS + ' 日分）に達しました。ページを読み直してください');
     return;
@@ -401,6 +368,7 @@ function select(view, first) {
     }
     shown = [];
     series.setData([]);
+    renderMonths();
     showLegend(undefined);
     note('');
     showError(failText(reason), function() { select(view, first); }, true);
@@ -482,7 +450,7 @@ function loadMore(entry, side) {
     if (entries[key] !== entry) {
       return;
     }
-    entry.bars = mergeBars(entry.bars, bars);
+    entry.bars = AtmSeries.mergeBars(entry.bars, bars);
     if (side === 'left') {
       entry.start = Math.min(entry.start, s);
       entry.empty = bars.length ? 0 : entry.empty + 1;
@@ -519,6 +487,7 @@ function createChart() {
   series = chart.addSeries(LightweightCharts.CandlestickSeries, {
     priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
   });
+  markers = LightweightCharts.createSeriesMarkers(series, []);
   chart.subscribeCrosshairMove(function(param) {
     var bar = param.time !== undefined ? param.seriesData.get(series) : null;
     showLegend(bar || (shown.length ? toChart(shown[shown.length - 1]) : undefined));
@@ -530,6 +499,18 @@ function createChart() {
 
 // ライセンス（Apache-2.0）の帰属表記のリンク。テンプレートに外部の URL を書かないため、ここで設定する
 el('attribution-link').href = 'https://www.tradingview.com/';
+
+// 限月の選択肢を系列の表から作る（選択肢の定義は atm_series.js の SERIES だけ）
+function fillSeriesOptions() {
+  var select = el('nmonth');
+  AtmSeries.SERIES.forEach(function(s) {
+    var o = document.createElement('option');
+    o.value = s.value;
+    o.textContent = s.label;
+    select.appendChild(o);
+  });
+  select.value = AtmSeries.DEFAULT_SERIES;
+}
 
 function onSelect() {
   select(visibleTimeRange());
@@ -567,6 +548,7 @@ el('chart-retry').addEventListener('click', function() {
   }
 });
 
+fillSeriesOptions();
 createChart();
 var initialNote = fixTf();
 updateTfOptions();

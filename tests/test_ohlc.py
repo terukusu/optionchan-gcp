@@ -16,6 +16,7 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
 SQL_DIR = os.path.join(ROOT, 'sql', 'ohlc')
 SQ_TF = os.path.join(ROOT, 'infra', 'prod', 'sq.tf')
 VIEWER_ATM_IV = os.path.join(ROOT, 'apps', 'viewer', 'src', 'optionchan_viewer', 'sql', 'atm_iv.sql')
+VIEWER_ATM_IV_MONTHS = os.path.join(ROOT, 'apps', 'viewer', 'src', 'optionchan_viewer', 'sql', 'atm_iv_months.sql')
 TABLES = ('atm_iv', 'atm_option_price', 'atm_target_price')
 # SQL → 置換する名前（atm_hourly は Terraform、他は runbook の render が入れる）
 NAMES = {
@@ -146,6 +147,9 @@ def test_bars_identical():
     # ビューアー（#52）の /atm_iv_data が「まだ 1 時間足になっていない分」を補う計算も同じ
     viewer = between(read(VIEWER_ATM_IV), '-- bars:begin', '-- bars:end')
     assert hourly.rstrip().rstrip(',') == viewer.rstrip().rstrip(',')
+    # 期近つなぎ（#101）の全限月の 1 時間足も同じ
+    months = between(read(VIEWER_ATM_IV_MONTHS), '-- bars:begin', '-- bars:end')
+    assert hourly.rstrip().rstrip(',') == months.rstrip().rstrip(',')
     # 旧系の insert_ohlc と同じ意味: ATM の put、UTC の正時、3600、open は昇順・close は降順の最初の NULL でない値
     assert 'TIMESTAMP_TRUNC(created_at, HOUR) AS started_at' in hourly
     assert '3600 AS time_frame' in hourly

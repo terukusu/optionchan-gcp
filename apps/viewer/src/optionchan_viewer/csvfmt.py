@@ -19,6 +19,8 @@ SMILE_COLUMNS = (
     "o2_put_price_time",
 )
 ATM_IV_COLUMNS = ("open", "high", "low", "close", "started_at")
+# /atm_iv_bars?n=roll（期近つなぎ、#101）: 6 列目にその足の限月（最終取引日）
+ATM_IV_MONTHS_COLUMNS = (*ATM_IV_COLUMNS, "last_trading_day")
 # /smile_snapshot（#79）: 2 行目以降の列（縦持ち。1 行 = 限月 × 行使価格 × call / put。smile.snapshot_rows の行）
 SNAPSHOT_COLUMNS = (
     "month",
@@ -69,6 +71,11 @@ def smile_csv(snapshot_at: datetime, atm_target_price: int, rows: list[dict]) ->
 def atm_iv_csv(rows: list[dict]) -> str:
     """ヘッダ・メタ行なし、ATM_IV_COLUMNS（started_at 昇順）"""
     return "".join(line([r[c] for c in ATM_IV_COLUMNS]) for r in rows)
+
+
+def atm_iv_months_csv(rows: list[dict]) -> str:
+    """/atm_iv_bars?n=roll（#101）: ヘッダなし、ATM_IV_MONTHS_COLUMNS（atm_iv_csv の 5 列 + 限月。started_at 昇順）"""
+    return "".join(line([r[c] for c in ATM_IV_MONTHS_COLUMNS]) for r in rows)
 
 
 def snapshot_csv(snapshot_at: datetime, months: dict, rows: list[dict]) -> str:

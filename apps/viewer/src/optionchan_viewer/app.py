@@ -2,7 +2,8 @@
 /atm_iv_bars）。
 
 /smile_data・/atm_iv_data の URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。/atm_iv_bars は /atm_iv の足の
-切り替え・表示範囲に応じた読み込み用（#68・#77。CSV は /atm_iv_data と同じ列。期間は start・end）。
+切り替え・表示範囲に応じた読み込み用（#68・#77。CSV は /atm_iv_data と同じ列。期間は start・end。n=roll（期近つなぎ、
+#101）は 6 列目に限月）。
 /smile_snapshot は /smile の時点の移動用（#79。at 以前で最新のスナップショットの 1 時点。dir=next は at 以後で最初
 （#80）。曲線の列は smile.py）。
 1 日のクエリ量はプロセスごとに数え、上限を超えたら 429（#95。budget.py）。
@@ -136,9 +137,9 @@ def create_app(runner=None, clock=None, daily=None) -> Flask:
         # 読んだ範囲（UTC の UNIX 秒）を応答のヘッダで返す。画面はこれで取得済みの範囲を覚え、
         # 表示範囲の外だけを取りに来る（#77）
         def produce():
-            # 検証を先に（tf → n → iv → start・end。不正なら BigQuery を呼ばない）
+            # 検証を先に（tf → n → iv → start・end。不正なら BigQuery を呼ばない）。n は roll（期近つなぎ、#101）も
             tf = api.parse_tf(request.args.get("tf"))
-            n = api.parse_n(request.args.get("n"))
+            n = api.parse_bars_n(request.args.get("n"))
             iv = api.parse_iv(request.args.get("iv"), tf)
             now = clock()
             rng = api.parse_range(request.args.get("start"), request.args.get("end"), tf, now)

@@ -1,6 +1,7 @@
 """Flask のルート・パラメータの検証・期間・エラーの検査（#52 AC 2・3）。BigQuery は偽の runner に差し替える。"""
 
 import json
+import re
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -719,3 +720,235 @@ def test_favicon(make):
     for path in ("/", "/smile", "/atm_iv"):
         assert '<link rel="icon" href="/static/favicon.svg"' in client.get(path).get_data(as_text=True)
     assert runner.calls == []
+
+
+# ---- /atm_iv_bars?n=roll（期近つなぎ、#101） ----
+
+OCT, NOV, DEC = date(2026, 10, 8), date(2026, 11, 12), date(2026, 12, 10)
+YMD = r"\d{4}-\d{2}-\d{2}"
+
+
+def with_month(rows, month, shift=0.0):
+    """限月付きの行（sql/*_months.sql の形）。shift で限月ごとに値を変える（混ざったら値で分かる）"""
+    return [{**r, **({} if r["high"] is None else {k: r[k] + shift for k in ("open", "high", "low", "close")}),
+             "last_trading_day": month} for r in rows]
+
+
+def roll_results():
+    results = bars_results()
+    results["atm_iv_minute_months"] = sorted(
+        with_month(results["atm_iv_minute"], NOV) + with_month(results["atm_iv_minute"], DEC, 30.0),
+        key=lambda r: (r["started_at"], r["last_trading_day"]))
+    results["atm_mid_minute_months"] = with_month(mid_results()["atm_mid_minute"], NOV)
+    results["atm_iv_months"] = sorted(
+        with_month(results["atm_iv"], NOV) + with_month(results["atm_iv"], DEC, 30.0),
+        key=lambda r: (r["started_at"], r["last_trading_day"]))
+    return results
+
+
+@pytest.mark.parametrize("tf,names,count", [
+    ("1m", ["latest_snapshot", "atm_iv_minute_months", "trading_holidays"], 3),
+    ("5m", ["latest_snapshot", "atm_iv_minute_months", "trading_holidays"], 2),
+    ("15m", ["latest_snapshot", "atm_iv_minute_months", "trading_holidays"], 1),
+    ("1h", ["atm_iv_meta", "atm_iv_months", "trading_holidays"], 4),
+    ("1d", ["atm_iv_meta", "atm_iv_months", "trading_holidays"], 2),
+])
+def test_atm_iv_bars_roll_each_tf(make, tf, names, count):
+    client, runner = make(roll_results())
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=roll")
+    assert res.status_code == 200
+    lines = res.get_data(as_text=True).splitlines()
+    assert len(lines) == count
+    assert all(len(line.split(",")) == 6 and re.fullmatch(YMD, line.split(",")[5]) for line in lines)
+    times = [line.split(",")[4] for line in lines]
+    assert times == sorted(set(times))
+    # 期近（11 月限）の値だけ（12 月限は +30）
+    assert all(line.split(",")[5] == "2026-11-12" and float(line.split(",")[1]) < 40 for line in lines)
+    assert [name for name, _ in runner.calls] == names
+    # 期間・既定の範囲のヘッダは n=0 と同じ
+    runner.calls.clear()
+    zero = client.get(f"/atm_iv_bars?tf={tf}&n=0")
+    assert (res.headers["X-Bars-Start"], res.headers["X-Bars-End"]) == (zero.headers["X-Bars-Start"],
+                                                                         zero.headers["X-Bars-End"])
+
+
+@pytest.mark.parametrize("tf", ["1m", "5m", "15m", "1h", "1d"])
+@pytest.mark.parametrize("n", ["0", "1"])
+def test_atm_iv_bars_n01_stays_five_columns(make, tf, n):
+    client, _ = make(roll_results())
+    lines = client.get(f"/atm_iv_bars?tf={tf}&n={n}").get_data(as_text=True).splitlines()
+    assert lines and all(len(line.split(",")) == 5 for line in lines)
+
+
+def test_atm_iv_bars_roll_params(make):
+    client, runner = make(roll_results())
+    # 分足: 範囲は n=0 と同じ、全限月のクエリは start_at・end_at だけ
+    client.get(f"/atm_iv_bars?tf=5m&n=roll&start={ep(utc(10))}&end={ep(utc(13))}")
+    assert runner.calls[0] == ("atm_iv_minute_months", {"start_at": utc(10), "end_at": utc(13)})
+    assert runner.calls[1] == ("trading_holidays", {"start_date": date(2026, 10, 9), "end_date": date(2026, 11, 22)})
+    # 1h: hourly_params の補う分・期間の値だけ
+    runner.calls.clear()
+    client.get(f"/atm_iv_bars?tf=1h&n=roll&start={ep(utc(12))}&end={ep(NOW)}")
+    assert runner.calls[1] == ("atm_iv_months", {"fill_start": utc(12, 22), "fill_end": NOW, "days_start": utc(12),
+                                                 "range_end": NOW})
+    # 1d: _daily_bars と同じ読み方（start の 10 日前〜min(end + 1 日, now)）
+    runner.calls.clear()
+    client.get(f"/atm_iv_bars?tf=1d&n=roll&start={ep(utc(8))}&end={ep(utc(10))}")
+    assert runner.calls[1][1]["days_start"] == utc(28, month=9) and runner.calls[1][1]["range_end"] == utc(11)
+    assert runner.calls[2] == ("trading_holidays", {"start_date": date(2026, 9, 27), "end_date": date(2026, 11, 20)})
+
+
+@pytest.mark.parametrize("tf", ["1m", "5m", "15m"])
+def test_atm_iv_bars_roll_mid(make, tf):
+    client, runner = make(roll_results())
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=roll&iv=mid")
+    assert res.status_code == 200
+    lines = res.get_data(as_text=True).splitlines()
+    assert lines and all(len(line.split(",")) == 6 for line in lines)
+    assert [name for name, _ in runner.calls] == ["latest_snapshot", "atm_mid_minute_months", "trading_holidays"]
+
+
+@pytest.mark.parametrize("path", [
+    "/atm_iv_bars?tf=1h&n=roll&iv=mid", "/atm_iv_bars?tf=1d&n=roll&iv=mid", "/atm_iv_bars?n=roll&iv=mid",
+    "/atm_iv_data?n=roll", "/atm_iv_bars?n=ROLL", "/atm_iv_bars?n=roll%0A", "/atm_iv_bars?n=Roll",
+    "/atm_iv_bars?n=%20roll", "/atm_iv_bars?n=2", "/atm_iv_bars?n=", "/atm_iv_bars?tf=1m&n=rolls",
+    # start・end の検証は n=0 と同じ（片方だけ・1 回の最大・分足の遡れる上限）
+    f"/atm_iv_bars?n=roll&start={ep(utc(12))}",
+    f"/atm_iv_bars?tf=1m&n=roll&start={ep(utc(9))}&end={ep(utc(12, 1))}",
+    f"/atm_iv_bars?tf=1h&n=roll&start={ep(utc(1, month=6))}&end={ep(utc(10, month=9))}",
+    f"/atm_iv_bars?tf=1d&n=roll&start={ep(utc(1, month=1, year=2025))}&end={ep(utc(10, month=2, year=2026))}",
+    f"/atm_iv_bars?tf=5m&n=roll&start={ep(utc(11, 23, month=9))}&end={ep(utc(13, month=9))}",
+    f"/atm_iv_bars?tf=1d&n=roll&start={ep(utc(31, month=12, year=2009))}&end={ep(utc(10, month=1, year=2010))}",
+])
+def test_atm_iv_bars_roll_bad_request(make, path, capsys):
+    client, runner = make(roll_results())
+    res = client.get(path)
+    assert res.status_code == 400
+    assert runner.calls == []
+    record = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert record["event"] == "bad_request"
+
+
+@pytest.mark.parametrize("tf,name", [("1m", "atm_iv_minute_months"), ("15m", "atm_iv_minute_months"),
+                                     ("1h", "atm_iv_months"), ("1d", "atm_iv_months"), ("1d", "trading_holidays")])
+def test_atm_iv_bars_roll_query_error_is_500(make, capsys, tf, name):
+    results = roll_results()
+    results[name] = RuntimeError("secret detail: project 123456789012 user@example.com")
+    client, _ = make(results)
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=roll")
+    assert res.status_code == 500
+    assert res.get_data(as_text=True) == "internal error\n"
+    out = capsys.readouterr().out
+    record = json.loads(out.strip().splitlines()[-1])
+    assert record["event"] == "query_failed" and record["endpoint"] == "atm_iv_bars"
+    assert "secret" not in out
+
+
+@pytest.mark.parametrize("tf,name", [("1m", "atm_iv_minute_months"), ("5m", "atm_iv_minute_months"),
+                                     ("1h", "atm_iv_months"), ("1d", "atm_iv_months")])
+def test_atm_iv_bars_roll_no_rows_is_empty_200(make, tf, name):
+    results = roll_results()
+    results[name] = []
+    client, runner = make(results)
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=roll")
+    assert res.status_code == 200 and res.get_data(as_text=True) == ""
+    # 行が無ければ休業日を読まない（空の要求で課金を増やさない）
+    assert "trading_holidays" not in [name for name, _ in runner.calls]
+
+
+def test_atm_iv_bars_roll_no_snapshot_is_empty_200(make):
+    results = roll_results()
+    results["latest_snapshot"] = [{"snapshot_at": None}]
+    client, runner = make(results)
+    res = client.get("/atm_iv_bars?tf=1m&n=roll")
+    assert res.status_code == 200 and res.get_data(as_text=True) == ""
+    assert [name for name, _ in runner.calls] == ["latest_snapshot"]
+
+
+def crossing_results():
+    """10 月限（L = 10-08（木））→ 11 月限: 取引日 10-01（r = 5）から。09-30（水）15 時台 JST は 10 月限、
+    17 時台（夜間の始まり）から 11 月限"""
+    def hr(day, h, v, month):
+        return {"open": v, "high": v + 1, "low": v - 1, "close": v, "last_trading_day": month,
+                "started_at": datetime(2026, 9, day, h, tzinfo=UTC)}
+
+    hourly = [hr(30, 6, 20.0, OCT), hr(30, 6, 18.0, NOV), hr(30, 8, 21.0, OCT), hr(30, 8, 19.0, NOV),
+              hr(30, 9, 21.5, OCT), hr(30, 9, 19.5, NOV)]
+    minutes = [{**r, "started_at": r["started_at"] + timedelta(minutes=m)} for r in hourly for m in (0, 1, 7)]
+    minutes.sort(key=lambda r: (r["started_at"], r["last_trading_day"]))
+    return {**roll_results(), "atm_iv_months": hourly, "atm_iv_minute_months": minutes, "trading_holidays": []}
+
+
+@pytest.mark.parametrize("tf,want", [
+    ("1h", [("2026-09-30 06:00:00+00:00", "2026-10-08"), ("2026-09-30 08:00:00+00:00", "2026-11-12"),
+            ("2026-09-30 09:00:00+00:00", "2026-11-12")]),
+    ("15m", [("2026-09-30 06:00:00+00:00", "2026-10-08"), ("2026-09-30 08:00:00+00:00", "2026-11-12"),
+             ("2026-09-30 09:00:00+00:00", "2026-11-12")]),
+    ("5m", [("2026-09-30 06:00:00+00:00", "2026-10-08"), ("2026-09-30 06:05:00+00:00", "2026-10-08"),
+            ("2026-09-30 08:00:00+00:00", "2026-11-12"), ("2026-09-30 08:05:00+00:00", "2026-11-12"),
+            ("2026-09-30 09:00:00+00:00", "2026-11-12"), ("2026-09-30 09:05:00+00:00", "2026-11-12")]),
+    ("1d", [("2026-09-29 15:00:00+00:00", "2026-10-08"), ("2026-09-30 15:00:00+00:00", "2026-11-12")]),
+])
+def test_atm_iv_bars_roll_crosses_switch(make, tf, want):
+    client, _ = make(crossing_results())
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=roll&start={ep(utc(29, month=9))}&end={ep(utc(1))}")
+    lines = res.get_data(as_text=True).splitlines()
+    assert [(line.split(",")[4], line.split(",")[5]) for line in lines] == want
+    # 乗り換えの後は 11 月限の値（期近の値が混ざらない）
+    assert all(float(line.split(",")[3]) < 20.0 for line in lines if line.endswith("2026-11-12"))
+
+
+YEAR_END_HOLIDAYS = (date(2025, 12, 31), date(2026, 1, 1), date(2026, 1, 2))
+JAN, FEB = date(2026, 1, 8), date(2026, 2, 12)
+
+
+class HolidayRunner(FakeRunner):
+    """trading_holidays だけ params の [start_date, end_date) に入る偽の休業日を返す runner"""
+
+    def __call__(self, name, params):
+        if name == "trading_holidays":
+            self.calls.append((name, params))
+            return [{"calendar_date": d} for d in YEAR_END_HOLIDAYS if params["start_date"] <= d < params["end_date"]]
+        return super().__call__(name, params)
+
+
+@pytest.mark.parametrize("tf,want", [
+    ("1h", [("2025-12-26 06:00:00+00:00", "2026-01-08"), ("2025-12-26 08:00:00+00:00", "2026-02-12")]),
+    ("1m", [("2025-12-26 06:00:00+00:00", "2026-01-08"), ("2025-12-26 08:00:00+00:00", "2026-02-12")]),
+    ("1d", [("2025-12-25 15:00:00+00:00", "2026-01-08"), ("2025-12-28 15:00:00+00:00", "2026-02-12")]),
+])
+def test_atm_iv_bars_roll_year_end_holidays(tf, want):
+    # 1 月限（L = 2026-01-08）→ 2 月限: 年末年始（12-31〜01-02）の休業をはさみ、取引日 12-29（月）から。
+    # 読む窓の最後は 12-26（金）〜12-29。休業日を読む範囲が足りないと乗り換えが遅れる
+    now = datetime(2025, 12, 29, 9, tzinfo=UTC)
+
+    def r(h, v, month):
+        return {"open": v, "high": v + 1, "low": v - 1, "close": v, "last_trading_day": month,
+                "started_at": datetime(2025, 12, 26, h, tzinfo=UTC)}
+
+    rows = [r(6, 20.0, JAN), r(6, 18.0, FEB), r(8, 21.0, JAN), r(8, 19.0, FEB)]
+    runner = HolidayRunner({"atm_iv_meta": [{"last_started_at": datetime(2025, 12, 28, 21, tzinfo=UTC)}],
+                            "atm_iv_months": rows, "atm_iv_minute_months": rows})
+    client = create_app(runner=runner, clock=lambda: now).test_client()
+    start, end = datetime(2025, 12, 25, tzinfo=UTC), now
+    if tf == "1m":
+        start, end = datetime(2025, 12, 26, tzinfo=UTC), datetime(2025, 12, 29, tzinfo=UTC)  # 分足は 1 回 3 日まで
+    lines = client.get(f"/atm_iv_bars?tf={tf}&n=roll&start={ep(start)}&end={ep(end)}").get_data(as_text=True)
+    assert [(line.split(",")[4], line.split(",")[5]) for line in lines.splitlines()] == want
+    [(_, params)] = [c for c in runner.calls if c[0] == "trading_holidays"]
+    assert params["end_date"] >= api.jst_date(end) + timedelta(days=26)
+
+
+def test_roll_hourly_params():
+    last = datetime(2026, 10, 12, 21, tzinfo=UTC)
+    recent = api.roll_hourly_params(NOW, last, utc(12), NOW)
+    assert set(recent) == {"fill_start", "fill_end", "days_start", "range_end"}
+    assert recent["fill_end"] == NOW
+    assert recent == {k: v for k, v in api.hourly_params(NOW, last, utc(12), NOW, 0).items() if k in recent}
+    past = api.roll_hourly_params(NOW, last, utc(1, month=9), utc(1))
+    assert past["fill_end"] < past["fill_start"]
+
+
+@pytest.mark.parametrize("raw,want", [(None, 0), ("0", 0), ("1", 1), ("roll", "roll")])
+def test_parse_bars_n(raw, want):
+    assert api.parse_bars_n(raw) == want
