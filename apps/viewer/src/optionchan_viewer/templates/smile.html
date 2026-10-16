@@ -8,6 +8,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>スマイルカーブ</title>
     <script src="/static/vendor/chart.umd.min.js"></script>
+    <script src="/static/smile_age.js" defer></script>
     <script src="/static/smile.js" defer></script>
     <link rel="stylesheet" href="/static/viewer.css">
 </head>
@@ -39,6 +40,7 @@
                 <option value="cp">call・put別</option>
             </select>
         </label>
+        <label><input id="show-age" type="checkbox">経過時間</label>
         <button id="pin" type="button">この時点を固定</button>
         <button id="unpin" type="button" disabled>固定を解除</button>
         <button id="reset" type="button">表示をリセット</button>
@@ -63,7 +65,8 @@
 </div>
 <div id="message" class="chart-note"></div>
 <p class="chart-help">
-    線: 気配の仲値（mid）の IV、縦のひげ: 買い気配（bid）〜売り気配（ask）の IV、点: 約定の IV。
+    線: 気配の仲値（mid）の IV、縦のひげ: 買い気配（bid）〜売り気配（ask）の IV、点: 約定の IV（濃いほど最近の約定。段の区切りは凡例）。
+    「経過時間」をオンにすると、約定からの経過（分）を右軸に点線で描きます。
     ホイール・ドラッグ（スマートフォンはピンチ・スワイプ）で拡大縮小・スクロール。
 </p>
 </body>

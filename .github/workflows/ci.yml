@@ -87,6 +87,10 @@ jobs:
         working-directory: apps/viewer
         run: |
           for f in src/optionchan_viewer/static/*.js; do node --check "$f"; done
+      # 画面の純粋関数（static/smile_age.js。#82）のテスト。node の標準のテストだけ（依存の追加なし）
+      - name: viewer の JS のテスト
+        working-directory: apps/viewer
+        run: node --test tests/js/*.test.js
 
   # イメージのビルド確認（push しない・認証なし。必須 check にはしない）
   ingest-image:
