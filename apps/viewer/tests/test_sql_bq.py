@@ -424,7 +424,8 @@ def mid_minute_rows(n, options):
 
 @pytest.mark.parametrize("n", [0, 1, 2])
 def test_bars_mid_same_as_trade_logic(n):
-    # #93 AC 1: mid の 1 分足は、iv を mid に替えた atm_iv_minute と同じ（限月の選び方・空の分・OHLC・同じ created_at の順）
+    # #93 AC 1: mid の 1 分足は、iv を mid に替えた atm_iv_minute と同じ
+    # （限月の選び方・空の分・OHLC・同じ created_at の順）
     got = mid_minute_rows(n, mid_options())
     want = minute_rows(n)
     assert [r["started_at"] for r in got] == [r["started_at"] for r in want]
