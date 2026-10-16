@@ -178,6 +178,11 @@
         font-size: 0.75em;
     }
 }
+/* 長押しからの選択モード（#86）: 詳細の左に橙の線・薄い橙の背景（高さは変えない） */
+.smile-stage .smile-cursor.selecting {
+    background: #fff3e0;
+    box-shadow: inset 3px 0 0 #ff6f00;
+}
 .cursor-row {
     margin: 0.1em 0;
 }
@@ -244,10 +249,17 @@
 .dot-t3 {
     border-color: rgba(66, 66, 66, 0.35);
 }
-/* タッチ: 縦のスワイプはページのスクロール、横のなぞり・2 本指は smile.js（#84） */
+/* タッチ: 縦のスワイプはページのスクロール、1 本指の横のドラッグ・長押し・2 本指は smile.js（#84・#86） */
 .smile-canvas {
     touch-action: pan-y;
     cursor: crosshair;
+}
+/* 長押しで文字選択・iOS の吹き出しを出さない（#86。コンテキストメニューは smile.js で止める） */
+.smile-canvas,
+.smile-stage .chart-box {
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
 }
 .smile-canvas.dragging {
     cursor: grabbing;

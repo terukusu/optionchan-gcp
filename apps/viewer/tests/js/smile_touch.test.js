@@ -1,4 +1,4 @@
-// static/smile_touch.js（#84: タッチ操作の規則）のテスト。node の標準のテストだけを使う（依存なし）:
+// static/smile_touch.js（#84・#86: タッチ操作の規則）のテスト。node の標準のテストだけを使う（依存なし）:
 //   cd apps/viewer && node --test tests/js/*.test.js
 'use strict';
 const test = require('node:test');
@@ -6,17 +6,41 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const SmileTouch = require(path.join(__dirname, '..', '..', 'src', 'optionchan_viewer', 'static', 'smile_touch.js'));
-const { classify, nearest, clampPx, valueAt, edgeFactor, edgeDelta, shiftView, SLOP_PX, EDGE_PX, EDGE_RATE } = SmileTouch;
+const { classify, press, nearest, clampPx, valueAt, edgeFactor, edgeDelta, shiftView, SLOP_PX, LONG_PRESS_MS, EDGE_PX,
+  EDGE_RATE } = SmileTouch;
 
-test('縦か横かの判定: SLOP_PX 未満は待つ、横（同じ量を含む）はなぞり、縦はスクロール', () => {
-  assert.equal(SLOP_PX, 6);
+test('パンか縦かの判定: SLOP_PX 未満は待つ、横（同じ量を含む）はパン、縦はスクロール', () => {
+  assert.equal(SLOP_PX, 8);
   assert.equal(classify(0, 0, SLOP_PX), 'pending');
-  assert.equal(classify(5, -5, SLOP_PX), 'pending');
-  assert.equal(classify(6, 0, SLOP_PX), 'cursor');
-  assert.equal(classify(-6, 5, SLOP_PX), 'cursor');
-  assert.equal(classify(6, 6, SLOP_PX), 'cursor');
-  assert.equal(classify(5, 6, SLOP_PX), 'scroll');
+  assert.equal(classify(7, -7, SLOP_PX), 'pending');
+  assert.equal(classify(8, 0, SLOP_PX), 'pan');
+  assert.equal(classify(-8, 7, SLOP_PX), 'pan');
+  assert.equal(classify(8, 8, SLOP_PX), 'pan');
+  assert.equal(classify(7, 8, SLOP_PX), 'scroll');
   assert.equal(classify(1, -20, SLOP_PX), 'scroll');
+});
+
+test('長押しの判定: LONG_PRESS_MS（400ms）動かさずに押し続けたら選択モード', () => {
+  assert.equal(LONG_PRESS_MS, 400);
+  assert.equal(press(0, 0, 0), 'pending');
+  assert.equal(press(0, 0, 399), 'pending');
+  assert.equal(press(0, 0, 400), 'select');
+  assert.equal(press(7, -7, 400), 'select');  // SLOP_PX 未満の揺れは長押しを取り消さない
+  assert.equal(press(5, 3, 1000), 'select');
+});
+
+test('長押しの取り消し: 時間の前に SLOP_PX 動いたら、横はパン・縦はスクロール', () => {
+  assert.equal(press(8, 0, 100), 'pan');
+  assert.equal(press(-12, 5, 399), 'pan');
+  assert.equal(press(0, 8, 100), 'scroll');
+  assert.equal(press(3, -30, 399), 'scroll');
+  assert.equal(press(7, 7, 399), 'pending');
+});
+
+test('時間が過ぎてから最初の move が来た（タイマーが遅れた）ときは、移動が大きくても長押し', () => {
+  // まだ判定していない = それまでの move は SLOP_PX 未満だった。この move は選択モードのなぞりとして扱う
+  assert.equal(press(40, 0, 450), 'select');
+  assert.equal(press(0, 40, 450), 'select');
 });
 
 test('吸い付き: 一番近い行使価格、同じ距離なら先の値、空なら null', () => {
