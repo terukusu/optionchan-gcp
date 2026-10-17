@@ -4,6 +4,7 @@ target.md 3.5: Cloud Run は全リソースで service_account を明示する�
 HCL のパーサーは入れず、resource ブロックを波かっこの対応で切り出して文字列で確かめる。
 """
 import glob
+import json
 import os
 import re
 
@@ -246,3 +247,22 @@ def test_datacube_tick_table():
         assert 'dc_option_tick' not in f.read()
     # 付与は足さない（データセット単位の既存の付与だけ）
     assert not re.search(r'google_bigquery_(table|dataset)_iam', tf)
+
+
+def test_datacube_future_tick_table():
+    """DataCube の先物の歩み値（#114）: dc_option_tick と同じ扱い。取引日の MONTH パーティション、削除は二重に止める"""
+    tf = dict(all_tf())['prod/datacube.tf']
+    table = re.search(r'resource "google_bigquery_table" "dc_future_tick" \{(.*?)\n\}', tf, re.S).group(1)
+    assert 'table_id                 = "dc_future_tick"' in table
+    assert 'schema/tokyo/dc_future_tick.json' in table
+    assert re.search(r'time_partitioning \{\n\s+type  = "MONTH"\n\s+field = "trade_date"', table)
+    assert 'require_partition_filter = true' in table
+    assert 'clustering               = ["contract_month"]' in table
+    assert 'deletion_protection      = true' in table
+    assert 'deletion_policy          = "PREVENT"' in table
+    assert 'prevent_destroy = true' in table
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'tables.json'), encoding='utf-8') as f:
+        assert 'dc_future_tick' not in f.read()
+    # クラスタの列は表にある
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'dc_future_tick.json'), encoding='utf-8') as f:
+        assert 'contract_month' in {c['name'] for c in json.load(f)}

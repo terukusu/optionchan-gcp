@@ -2095,6 +2095,236 @@ vf111 --maximum_bytes_billed=10737418240 | jq -c '.[-1][0] | {marked_rows, targe
 - **新系の取り込み**: `<P>-raw` の `raw/` だけを読むので、`datacube/` の CSV は読まない。`sa-ingest` はバケット単位の読み取りを持つが、このプロジェクトの中だけ
 - **ビューアー**: `/smile` の欠け 2 の日時に約定値・取引時刻が出る（決まらない行は従来どおり空）
 
+## DataCube の歩み値での行の作成（#114）
+
+#110 の欠け 1（**2022-09-14 15:16 〜 2023-04-25 13:35 JST**。spot・future・option の 3 表とも行が無い）と欠け 3（前日比 ±1,000 円以上で解析が失敗した区間。修正が効いた **2024-08-06 12:25 JST** より前）の、旧系の行が無い区間に、J-Quants DataCube の歩み値から option・future・ingest_runs の行を作る。オプションの歩み値は #111 の `optionchan_tokyo.dc_option_tick`、先物（日経225 ラージ）の歩み値はこの節で `optionchan_tokyo.dc_future_tick`（Terraform の `infra/prod/datacube.tf`、列の正は `schema/tokyo/dc_future_tick.json`）に入れる（購入済みの 25 か月。欠け 1 の 8 か月と欠け 3 の 17 か月。2023-05 は欠け 2 で行と IV があるので無い）。SQL は `sql/tick_build/`（試験は `tests/test_tick_build.py`・`tests/test_tick_build_bq.py`）。`bq load`・INSERT・1 時間足の作り直しは Terraform 外で、所有者がこの節の手順で行う。
+
+**規約（DataCube の自己使用）**: 「DataCube の歩み値での穴埋め（#111）」と同じ。作った行（約定値・IV）も加工した値として同じ扱い（非公開の表・IAP の内側のビューアーだけ）。**リポジトリ・Issue・PR にはデータ・行の抜粋・値を貼らない**（件数・割合・誤差の要約だけ）。
+
+| SQL | 内容 |
+|---|---|
+| `accuracy.sql` | 作り方の一致率。旧系の行がある期間（対照の窓）に `build.sql` と同じ作り方をすべての分で当て、同じ `created_at` の旧系の行と比べる（読み取りだけ） |
+| `build.sql` | 行の作成。`@mode = 'dryrun'` は表 × IV の確かさ（`iv_basis`）ごとの件数を数えるだけ、`'apply'` はまだ作っていないスナップショットの行を 3 表に INSERT する（1 つのトランザクション）。流し直しても 2 回目は 0 行。範囲は 2018-10-01 〜 2024-08-06 12:25 JST の中だけ（外ならエラー） |
+| `verify.sql` | 作成の検証（作り方を使わない独立の検査。1 行） |
+| `rollback.sql` | 切り戻し。作った行（印のある行）を 3 表から消す |
+
+**埋める区間**（`build.sql` の先頭のコメントに詳細）: 旧系のスナップショット（`ingest_runs` の `trigger = 'legacy_import'`）の隣り合う 2 つの間が **15 分以上**あき、前のスナップショットが 2024-08-06 12:25 JST より前で、その間に**先物の約定のある分が 10 分以上**ある区間（2026-10-17 オーナー判断。欠け 3 のほか、原因の違う欠け（停止など）も入る）。歩み値の月を入れていない区間は約定が無いので埋めない。約定のある区間が入れた月と入れていない月にまたがるとき・入れた月の取引日の歩み値が無いときは `build.sql` がエラーで止まる。
+
+**作る行**:
+
+| 表 | 行 |
+|---|---|
+| `ingest_runs` | 区間の中で、先物の約定か近い 2 限月のオプションの約定があった分 [m, m + 1 分) ごとに 1 つ。`snapshot_at = created_at = m + 1 分`（分の終わり。その分までの約定をすべて含む。旧系も分の境目）、`ingest_run_id = 'legacy-fill114-' ‖ snapshot_at（UTC、YYYYMMDDTHHMMSSZ）`、`trigger = 'legacy_fill114'`、`parser_version = 'legacy-fill114-1'`、`source_object = 'datacube:tick'`、`rows_*` は作った行の数（spot は 0）。ビューアーの `*_latest` は実行の行で絞るので、行と一緒に作る |
+| `option_price` | スナップショットの取引日 T（#111 と同じ: 16:30 以降は翌日から数えて最初の現物の営業日）の近い 2 限月（最終取引日が T 以降の月次の限月の小さい方から 2 つ。最終取引日の夜間から次の限月）の、T の約定が `created_at` までに 1 つ以上ある系列。`price` = 最後の約定の値段、`price_time` = その約定日時（JST、分に切り捨て）、`volume` = T の約定の累計（ページの取引高と同じ。#111 で 100% 一致）、`iv` = 最後の約定の時点の IV（下のモデル。値段が裁定の範囲の外なら NULL）、`is_atm` = その限月の行のうち、行使価格が `created_at` の原資産に最も近い行（同じ距離なら小さい方。コール・プットの両方）、`last_trading_day`。気配・気配の IV・ギリシャ指標・前日比・建玉は NULL。約定の無い系列の行は作らない（旧系は掲載の全行使価格の行があった）。祝日取引の日は #111 と同じ（夜間のスナップショットは祝日の日中の約定を除く） |
+| `future_price` | T の直近の四半期限月（最終取引日が T 以降の 3・6・9・12 月の最も近い限月）の、T の `created_at` までの最後の約定の値段・約定日時（分）。`diff`・`diff_rate`・`hv` は NULL |
+| `spot_price` | 作らない（元のデータが無い） |
+
+**IV のモデル**（旧系の JPX の `iv` と約 65 万件の約定で突き合わせて決めた。#114 のコメント）: 原資産は、限月 M 以降で最も近い四半期限月の先物の、オプションの約定の時点の直前の約定（同じ時刻は先物が先）。四半期でない M は、取引日ごとの差（プット・コール・パリティ: 行使価格が先物 ± 500 の、分ごとの最後のコールとプットの K + C − P − 先物 の中央値を 5 円に丸める）を足す。その日のサンプルが 5 未満の日（2 限月めに多い）は、10 日前からその日までのサンプルを合わせた中央値（合わせても 5 未満なら IV は NULL）。残存 = （SQ − 約定日時の 6 時間前の日付）/ 365、金利 0、Black-76、二分法。SQ は第 2 金曜（現物の営業日でなければその前の営業日）、最終取引日は SQ の前の営業日（旧系の `last_trading_day` と 2018-12〜2024-08 の 55 か月で一致）。
+
+**合い方**（件数・誤差の要約だけ）:
+
+- 突き合わせ（#114 のコメント、4 か月・約 65 万件）: JPX の `iv` との差の絶対値 中央値 0.05 ポイント、90% 点 0.21、99% 点 0.9
+- `accuracy.sql`（2022-08-15〜17 の 3 日、約 34 万行）: 同じ `created_at` で値段・約定時刻・取引高の 3 つとも一致 99.07%、取得の遅れ（0〜3 分）を許すと 99.83%。同じ約定の IV の差の絶対値 中央値 0.04・90% 点 0.20・99% 点 1.26（99% 点は 10 円未満の安いオプションと 1,000 円以上の深いイン・ザ・マネーで大きい。原資産を取る時点の差）。ATM の行使価格の一致 80%（旧系は現物で、こちらは先物で選ぶ）。future の値段の一致 66%（遅れを許すと 96%）
+
+**いつ行うか**: いつでもよい（INSERT が触るのは 2018〜2024 年の区間のパーティションだけで、新系の書き込み・定期クエリと重ならない）。前提: この PR のマージ後の deploy.yml で `dc_future_tick` ができていること、#111 が済んでいること（済み）、取引カレンダーに 2018〜2024 年があること（済み）。クエリ量は 1 日で dryrun・apply・verify を合わせて 約 15GB（「費用」）。1 時間足の作り直しは別の日に分けてよい。
+
+### 変数
+
+「DataCube の歩み値での穴埋め（#111）」の「変数」（`P`・`L`・`IMP`・`W`・`q`）に加えて:
+
+```sh
+B_FUT=gs://$P-raw/datacube/future_tick     # 先物の CSV（future_tick_18_YYYYMM.csv、25 個）
+render114() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" "sql/tick_build/$1.sql"; }
+# 範囲（JST の月の境目で 3 つに分ける。B が欠け 1。A・C が欠け 3 など）。range_start・range_end は build.sql と同じ
+RA='2018-09-30 15:00:00+00'; RB='2022-08-31 15:00:00+00'; RC='2023-04-30 15:00:00+00'; RE='2024-08-06 03:25:00+00'
+# build.sql: 範囲 [$1, $2)、モード $3（dryrun / apply）
+bd() { local s=$1 e=$2 m=$3; shift 3; render114 build | q --location=$L --format=json --maximum_bytes_billed=10737418240 \
+  --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" --parameter="mode:STRING:$m" "$@"; }
+vf114() { local s=$1 e=$2; shift 2; render114 verify | q --location=$L --format=json --maximum_bytes_billed=10737418240 \
+  --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" "$@"; }
+# build.sql の結果（.[-1]）の列の合計（表を $3 で絞る）
+sum114() { jq "[.[-1][] | select(.tbl == \"$3\") | .$1 | tonumber] | add // 0" "$2"; }
+```
+
+### 1. 先物の歩み値の取り込み（月ごと）
+
+CSV は `$B_FUT/` に置いてある（25 個。無ければ `option_tick` と同じく展開して `gcloud storage cp --no-clobber`）。列は 2022-08 以前が 10 列（大文字、2 列目 `Make_Date`）、2022-09 以降が 11 列（小文字、2 列目 `execution_date`、最後に `sco_category`）。並びは同じなので、見出しを飛ばして明示のスキーマで入れ、10 列のファイルは `--allow_jagged_rows` で最後の列を NULL にする。2022-07 以前の夜間の約定日はオプションと同じく CSV のまま入れ、読む SQL（`exec_at`）で直す。まず 1 か月だけ入れて確かめる:
+
+```sh
+bq show --format=prettyjson $P:optionchan_tokyo.dc_future_tick | jq '{timePartitioning, clustering, requirePartitionFilter}'
+# timePartitioning が {"type":"MONTH","field":"trade_date"}。無ければ Terraform の apply を先に済ませる
+gcloud storage ls $B_FUT/ | grep -c '\.csv$'   # 25
+ldf() { local ym=$1; bq load --project_id=$P --location=$L --source_format=CSV --skip_leading_rows=1 --allow_jagged_rows \
+  --date_format=YYYYMMDD --time_format=HH24MISSFF3 --replace \
+  "$P:optionchan_tokyo.dc_future_tick\$$ym" "$B_FUT/future_tick_18_$ym.csv" schema/tokyo/dc_future_tick.json; }
+ldf 202304
+q --location=$L --format=csv '
+SELECT COUNT(*) AS n, MIN(trade_date), MAX(trade_date), MIN(execution_time), MAX(execution_time), COUNTIF(sco_category IS NULL) AS no_sco
+FROM optionchan_tokyo.dc_future_tick WHERE trade_date BETWEEN "2023-04-01" AND "2023-04-30"'
+gcloud storage cat $B_FUT/future_tick_18_202304.csv | awk 'END { print NR - 1 }'   # 上の n と同じ
+```
+
+よければ全月を入れる（流し直しても同じ結果）:
+
+```sh
+for f in $(gcloud storage ls $B_FUT/ | grep '\.csv$'); do
+  ym=$(basename "$f" .csv); ym=${ym#future_tick_18_}
+  ldf "$ym" || { echo "failed: $ym"; break; }
+done
+```
+
+確認（25 か月。スキャン 約 0.2GB）: 月ごとの行数が CSV のデータ行数と同じで、（取引日・銘柄コード・シーケンス No）の重複が 0。2022-08 以前は `sco_category` が全部 NULL、2022-09 以降は NULL が 0:
+
+```sh
+for f in $(gcloud storage ls $B_FUT/ | grep '\.csv$'); do ym=$(basename "$f" .csv); echo "${ym#future_tick_18_},$(gcloud storage cat "$f" | awk 'END { print NR - 1 }')"; done | sort > $W/dcf-csv-rows.csv
+q --location=$L --format=csv --maximum_bytes_billed=2147483648 '
+SELECT FORMAT_DATE("%Y%m", trade_date) AS ym, COUNT(*) AS n
+FROM optionchan_tokyo.dc_future_tick WHERE trade_date >= "2018-01-01"
+GROUP BY ym ORDER BY ym' | tail -n +2 | sort > $W/dcf-bq-rows.csv
+diff $W/dcf-csv-rows.csv $W/dcf-bq-rows.csv && echo "rows ok"   # 25 行とも同じ
+q --location=$L --format=csv --maximum_bytes_billed=2147483648 '
+SELECT
+  (SELECT COUNT(*) FROM (
+    SELECT trade_date, security_code, seq_no FROM optionchan_tokyo.dc_future_tick WHERE trade_date >= "2018-01-01"
+    GROUP BY 1, 2, 3 HAVING COUNT(*) > 1)) AS duplicated,
+  (SELECT COUNTIF((trade_date < "2022-09-01") != (sco_category IS NULL)) FROM optionchan_tokyo.dc_future_tick
+   WHERE trade_date >= "2018-01-01") AS sco_mismatch'   # 0 0
+```
+
+`--date_format`・`--time_format` で失敗するときは、#111 の「2. 歩み値の取り込み」の代わりの手順（全列 STRING の一時表 → トランザクションで月を入れ直す）を先物の 11 列で行う。調査で作った全列 STRING の一時表（`$IMP.dc_future_tick_stage`）は、確認が済んだら `bq rm -f -t $P:$IMP.dc_future_tick_stage` で消してよい。
+
+### 2. 事前確認
+
+一致率（対照の窓。読み取りだけ、1 窓 約 0.3GB）。旧系の行があり、両方の歩み値を入れた月の数日:
+
+```sh
+for w in '2020-02-17 00:00:00+09|2020-02-20 00:00:00+09' '2021-11-15 00:00:00+09|2021-11-18 00:00:00+09' \
+         '2022-08-15 00:00:00+09|2022-08-18 00:00:00+09' '2024-02-19 00:00:00+09|2024-02-22 00:00:00+09'; do
+  render114 accuracy | q --location=$L --format=json --maximum_bytes_billed=10737418240 \
+    --parameter="start_at:TIMESTAMP:${w%|*}" --parameter="end_at:TIMESTAMP:${w#*|}" | jq -c '.[-1][0] | del(.start_at, .end_at)'
+done > $W/build114-accuracy.jsonl
+```
+
+- `all_ok_lag / option_rows` が 99% 以上（値段・約定時刻・取引高の作り方。2022-08 の窓の実測 99.83%）。`built_only_rows` が 0 に近い
+- `iv_abs_p50` が 0.1 以下・`iv_abs_p90` が 0.3 以下（2022-08 の窓の実測 0.04・0.20）。`iv_null_rows` が 0 に近い
+- `month_ok / month_pairs` が 100%（近い 2 限月の選び方）。`atm_ok / atm_pairs` は 80% 前後（旧系は現物で選ぶ）
+- 満たさなければ止める
+
+作成の前の基準値と内訳（書き込まない）。範囲は 3 つ（A: 〜2022-08、B: 欠け 1 の 2022-09〜2023-04、C: 2023-05〜）:
+
+```sh
+vf114 "$RA" "$RE" > $W/build114-verify-before.json; jq -c '.[-1][0]' $W/build114-verify-before.json
+# built_runs = 0。legacy_runs・other_runs を控える
+for r in "$RA|$RB|A" "$RB|$RC|B" "$RC|$RE|C"; do
+  IFS='|' read -r s e n <<< "$r"
+  bd "$s" "$e" dryrun > $W/build114-dryrun-$n.json
+  jq -c '.[-1][] | {tbl, iv_basis, rows_total, rows_pending, snapshots, snapshots_pending, holes_built, hole_active_minutes_total}' $W/build114-dryrun-$n.json
+done
+```
+
+- B: `holes_built` = 1（欠け 1）、`hole_active_minutes_total` が 約 15.7 万。A・C の `holes_built` の合計が 約 214（調査時の値。欠け 3 の 110 区間を含む）
+- `iv_basis` が `ok` の行がほとんど。`no_offset`（2 限月めで offset が決まらない）・`no_future`（夜間の寄り付きで先物の約定がまだ無い）・`out_of_bounds`（値段が裁定の範囲の外）が多ければ止めて調べる
+- `tick_build: holes starting at [...] span loaded and not-loaded months`: 約定のある区間の月の歩み値が片方しか無い。その月を入れるか、区間を範囲から外す（範囲を区間の手前で切る）
+- `tick_build: dc_option_tick or dc_future_tick has no rows for trade days [...]`: 入れた月の取引日の歩み値が無い（ファイルの欠け）。1. の確認をやり直す
+
+書き込む前に 3 表のテーブルスナップショットを取る（期限 14 日。INSERT だけなので、保存料は書き込んだパーティションの古い版の分だけ）:
+
+```sh
+for t in option_price future_price ingest_runs; do
+  bq cp --snapshot --no_clobber --expiration=1209600 $P:optionchan_tokyo.$t $P:$IMP.build114_$t
+done
+```
+
+### 3. 作成
+
+範囲ごとに apply し、同じ範囲の dryrun をもう一度流して書く行が 0 になることを確かめる:
+
+```sh
+for n in A B C; do
+  case $n in A) s=$RA e=$RB ;; B) s=$RB e=$RC ;; C) s=$RC e=$RE ;; esac
+  bd "$s" "$e" apply > $W/build114-apply-$n.json
+  echo "$n plan=$(sum114 rows_pending $W/build114-dryrun-$n.json option)/$(sum114 rows_pending $W/build114-dryrun-$n.json future) applied=$(jq -c '.[-1][0] | [.inserted_option, .inserted_future, .inserted_runs]' $W/build114-apply-$n.json)"
+  bd "$s" "$e" dryrun > $W/build114-again-$n.json
+  echo "$n pending=$(jq '[.[-1][] | .rows_pending | tonumber] | add' $W/build114-again-$n.json)"   # 0
+done
+```
+
+- `inserted_option`・`inserted_future` が dryrun の `rows_pending`（option・future）と同じ。`inserted_runs` が `snapshots_pending` と同じ
+- 3 表の INSERT は 1 つのトランザクション（全部書くか何も書かない）。失敗したら原因（`tick_build: ...` の `ERROR()`・クォータ）を直して同じコマンドを流し直す（作ったスナップショットは飛ばす）
+- `tick_build: N snapshots built by another version`: 別の版（`legacy-fill114-*`）で作った行が残っている。`rollback.sql` で消してから流す
+
+### 4. 検証
+
+```sh
+for r in "$RA|$RB|A" "$RB|$RC|B" "$RC|$RE|C"; do
+  IFS='|' read -r s e n <<< "$r"; vf114 "$s" "$e" | jq -c '.[-1][0] | del(.start_at, .end_at)'
+done > $W/build114-verify-after.jsonl
+```
+
+- 0 になる項目: `out_of_hole_runs`・`run_field_errors`・`run_count_errors`・`orphan_rows`・`row_field_errors`・`iv_range_rows`・`future_trade_rows`・`duplicate_rows`・`atm_errors`・`month_errors`
+- `built_runs`・`built_option_rows`・`built_future_rows` の合計が 3. の `inserted_runs`・`inserted_option`・`inserted_future` の合計と同じ
+- `legacy_runs`・`other_runs` の合計が作成の前（`build114-verify-before.json`）と同じ（旧系・新系の行に触れていない）
+- ビューアーの `/smile` で欠け 1 の日時（例: 2023-01-10 の日中）を選び、約定のある行使価格に約定値・取引時刻・IV が出ること、`/atm_iv` の約定の IV（`iv=trade`）の 1 分足が欠け 1 の期間につながること（オーナーが目視。mid は欠けのまま）
+
+結果は件数・割合だけを #114 にコメントする（一致率の要約、dryrun の表 × `iv_basis` ごとの件数、`inserted_*`、`verify` の 0 の項目、スキャン量）。JSON の全文・行・値は貼らない。
+
+### 5. 1 時間足の作り直し
+
+1 時間足（#49 の `atm_iv`・`atm_option_price`・`atm_target_price`・`atm_mid_iv`）は、作った行のある窓（JST 07:00 区切りの 1 日）を作り直す。窓の中を置き換えるので、旧系の行と作った行が混ざる日（欠け 3）もその日の全体が最新版から作り直される（旧系の移行分と同じ計算。#49 の「旧系との突き合わせ」で同値）。手順は「1 時間足（#49）」の「再実行・バックフィル」（変数も同じ節）で、窓の日付を作った実行から出す:
+
+```sh
+q --location=$L --format=csv '
+SELECT DISTINCT FORMAT_DATE("%F", DATE(TIMESTAMP_SUB(snapshot_at, INTERVAL 7 HOUR), "Asia/Tokyo")) AS window_date
+FROM optionchan_tokyo.ingest_runs
+WHERE snapshot_at >= "2018-09-30" AND snapshot_at < "2024-08-07" AND STARTS_WITH(ingest_run_id, "legacy-fill114-")
+ORDER BY window_date' | tail -n +2 > $W/build114-windows.txt
+wc -l < $W/build114-windows.txt
+rdays < $W/build114-windows.txt   # 1 日ずつ DTS の手動実行。最後に all SUCCEEDED
+```
+
+- 窓は 約 300 日（欠け 1 の約 7 か月 + 欠け 3 の日）。DTS の手動実行は 1 日 約 1 分なので数時間かかる。毎朝の定期実行（07:40）と重ならない時間に流す
+- 1 窓 約 10〜60MB（欠け 1 の日は作った行だけ、欠け 3 の日は旧系の行も読む）。全部で 約 10GB なので、作成と同じ日に流すときはクエリ量（32GiB/日）を見て分ける
+- `atm_mid_iv`: 作った行は気配の IV（`bid_iv`・`ask_iv`）が NULL なので、作った行だけの 1 時間（欠け 1）の足は OHLC が NULL の行になる（旧系の気配の無い時間と同じ。ビューアーの `/atm_iv?iv=mid` は線が切れるだけ）。欠け 3 の日は同じ時間の旧系の行の mid がそのまま入る
+- 30 日固定の ATM IV（#100 の `atm_cm_iv`）は気配（`bid`・`ask`）から作るので、作った行からは行ができない（欠けのまま）。`cm_backfill.sql` を流し直す必要は無い（流しても作った行の窓は何も変わらない）
+- 確認: 「1 時間足（#49）」の「日次の確認」のクエリの期間を窓の範囲にして、窓ごとに 4 表の `bars` が同じで、`bars = keys`（キーの重複 0）
+
+### 切り戻し
+
+作った行は元の表に無かった行なので、印（`ingest_run_id` の接頭辞 `legacy-fill114-` と `parser_version = 'legacy-fill114-1'`）で消せば作成の前と同じになる:
+
+```sh
+render114 rollback | q --location=$L --format=json --maximum_bytes_billed=21474836480 \
+  --parameter="start_at:TIMESTAMP:$RA" --parameter="end_at:TIMESTAMP:$RE" | jq -c '.[-1][0]'
+vf114 "$RA" "$RE" | jq -c '.[-1][0] | {built_runs, built_option_rows, built_future_rows, legacy_runs, other_runs}'
+# built_* = 0、legacy_runs・other_runs が作成の前と同じ
+```
+
+- 切り戻した後は 5. と同じ窓の 1 時間足を作り直す（作った行の分の足が消え、欠け 1 の窓は行が無いので何もしない → 既存の足が残る。残った足は `DELETE FROM optionchan_tokyo.<表> WHERE started_at >= '2022-09-14' AND started_at < '2023-04-26'` のように窓の範囲で 4 表から消す）
+- 最後の手段: 2. のテーブルスナップショット（14 日）・タイムトラベル（7 日）。スナップショットからの復元は作成の後に新系が書いた行も消すので、#12 の「切り戻し」と同じく新系を止めて再処理で補う
+- 作り方を変えてやり直すときは、`rollback.sql` で消してから版（`build_version`。4 つの SQL で同じ値）を上げて流す
+- 先物の歩み値の表: Terraform の revert では消えない（`prevent_destroy`）。消すときは別の作業で保護を外す。CSV は `gcloud storage rm $B_FUT/*`（ソフト削除 7 日）
+
+### 費用
+
+| 項目 | 見込み |
+|---|---|
+| `bq load` | 無料（共有スロット） |
+| 取り込みの確認 | 約 0.2GB × 2 |
+| 一致率（4 窓） | 各 約 0.3GB |
+| dryrun（3 範囲 × 2 回） | 範囲 B が 約 2GB（歩み値の 8 か月 + 作った行の一時表 約 2 千万行の読み込み）、A・C は各 1GB 前後 |
+| apply（3 範囲） | dryrun + 一時表の全列の読み込み（範囲 B で 約 2GB） |
+| verify（前 1 回・後 3 範囲） | 作った日のパーティションの 12 列（欠け 3 の日は旧系の行も読む。全部で 約 4GB） |
+| 1 時間足の作り直し | 約 10GB（5.） |
+| 保存 | 先物の CSV 約 0.6GB（GCS）・表 約 1 千万行、作った行（見込み: option 約 2 千万行・future と ingest_runs 約 18 万行）。月に数円〜十数円 |
+
+### 他の仕組みとの関係
+
+- **旧系の行を `ingest_run_id` の接頭辞 `legacy-` で選ぶ SQL**: 作った行も `legacy-` で始まる（`legacy-fill114-`）。#4 の `sql/price_time_fix/`・#111 の `sql/tick_fill/`・#12 の `sql/legacy_import/` の検証は済んだ 1 回だけの作業なので流し直さない（流し直すときは先に `rollback.sql` で消すか、`legacy-fill114-` を除く）。#111 の `fill.sql` の範囲（欠け 2）には作った行は無い
+- **品質チェック・新旧の突き合わせ**: 新系の日だけを読むので影響しない
+- **1 時間足・30 日固定の IV**: 5. のとおり（定期クエリは前日の窓だけなので、作り直さない限り変わらない）
+- **ビューアー**: `/smile` の欠け 1・3 の日時に、約定のあった行使価格の約定値・取引時刻・IV が出る（気配・mid IV・デルタは空。約定の無い行使価格は行が無い）。`/atm_iv` の約定の IV がつながる（mid は欠けのまま）
+- **新系の取り込み**: `<P>-raw` の `raw/` だけを読むので、`datacube/` の CSV は読まない
+
 ## 1 時間足（#49）
 
 旧系の `insert_ohlc`（Cloud Functions、python37、毎日 00:01 UTC）の置き換え（target.md 3.2）。新系の最新版から ATM の 1 時間足を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の 3 表（+ #98 で足した mid IV の `atm_mid_iv`。旧系に無い表）。旧系（`insert_ohlc`・旧 `optionchan.atm_*`）は変えない（止めるのは #14）。定義は `infra/prod/sq.tf`、SQL は `sql/ohlc/`（試験は `tests/test_ohlc.py`・`tests/test_ohlc_bq.py`）。
