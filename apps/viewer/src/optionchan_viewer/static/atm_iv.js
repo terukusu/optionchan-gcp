@@ -9,7 +9,7 @@
 //   データの無い範囲が続いたら（EMPTY_LIMIT 回）それより前は無いとみなす
 // - 足・限月を切り替えても表示していた時間の範囲を保つ（その範囲を読み直す。分足は 1 回の上限まで）
 // - 5分・15分足は 1 分足を読んでこの画面で束ねる（1 分・5 分・15 分の切り替えで BigQuery を読み直さない）
-// - IV は約定（既定）か mid（気配の中値。&iv=mid。分足は #93、1 時間足・日足は 1 時間足 atm_mid_iv から #98）。どの足でも選べる
+// - IV は mid（気配の中値。&iv=mid。既定。分足は #93、1 時間足・日足は 1 時間足 atm_mid_iv から #98）か約定。どの足でも選べる
 // - サーバーの 1 日のクエリ量の上限（#95）に達すると 429 が返る。そのときは上限に達したことを出す
 // - 限月の選択肢は static/atm_series.js の系列の表（AtmSeries.SERIES）から作る。「期近つなぎ」（n=roll。#101）は
 //   取引日ごとに期近の最終取引日の 5 営業日前で 2 限月へ乗り換えてつないだ足で、乗り換えた足に印（新しい限月）を付け、
@@ -18,6 +18,7 @@
 // - 表示はローソク足か折れ線（終値を結ぶ）。切り替えは描き直すだけで読み直さない
 // - 日付の欄で、選んだ時点で（他の選択と同じく。ボタンは無い）選んでいる足のままその日（JST）のまわりへ移動する（AtmSeries.jumpView の範囲を select で読み直す。そこから
 //   左右へスクロールすると続きを読む。1 時間足の 400 日・分足の 31 日の上限はそのまま）
+// - 配色は theme.js（既定はダーク）。チャートの色は CHART_THEME から選び、切り替えたら applyOptions で塗り直す
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
@@ -39,7 +40,12 @@ var MINUTE_BUDGET_DAYS = 24;  // 分足をこの画面で読む日数の合計�
 var EDGE_BARS = 10;  // 表示範囲の端と読み込んだ範囲の端の距離（本）がこれ未満なら追加で読む
 var DEBOUNCE_MS = 250;
 var RIGHT_OFFSET = 3;  // 最新の足の右の余白（本）
-var MARKER_COLOR = '#2962ff';  // 乗り換えの印（チャートの canvas に描く）
+// テーマごとのチャートの色（背景・文字・目盛りの線・軸の枠）と折れ線・乗り換えの印の色（チャートの canvas に描く）。
+// ライトは Lightweight Charts の既定に近い値、ダークは viewer.css の --bg に合わせる
+var CHART_THEME = {
+  dark: { bg: '#12141c', text: '#c3c8d4', grid: '#222634', border: '#2c3040', line: '#5c8dff', marker: '#5c8dff' },
+  light: { bg: '#ffffff', text: '#191919', grid: '#eef0f4', border: '#d6dcde', line: '#2962ff', marker: '#2962ff' },
+};
 
 var chart = null;
 var series = null;
@@ -52,8 +58,8 @@ var currentTf = null;
 var shownTf = '1h';  // 描いている足（読み込み中は currentTf と違う）
 var currentN = null;
 var shownN = null;
-var currentIv = 'trade';
-var shownIv = 'trade';
+var currentIv = 'mid';
+var shownIv = 'mid';
 var entries = {};  // "src|<系列の value>|iv" → { bars, start, end, leftDone, rightDone, empty, note }
 var inflight = null;  // { ctrl, gen, mode }
 var gen = 0;  // 足・限月を選び直すたびに増やす（古い応答を捨てる）
@@ -169,7 +175,8 @@ function renderMonths() {
     }
   });
   markers.setMarkers(AtmSeries.rollMarkers(shown).map(function(m) {
-    return { time: m.time + JST_OFFSET, position: 'aboveBar', shape: 'arrowDown', color: MARKER_COLOR, text: m.text };
+    return { time: m.time + JST_OFFSET, position: 'aboveBar', shape: 'arrowDown', color: chartTheme().marker,
+      text: m.text };
   }));
 }
 
@@ -489,14 +496,29 @@ function loadMore(entry, side) {
   });
 }
 
+function chartTheme() {
+  return CHART_THEME[ViewerTheme.get()];
+}
+
+// テーマの色の options（createChart と切り替えの applyOptions で使う）
+function themeOptions() {
+  var t = chartTheme();
+  return {
+    layout: { background: { type: 'solid', color: t.bg }, textColor: t.text },
+    grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+    rightPriceScale: { borderColor: t.border },
+    timeScale: { borderColor: t.border },
+  };
+}
+
 function createChart() {
-  chart = LightweightCharts.createChart(el('chart'), {
-    autoSize: true,
-    // attributionLogo は <style> 要素を足すので CSP（style-src 'self'）に反する。表記はページの下に置く
-    layout: { attributionLogo: false },
-    localization: { locale: 'ja-JP', timeFormatter: formatTime },
-    timeScale: { timeVisible: true, secondsVisible: false, rightOffset: RIGHT_OFFSET },
-  });
+  var opts = themeOptions();
+  // attributionLogo は <style> 要素を足すので CSP（style-src 'self'）に反する。表記はページの下に置く
+  opts.layout.attributionLogo = false;
+  opts.autoSize = true;
+  opts.localization = { locale: 'ja-JP', timeFormatter: formatTime };
+  Object.assign(opts.timeScale, { timeVisible: true, secondsVisible: false, rightOffset: RIGHT_OFFSET });
+  chart = LightweightCharts.createChart(el('chart'), opts);
   setStyle(el('style').value);
   chart.subscribeCrosshairMove(function(param) {
     var bar = param.time !== undefined ? barAt.get(param.time) : null;
@@ -515,7 +537,7 @@ function setStyle(style) {
   seriesStyle = style === 'line' ? 'line' : 'candle';
   var opts = { priceFormat: { type: 'price', precision: 2, minMove: 0.01 } };
   series = seriesStyle === 'line' ?
-    chart.addSeries(LightweightCharts.LineSeries, Object.assign({ lineWidth: 2 }, opts)) :
+    chart.addSeries(LightweightCharts.LineSeries, Object.assign({ lineWidth: 2, color: chartTheme().line }, opts)) :
     chart.addSeries(LightweightCharts.CandlestickSeries, opts);
   markers = LightweightCharts.createSeriesMarkers(series, []);
   series.setData(shown.map(toSeries));
@@ -546,6 +568,13 @@ el('nmonth').addEventListener('change', onSelect);
 el('ivkind').addEventListener('change', onSelect);
 el('style').addEventListener('change', function() {
   setStyle(el('style').value);
+});
+ViewerTheme.onChange(function() {
+  chart.applyOptions(themeOptions());
+  if (seriesStyle === 'line') {
+    series.applyOptions({ color: chartTheme().line });
+  }
+  renderMonths();  // 印の色
 });
 function jump() {
   var view = AtmSeries.jumpView(el('jump-date').value, el('tf').value, nowSec());

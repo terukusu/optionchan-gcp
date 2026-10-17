@@ -1,5 +1,21 @@
 /* トップ（/）の見た目。他のページは viewer.css（ここは読まない）。外部のフォント・画像は使わない（CSP） */
 :root {
+    /* 既定はダーク（theme.js が <html data-theme> を決める。属性が無いときもダーク） */
+    color-scheme: dark;
+    --bg: #12141c;
+    --card: #1b1e29;
+    --text: #e6e8ef;
+    --muted: #9aa0b2;
+    --line: #2c3040;
+    --accent: #5c8dff;
+    --accent2: #4a5680;
+    --up: #3cc4b5;
+    --brand: #3949ab;
+    --tag: #252a3b;
+}
+
+:root[data-theme="light"] {
+    color-scheme: light;
     --bg: #f5f6fa;
     --card: #ffffff;
     --text: #1c2033;
@@ -10,21 +26,6 @@
     --up: #26a69a;
     --brand: #1a237e;
     --tag: #eef1fb;
-}
-
-@media (prefers-color-scheme: dark) {
-    :root {
-        --bg: #12141c;
-        --card: #1b1e29;
-        --text: #e6e8ef;
-        --muted: #9aa0b2;
-        --line: #2c3040;
-        --accent: #5c8dff;
-        --accent2: #4a5680;
-        --up: #3cc4b5;
-        --brand: #3949ab;
-        --tag: #252a3b;
-    }
 }
 
 * {
@@ -76,6 +77,25 @@ body.home {
     margin: 0;
     font-size: 1.6rem;
     letter-spacing: 0.02em;
+}
+
+/* 配色の切り替え（theme.js） */
+.home-theme {
+    margin-left: auto;
+    padding: 4px 12px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--card);
+    color: var(--muted);
+    font: inherit;
+    font-size: 0.82rem;
+    cursor: pointer;
+}
+
+.home-theme:hover,
+.home-theme:focus-visible {
+    border-color: var(--accent);
+    color: var(--text);
 }
 
 .home-lead {
