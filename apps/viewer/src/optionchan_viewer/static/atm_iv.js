@@ -16,6 +16,8 @@
 //   凡例にカーソルの足の限月を出す。「30日固定」（n=cm。#100）は満期 30 日に補間した IV で、IV の選択は使わない（選べなくする）。
 //   CSV・束ね・つなぎ・印の純粋関数は atm_series.js
 // - 表示はローソク足か折れ線（終値を結ぶ）。切り替えは描き直すだけで読み直さない
+// - 日付の欄で、選んでいる足のままその日（JST）のまわりへ移動する（AtmSeries.jumpView の範囲を select で読み直す。そこから
+//   左右へスクロールすると続きを読む。1 時間足の 400 日・分足の 31 日の上限はそのまま）
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
@@ -545,6 +547,23 @@ el('ivkind').addEventListener('change', onSelect);
 el('style').addEventListener('change', function() {
   setStyle(el('style').value);
 });
+function jump() {
+  var view = AtmSeries.jumpView(el('jump-date').value, el('tf').value, nowSec());
+  if (!view) {
+    note('日付を 2010-01-01〜今日の範囲で入れてください');
+    return;
+  }
+  select(view);
+}
+
+el('jump-go').addEventListener('click', jump);
+el('jump-date').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') {
+    jump();
+  }
+});
+// 選べる日付の上限は今日（JST）
+el('jump-date').max = new Date((nowSec() + JST_OFFSET) * 1000).toISOString().slice(0, 10);
 el('chart-retry').addEventListener('click', function() {
   if (retry) {
     retry();
