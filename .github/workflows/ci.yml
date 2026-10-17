@@ -71,7 +71,7 @@ jobs:
         working-directory: apps/ingest
         run: uv run --locked pytest -q
 
-      # 新しいビューアー（apps/viewer、#52）。ingest と同じ流儀（Python 3.13・uv.lock）。JS は構文だけをランナーの node で検査する
+      # 新しいビューアー（apps/viewer、#52）。ingest と同じ流儀（Python 3.13・uv.lock）。JS は .node-version の node で検査する
       - name: viewer の依存のインストール
         working-directory: apps/viewer
         env:
@@ -83,6 +83,10 @@ jobs:
       - name: viewer の pytest
         working-directory: apps/viewer
         run: uv run --locked pytest -q
+      # JS の検査・テストの node はルートの .node-version（ビューアーのイメージの node:24-slim と同じ系列）
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
       - name: viewer の JS の構文
         working-directory: apps/viewer
         run: |
