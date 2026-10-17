@@ -20,7 +20,8 @@
 --   原資産 F: 限月 M の原資産は、M 以降で最も近い四半期限月 U(M) の先物の、約定の時点（同じ時刻は先物が先）の直前の先物の約定。
 --   四半期でない M は、取引日ごとの差 offset を足す（プット・コール・パリティ: 行使価格が F ± 500 の、分ごとの最後のコールとプットの
 --   K + C − P − (F_C + F_P) / 2 の中央値を 5 円に丸める。その日のサンプルが 5 未満なら、10 日前からその日までのサンプルを合わせた
---   中央値（2 限月めは 1 日のサンプルが数件しか無い日が多い）。合わせても 5 未満なら offset と IV は NULL）
+--   中央値（2 限月めは 1 日のサンプルが数件しか無い日が多い）。合わせても 5 未満なら offset は 0（iv_basis = 'offset_zero'。
+--   対照の窓で、0 にしたときの 2 限月めの IV の差は中央値 0.1 ポイント前後で 1 限月めと同じ程度））
 --   残存 = (SQ − 約定日時（JST）の 6 時間前の日付) / 365（0〜6 時の夜間は前の日から数える）。金利 0、Black-76、二分法（JS の一時関数）
 --   SQ = M の第 2 金曜（現物の営業日でなければその前の営業日）、最終取引日 = SQ の前の営業日（旧系の last_trading_day と 2018-12〜2024-08 の
 --   55 か月で一致）。値段が裁定の範囲の外（内在価値以下か、F（プットは K）以上）なら NULL
@@ -395,7 +396,7 @@ off_day AS (
 ),
 mon AS (
   -- 取引日 × 近い 2 限月: 原資産の限月・SQ・最終取引日・offset。四半期限月は 0。四半期でない限月は、その日のサンプルが 5 以上なら
-  -- その日の中央値、5 未満なら 10 日前からその日までのサンプルを合わせた中央値（合わせても 5 未満なら NULL）。5 円に丸める
+  -- その日の中央値、5 未満なら 10 日前からその日までのサンプルを合わせた中央値（合わせても 5 未満なら 0 にして off_zero）。5 円に丸める
   SELECT
     x.td, FORMAT_DATE('%Y%m', x.m) AS cm, FORMAT_DATE('%Y%m', quarter_month(x.m)) AS ucm,
     sq_day(x.m, closed_cash) AS sq, last_day_of(x.m, closed_cash) AS ltd,
@@ -403,7 +404,9 @@ mon AS (
       WHEN x.m = quarter_month(x.m) THEN 0.0
       WHEN ANY_VALUE(o.n) >= 5 THEN ANY_VALUE(o.off)
       WHEN COUNT(w.s) >= 5 THEN ROUND(APPROX_QUANTILES(w.s, 2 IGNORE NULLS)[OFFSET(1)] / 5) * 5
-    END AS off
+      ELSE 0.0
+    END AS off,
+    x.m != quarter_month(x.m) AND IFNULL(ANY_VALUE(o.n), 0) < 5 AND COUNT(w.s) < 5 AS off_zero
   FROM (SELECT t.td, m FROM tdays AS t, UNNEST([t.m1, t.m2]) AS m) AS x
   LEFT JOIN off_day AS o ON o.cm = FORMAT_DATE('%Y%m', x.m) AND o.trade_date = x.td
   LEFT JOIN pcp_sample AS w
@@ -417,8 +420,8 @@ oiv AS (
     o.fx + m.off AS f,
     CASE
       WHEN o.fx IS NULL THEN 'no_future'
-      WHEN m.off IS NULL THEN 'no_offset'
       WHEN v IS NULL THEN 'out_of_bounds'
+      WHEN m.off_zero THEN 'offset_zero'
       ELSE 'ok'
     END AS iv_basis,
     ROUND(v, 2) AS iv
@@ -589,7 +592,7 @@ IF mode = 'apply' THEN
 END IF;
 
 -- 5. 内訳（表 × IV の確かさごと）。rows_pending・snapshots_pending は書く（書いた）行・スナップショットで、apply では inserted_* と同じ。
---    iv_basis: ok = IV あり、out_of_bounds = 値段が裁定の範囲の外（IV は NULL）、no_offset = offset が決まらない、no_future = 原資産の
+--    iv_basis: ok = IV あり、out_of_bounds = 値段が裁定の範囲の外（IV は NULL）、offset_zero = offset が決まらず 0 にした（IV あり）、no_future = 原資産の
 --    先物の約定がまだ無い。holes_* は範囲と交わる区間の候補の数（built = 埋める、inactive = 約定のある分が少ない、unloaded = 歩み値の
 --    月が無い）と、埋める区間の約定のある分の数
 SELECT

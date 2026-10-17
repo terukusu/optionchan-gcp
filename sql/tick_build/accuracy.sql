@@ -210,7 +210,7 @@ off_day AS (
 ),
 mon AS (
   -- 取引日 × 近い 2 限月: 原資産の限月・SQ・最終取引日・offset。四半期限月は 0。四半期でない限月は、その日のサンプルが 5 以上なら
-  -- その日の中央値、5 未満なら 10 日前からその日までのサンプルを合わせた中央値（合わせても 5 未満なら NULL）。5 円に丸める
+  -- その日の中央値、5 未満なら 10 日前からその日までのサンプルを合わせた中央値（合わせても 5 未満なら 0 にして off_zero）。5 円に丸める
   SELECT
     x.td, FORMAT_DATE('%Y%m', x.m) AS cm, FORMAT_DATE('%Y%m', quarter_month(x.m)) AS ucm,
     sq_day(x.m, closed_cash) AS sq, last_day_of(x.m, closed_cash) AS ltd,
@@ -218,7 +218,9 @@ mon AS (
       WHEN x.m = quarter_month(x.m) THEN 0.0
       WHEN ANY_VALUE(o.n) >= 5 THEN ANY_VALUE(o.off)
       WHEN COUNT(w.s) >= 5 THEN ROUND(APPROX_QUANTILES(w.s, 2 IGNORE NULLS)[OFFSET(1)] / 5) * 5
-    END AS off
+      ELSE 0.0
+    END AS off,
+    x.m != quarter_month(x.m) AND IFNULL(ANY_VALUE(o.n), 0) < 5 AND COUNT(w.s) < 5 AS off_zero
   FROM (SELECT t.td, m FROM tdays AS t, UNNEST([t.m1, t.m2]) AS m) AS x
   LEFT JOIN off_day AS o ON o.cm = FORMAT_DATE('%Y%m', x.m) AND o.trade_date = x.td
   LEFT JOIN pcp_sample AS w
@@ -232,8 +234,8 @@ oiv AS (
     o.fx + m.off AS f,
     CASE
       WHEN o.fx IS NULL THEN 'no_future'
-      WHEN m.off IS NULL THEN 'no_offset'
       WHEN v IS NULL THEN 'out_of_bounds'
+      WHEN m.off_zero THEN 'offset_zero'
       ELSE 'ok'
     END AS iv_basis,
     ROUND(v, 2) AS iv
