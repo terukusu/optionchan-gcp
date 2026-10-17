@@ -27,13 +27,19 @@
         </select>
     </label>
     <label>限月
-        <!-- 選択肢は static/atm_series.js の系列の表から atm_iv.js が作る（0・1・期近つなぎ。既定は 0） -->
+        <!-- 選択肢は static/atm_series.js の系列の表から atm_iv.js が作る（0・1・期近つなぎ・30日固定。既定は 0） -->
         <select id="nmonth"></select>
     </label>
     <label>IV
         <select id="ivkind">
             <option value="trade" selected>約定</option>
             <option value="mid">mid（気配の中値）</option>
+        </select>
+    </label>
+    <label>表示
+        <select id="style">
+            <option value="candle" selected>ローソク足</option>
+            <option value="line">折れ線</option>
         </select>
     </label>
 </div>

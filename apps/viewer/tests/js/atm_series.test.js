@@ -21,11 +21,13 @@ function bar(time, v, month) {
 
 test('系列: value は一意、既定は 0、限月の列を読むのは期近つなぎだけ', () => {
   const values = SERIES.map((s) => s.value);
-  assert.deepEqual(values, ['0', '1', 'roll']);
+  assert.deepEqual(values, ['0', '1', 'roll', 'cm']);
   assert.equal(new Set(values).size, values.length);
   assert.equal(DEFAULT_SERIES, '0');
   assert.deepEqual(SERIES.filter((s) => s.months).map((s) => s.value), ['roll']);
   assert.equal(seriesOf('roll').label, '期近つなぎ');
+  assert.equal(seriesOf('cm').label, '30日固定');
+  assert.deepEqual(SERIES.filter((s) => s.fixedIv).map((s) => s.value), ['cm']);
   assert.equal(seriesOf('2').value, '0');  // 無い値は既定
 });
 
@@ -33,6 +35,8 @@ test('barsUrl: n=0/1 は今と同じ文字列、期近つなぎは n=roll', () =
   assert.equal(barsUrl(seriesOf('0'), '1h', 'trade', null, null), '/atm_iv_bars?tf=1h&n=0');
   assert.equal(barsUrl(seriesOf('1'), '1m', 'mid', 100, 200), '/atm_iv_bars?tf=1m&n=1&iv=mid&start=100&end=200');
   assert.equal(barsUrl(seriesOf('roll'), '1d', 'trade', 100, 200), '/atm_iv_bars?tf=1d&n=roll&start=100&end=200');
+  // 30日固定（#100）は IV を選べないので iv を付けない
+  assert.equal(barsUrl(seriesOf('cm'), '1h', 'mid', null, null), '/atm_iv_bars?tf=1h&n=cm');
 });
 
 test('parseCsv: 6 列の CSV は限月（month）を読み、5 列の CSV には month が無い', () => {

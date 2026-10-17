@@ -97,6 +97,8 @@ SCHEDULED = {
     'sql/legacy/compare.sql': ({'project', 'dataset', 'copy_dataset', 'fail_on_unexplained', 'fail_from'}, 'legacy_compare_daily', 'compare_date'),
     # 1 時間足（#49）。結果は atm_* の 3 表への MERGE（検査は tests/test_ohlc.py）
     'sql/ohlc/atm_hourly.sql': ({'project', 'dataset'}, None, None),
+    # 30 日固定の ATM IV（#100）。結果は atm_cm_iv の窓の置き換え（検査は tests/test_cm.py）
+    'sql/cm/atm_cm.sql': ({'project', 'dataset'}, None, None),
 }
 WINDOW_DECLARE = (
     "DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo');\n"
@@ -163,6 +165,11 @@ def test_scheduled_sql_filters_period(path):
         dataset, table, args = m.groups()
         if dataset == 'stage_dataset':
             continue  # stage.sql が作る作業用テーブル（書き込み先と、その件数の数え直し）
+        if table == 'trading_calendar_latest':
+            # 休業日のカレンダー（ビュー。1 年 十数行）は日付で絞る（30 日固定の SQ の日、#100）
+            following = text[m.end():m.end() + 120]
+            assert re.match(r"\s*WHERE calendar_date >= DATE\(win_start, 'Asia/Tokyo'\) AND calendar_date < ", following), (path, following)
+            continue
         if table.endswith('_latest') or table == 'latest_runs':
             assert args and re.match(
                 r'\((win_start|TIMESTAMP_SUB\(win_start, INTERVAL \d+ (DAY|HOUR)\)), '
