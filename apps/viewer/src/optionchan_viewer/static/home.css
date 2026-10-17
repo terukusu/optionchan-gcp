@@ -1,0 +1,203 @@
+/* トップ（/）の見た目。他のページは viewer.css（ここは読まない）。外部のフォント・画像は使わない（CSP） */
+:root {
+    --bg: #f5f6fa;
+    --card: #ffffff;
+    --text: #1c2033;
+    --muted: #5d6478;
+    --line: #e2e5ee;
+    --accent: #2962ff;
+    --accent2: #9aa9d8;
+    --up: #26a69a;
+    --brand: #1a237e;
+    --tag: #eef1fb;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --bg: #12141c;
+        --card: #1b1e29;
+        --text: #e6e8ef;
+        --muted: #9aa0b2;
+        --line: #2c3040;
+        --accent: #5c8dff;
+        --accent2: #4a5680;
+        --up: #3cc4b5;
+        --brand: #3949ab;
+        --tag: #252a3b;
+    }
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body.home {
+    margin: 0;
+    padding: 40px 20px 32px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Hiragino Sans", "Noto Sans JP", "Yu Gothic UI", sans-serif;
+    line-height: 1.6;
+}
+
+.home-header,
+.home-cards,
+.home-footer {
+    max-width: 880px;
+    margin-left: auto;
+    margin-right: auto;
+}
+
+.home-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 28px;
+}
+
+.home-logo {
+    width: 48px;
+    height: 48px;
+    flex: none;
+}
+
+.home-logo-bg {
+    fill: var(--brand);
+}
+
+.home-logo-line {
+    fill: none;
+    stroke: #fff;
+    stroke-width: 3;
+    stroke-linecap: round;
+}
+
+.home-header h1 {
+    margin: 0;
+    font-size: 1.6rem;
+    letter-spacing: 0.02em;
+}
+
+.home-lead {
+    margin: 0;
+    color: var(--muted);
+    font-size: 0.95rem;
+}
+
+.home-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 18px;
+}
+
+.home-card {
+    display: block;
+    padding: 18px 20px 20px;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    color: inherit;
+    text-decoration: none;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
+}
+
+.home-card:hover,
+.home-card:focus-visible {
+    transform: translateY(-2px);
+    border-color: var(--accent);
+    box-shadow: 0 8px 24px rgba(20, 30, 80, 0.12);
+    outline: none;
+}
+
+.home-card h2 {
+    margin: 12px 0 4px;
+    font-size: 1.15rem;
+}
+
+.home-card h2::after {
+    content: " →";
+    color: var(--accent);
+}
+
+.home-card p {
+    margin: 0 0 12px;
+    color: var(--muted);
+    font-size: 0.92rem;
+}
+
+.home-art {
+    display: block;
+    width: 100%;
+    height: auto;
+    border-radius: 8px;
+    background: var(--bg);
+}
+
+.home-art-grid {
+    stroke: var(--line);
+    stroke-width: 1;
+}
+
+.home-art-candle path {
+    stroke: var(--up);
+    stroke-width: 1.5;
+}
+
+.home-art-candle rect {
+    fill: var(--up);
+}
+
+.home-art-line {
+    fill: none;
+    stroke: var(--accent);
+    stroke-width: 2.5;
+    stroke-linecap: round;
+}
+
+.home-art-line2 {
+    fill: none;
+    stroke: var(--accent2);
+    stroke-width: 2;
+    stroke-dasharray: 5 4;
+}
+
+.home-art-dot circle {
+    fill: var(--card);
+    stroke: var(--accent);
+    stroke-width: 2;
+}
+
+.home-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.home-tags li {
+    padding: 2px 10px;
+    border-radius: 999px;
+    background: var(--tag);
+    color: var(--muted);
+    font-size: 0.8rem;
+}
+
+.home-footer {
+    margin-top: 28px;
+    color: var(--muted);
+    font-size: 0.82rem;
+}
+
+@media (max-width: 480px) {
+    body.home {
+        padding: 24px 16px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .home-card {
+        transition: none;
+    }
+}
