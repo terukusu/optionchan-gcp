@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
     <title>optionchan</title>
+    <!-- 配色（既定はダーク）。CSS より前に読み、描く前に決める -->
+    <script src="/static/theme.js"></script>
     <!-- トップだけの見た目（CSP で inline の style を許さないので別ファイル。他のページの viewer.css には触れない） -->
     <link rel="stylesheet" href="/static/home.css">
 </head>
@@ -18,6 +20,7 @@
         <h1>optionchan</h1>
         <p class="home-lead">日経225 オプションの IV ビューアー</p>
     </div>
+    <button id="theme-toggle" class="home-theme" type="button">ライト表示</button>
 </header>
 
 <main class="home-cards">
@@ -41,7 +44,7 @@
             <li>限月 0・1</li>
             <li>期近つなぎ</li>
             <li>30日固定</li>
-            <li>約定 / mid</li>
+            <li>mid / 約定</li>
             <li>日付へ移動</li>
         </ul>
     </a>

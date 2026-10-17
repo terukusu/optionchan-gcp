@@ -7,6 +7,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <!-- 配色（既定はダーク）。CSS・チャートより前に読み、描く前に決める -->
+    <script src="/static/theme.js"></script>
     <title>ATM IVの推移</title>
     <script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
     <script src="/static/atm_series.js" defer></script>
@@ -14,7 +16,10 @@
     <link rel="stylesheet" href="/static/viewer.css">
 </head>
 <body>
-<a href="/">トップへ</a>
+<nav class="page-nav">
+    <a href="/">トップへ</a>
+    <button id="theme-toggle" type="button">ライト表示</button>
+</nav>
 <h1 class="chart-title">ATMオプションIV推移</h1>
 <div id="control">
     <label>足
@@ -32,8 +37,8 @@
     </label>
     <label>IV
         <select id="ivkind">
-            <option value="trade" selected>約定</option>
-            <option value="mid">mid（気配の中値）</option>
+            <option value="mid" selected>mid（気配の中値）</option>
+            <option value="trade">約定</option>
         </select>
     </label>
     <label>表示

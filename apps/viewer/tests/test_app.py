@@ -747,6 +747,30 @@ def test_favicon(make):
     assert runner.calls == []
 
 
+
+# ---- 配色（既定はダーク）・/atm_iv の IV の既定（mid） ----
+
+def test_theme_script_in_head(make):
+    # 描く前に配色を決めるので、どのページも <head> で CSS より前に defer なしで読む
+    client, runner = make()
+    for path in ("/", "/smile", "/atm_iv"):
+        html = client.get(path).get_data(as_text=True)
+        head = html.split("</head>", 1)[0]
+        tag = '<script src="/static/theme.js"></script>'
+        assert tag in head, path
+        assert head.index(tag) < head.index('<link rel="stylesheet"'), path
+        assert 'id="theme-toggle"' in html, path
+    res = client.get("/static/theme.js")
+    assert res.status_code == 200
+    assert runner.calls == []
+
+
+def test_atm_iv_default_iv_is_mid(make):
+    client, _ = make()
+    html = client.get("/atm_iv").get_data(as_text=True)
+    assert '<option value="mid" selected>' in html
+    assert '<option value="trade">' in html
+
 # ---- /atm_iv_bars?n=roll（期近つなぎ、#101） ----
 
 OCT, NOV, DEC = date(2026, 10, 8), date(2026, 11, 12), date(2026, 12, 10)

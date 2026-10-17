@@ -16,6 +16,7 @@
 // - 表示の切り替えは hidden 属性・classList・disabled だけ（CSP の style-src 'self'）
 // - 約定 IV の点は約定からの経過（smile_age.js の SmileAge。#82）で段ごとに塗り・枠・大きさを変える（Chart.js の点ごとの配列）。
 //   「経過時間」をオンにすると経過（分）を右軸に描く（サーバーに要求しない）
+// - 配色は theme.js（既定はダーク）。線の色・軸の色・ATM の縦線は PALETTES から選び、切り替えたら描き直す
 // 時刻は UTC の UNIX 秒で持ち、表示は JST（日本に夏時間は無いので 9 時間を足す）。
 var JST_OFFSET = 9 * 3600;
 var DAY = 86400;
@@ -28,14 +29,26 @@ var MIN_WIDTH = 500;  // 横の表示幅の最小（円）
 var WHEEL_FACTOR = 1.2;
 var CALL = 1;
 var PUT = 2;
-// 線の色（viewer.css の .sw-* と同じ値）。2 限月は薄い色
-var COLORS = {
-  otm: { 1: '#1a237e', 2: '#7986cb' },
-  call: { 1: '#c62828', 2: '#ef9a9a' },
-  put: { 1: '#1565c0', 2: '#90caf9' },
-  pin: { 1: '#9e9e9e', 2: '#cfcfcf' },
+// テーマごとの色。線の色は viewer.css の --sw-* と同じ値で、2 限月は背景に近い色（ライトは薄く、ダークは暗く）。
+// bg は白抜きの点の塗り（viewer.css の --bg）、ink は ATM の縦線・ラベル（不透明度は描くときに付ける）、text・grid は軸
+var PALETTES = {
+  dark: {
+    otm: { 1: '#8c9eff', 2: '#5361a8' },
+    call: { 1: '#ef5350', 2: '#9c4545' },
+    put: { 1: '#42a5f5', 2: '#3a6c96' },
+    pin: { 1: '#757575', 2: '#4a4a4a' },
+    bg: '#12141c', ink: '255, 255, 255', text: '#c3c8d4', grid: 'rgba(255, 255, 255, 0.1)',
+  },
+  light: {
+    otm: { 1: '#1a237e', 2: '#7986cb' },
+    call: { 1: '#c62828', 2: '#ef9a9a' },
+    put: { 1: '#1565c0', 2: '#90caf9' },
+    pin: { 1: '#9e9e9e', 2: '#cfcfcf' },
+    bg: '#ffffff', ink: '0, 0, 0', text: '#666666', grid: 'rgba(0, 0, 0, 0.1)',
+  },
 };
-// 約定 IV の点の段ごとの見た目（SmileAge.TIERS の順。fill / border は曲線の色の不透明度、null は白）
+var COLORS = PALETTES[ViewerTheme.get()];
+// 約定 IV の点の段ごとの見た目（SmileAge.TIERS の順。fill / border は曲線の色の不透明度、null は背景の色の白抜き）
 var TIER_STYLE = [
   { fill: 1, border: 1, radius: 3.5 },
   { fill: 0.45, border: 1, radius: 3 },
@@ -268,11 +281,11 @@ function tradeDataset(snap, g) {
     }
     var t = TIER_STYLE[SmileAge.tierOf(SmileAge.ageSeconds(snap.s, r.price_time))];
     data.push({ x: r.target_price, y: r.iv });
-    fill.push(t.fill === null ? '#ffffff' : alpha(g.color, t.fill));
+    fill.push(t.fill === null ? COLORS.bg : alpha(g.color, t.fill));
     border.push(alpha(g.color, t.border));
     radius.push(t.radius);
   });
-  return { type: 'line', data: data, showLine: false, borderColor: g.color, backgroundColor: '#ffffff',
+  return { type: 'line', data: data, showLine: false, borderColor: g.color, backgroundColor: COLORS.bg,
     pointBackgroundColor: fill, pointBorderColor: border, pointRadius: radius, pointStyle: 'circle', borderWidth: 1.2,
     order: 0 };
 }
@@ -608,13 +621,13 @@ var overlay = {
           return;
         }
         var px = x.getPixelForValue(atm);
-        ctx.strokeStyle = m === 1 ? 'rgba(0, 0, 0, 0.55)' : 'rgba(0, 0, 0, 0.35)';
+        ctx.strokeStyle = 'rgba(' + COLORS.ink + ', ' + (m === 1 ? 0.55 : 0.35) + ')';
         ctx.setLineDash(m === 1 ? [] : [2, 3]);
         ctx.beginPath();
         ctx.moveTo(px, area.top);
         ctx.lineTo(px, area.bottom);
         ctx.stroke();
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+        ctx.fillStyle = 'rgba(' + COLORS.ink + ', 0.6)';
         ctx.fillText('ATM ' + atm + (m === 2 ? '（2限月）' : ''), px + 4, area.top + 12 + (m - 1) * 14);
       });
     }
@@ -633,6 +646,18 @@ var overlay = {
   },
 };
 
+// 軸の文字・目盛りの線・枠の色を今のテーマにする（createChart と切り替えで使う。描き直しは呼ぶ側）。
+// chart.options に書くので、書く先（ticks・title・grid・border）は createChart の設定に置いておく
+function applyAxisColors() {
+  ['x', 'y', 'age'].forEach(function(id) {
+    var sc = chart.options.scales[id];
+    sc.ticks.color = COLORS.text;
+    sc.title.color = COLORS.text;
+    sc.grid.color = COLORS.grid;
+    sc.border.color = COLORS.grid;
+  });
+}
+
 function createChart() {
   chart = new Chart(el('chart'), {
     type: 'line',
@@ -644,16 +669,18 @@ function createChart() {
       events: [],  // ホバー・ツールチップは使わない（カーソル位置の値は DOM に出す）
       plugins: { legend: { display: false }, tooltip: { enabled: false } },
       scales: {
-        x: { type: 'linear', title: { display: true, text: '行使価格' } },
-        y: { type: 'linear', grace: '5%', title: { display: true, text: 'IV (%)' } },
+        x: { type: 'linear', title: { display: true, text: '行使価格' }, ticks: {}, grid: {}, border: {} },
+        y: { type: 'linear', grace: '5%', title: { display: true, text: 'IV (%)' }, ticks: {}, grid: {},
+          border: {} },
         // 約定からの経過（分）。「経過時間」がオンのときだけ見せる
         age: { type: 'logarithmic', position: 'right', display: false, min: AGE_AXIS_MIN, grid: { drawOnChartArea: false },
           afterBuildTicks: ageTicks, ticks: { callback: function(v) { return String(v); } },
-          title: { display: true, text: '約定からの経過（分）' } },
+          title: { display: true, text: '約定からの経過（分）' }, border: {} },
       },
     },
     plugins: [overlay],
   });
+  applyAxisColors();
 }
 
 // ---- 読み込み ----
@@ -1141,5 +1168,10 @@ function bind() {
 
 createChart();
 bind();
+ViewerTheme.onChange(function(t) {
+  COLORS = PALETTES[t];
+  applyAxisColors();
+  render();
+});
 render();
 go(null);
