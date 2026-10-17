@@ -1863,6 +1863,238 @@ vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 | jq -c '.[-1][] | {tbl, lega
 - **#14 で補う E 以降の取りこぼし**: #2 の修正後の旧系の行なので補正しない（`fix.sql` は `FIX` より前だけ）
 - **ビューアー**: スマイルカーブの取引時刻（`price_time`）が直った日付で出る（元のままの行は従来どおり）
 
+## DataCube の歩み値での穴埋め（#111）
+
+#110 の欠け 2（**2023-04-25 13:42 〜 2023-05-08 16:31 JST**。旧系がオプションの価格の表示を解析できず、`option_price` の `price`・`price_time` がすべて NULL の期間）を、J-Quants DataCube の「日経225オプション 歩み値（ティック）」で埋める。歩み値は表 `optionchan_tokyo.dc_option_tick`（Terraform の `infra/prod/datacube.tf`、列の正は `schema/tokyo/dc_option_tick.json`）に、購入済みの全月（2018-12〜2024-08 の 26 か月）を入れる（欠け 1・3 は別 Issue）。SQL は `sql/tick_fill/`（試験は `tests/test_tick_fill.py`・`tests/test_tick_fill_bq.py`）。CSV のアップロード・`bq load`・UPDATE・テーブルスナップショットは Terraform 外で、所有者がこの節の手順で行う。
+
+**規約（DataCube の自己使用）**: 私的な目的だけ。第三者への提供・公開はしない（加工した値も同じ扱い）。CSV・表は非公開のバケット・データセットだけに置き、**リポジトリ・Issue・PR にデータ・行の抜粋・値を貼らない**（件数・割合だけ）。ビューアーは IAP の内側でオーナーだけが見る。
+
+| SQL | 内容 |
+|---|---|
+| `accuracy.sql` | 規則の一致率。正解の期間（旧系が `price`・`price_time` を持つ期間）の旧系の `volume` がある行に `fill.sql` と同じ推定を当て、保存値と比べる（読み取りだけ） |
+| `fill.sql` | 推定と書き込み。`@mode = 'dryrun'` は確かさ（`basis`）ごとの内訳を数えるだけ、`'apply'` は決まる未補完の行を UPDATE する。流し直しても結果は同じ（2 回目は 0 行）。範囲は欠け 2 の中だけ（外ならエラー） |
+| `verify.sql` | 補完の検証（推定を使わない独立の検査。1 行） |
+| `rollback.sql` | 切り戻し。補完した行（印のある行）を NULL に戻す |
+
+**規則**（`fill.sql` の先頭のコメントに詳細）: ページの取引高（`volume`）は、その取引日の約定の累計の取引高と一致する（正解の期間で 100%）。スナップショットの取引日（16:30 以降は翌日から数えて最初の現物の営業日。祝日取引の日は取引日にならない。DataCube の `trade_date` と同じ）の約定を時刻順に累計し、累計 = `volume` になった約定の値段を `price`、約定日時（JST、分に切り捨て）を `price_time` に入れる。祝日取引の日の夜間のスナップショットは、祝日の日中の約定を累計から除く（ページの取引高が数えていない）。印は `parser_version = 'legacy-fill111-1'`。他の列（`volume`・`diff`・`iv`・`price_time_raw` など）は変えない。
+
+| basis | 意味 | 扱い |
+|---|---|---|
+| `matched` | 累計の合う約定がある | 書く |
+| `ambiguous_holiday` | 祝日取引の夜間で、照合した約定より後・スナップショット + 60 秒より前に祝日の日中の約定がある（ページの約定値がどちらか決まらない） | NULL のまま（2026-10-17 オーナー判断） |
+| `late_trade` | 照合した約定がスナップショット + 10 分より後 | NULL のまま（安全弁。見込み 0） |
+| `no_match` | 累計の合う約定が無い（値段が整数でない場合を含む） | NULL のまま（見込み 0） |
+| `no_tick_day` | 取引日の歩み値が無い（月の入れ忘れ） | `fill.sql` がエラーで止まる |
+
+`volume` が NULL の行（ページの表示が空）は対象にしない。
+
+**見込み（2026-10-17 の調査。件数だけ）**: 欠け 2 の旧系 2,462,430 行のうち `volume` がある行（対象）1,184,423 行。書く 約 113 万行（`matched`、約 95.5%）、残す 約 5.3 万行（すべて GW（2023-05-03〜05）の祝日取引の夜間の `ambiguous_holiday`）、`no_match` 0。書く行のうち前日比（`diff`）がある行で「約定値 − 前日比」（前日の清算値）が系列・取引日ごとに一定の割合 100%。正解の期間（2023-05-08 16:31〜05-31）では値段 100%・時刻（時:分）100%・#4 の印のある行の日付込み 100% で一致。
+
+**いつ行うか**: いつでもよい（UPDATE が触るのは 2023-04-25〜05-08 のパーティションだけで、新系の書き込み・定期クエリと重ならない）。前提: Terraform の prod apply（この PR のマージ後の deploy.yml）で `dc_option_tick` ができていること、#4 が済んでいること（済み）、取引カレンダーに 2023 年があること（済み）。
+
+### 変数
+
+リポジトリのルートで、「Terraform」の「共通の変数」の `P`、「新しい取り込み（ingest）」の `L` に加えて:
+
+```sh
+P=$(gcloud config get-value project 2>/dev/null); echo "$P"   # 自分の GCP プロジェクト ID か確かめる
+L=asia-northeast1
+IMP=optionchan_import                      # テーブルスナップショットを置く一時データセット（#12・#4 と同じ）
+B=gs://$P-raw/datacube/option_tick        # CSV の置き場所（非公開のバケット。新系の取り込みは raw/ だけを読む）
+ZIPS=<zip のディレクトリ>                  # option_tick_20_YYYYMM.zip（26 個）のあるディレクトリ
+W=<スクラッチのディレクトリ>               # 展開した CSV・結果の JSON を置く（リポジトリの外。Issue に貼らない）
+GS='2023-04-25 04:42:00+00'; GE='2023-05-08 07:31:00+00'   # 欠け 2（fill.sql の gap_start・gap_end と同じ）
+AS='2023-05-08 07:31:00+00'; AE='2023-05-31 07:30:00+00'   # 正解の期間（取引日が 05-31 までに収まる）
+q() { bq query --project_id=$P --use_legacy_sql=false --nouse_cache "$@"; }
+render111() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" "sql/tick_fill/$1.sql"; }
+# fill.sql: 欠け 2 の全体、モード $1（dryrun / apply）
+fl() { local m=$1; shift; render111 fill | q --location=$L --format=json \
+  --parameter="start_at:TIMESTAMP:$GS" --parameter="end_at:TIMESTAMP:$GE" --parameter="mode:STRING:$m" "$@"; }
+vf111() { render111 verify | q --location=$L --format=json \
+  --parameter="start_at:TIMESTAMP:$GS" --parameter="end_at:TIMESTAMP:$GE" "$@"; }
+# fill.sql の結果（.[-1]）の列の合計
+sum111() { jq "[.[-1][] | .$1 | tonumber] | add // 0" "$2"; }
+```
+
+### 1. CSV の展開とアップロード
+
+zip 1 つに CSV が 1 つ（`option_tick_20_YYYYMM.csv`）。展開した CSV を置く（zip は手元に残す。合計 約 1GB）:
+
+```sh
+bq show --format=prettyjson $P:optionchan_tokyo.dc_option_tick | jq '{timePartitioning, clustering, requirePartitionFilter}'
+# timePartitioning が {"type":"MONTH","field":"trade_date"}。無ければ Terraform の apply を先に済ませる
+mkdir -p $W/dc
+for z in $ZIPS/option_tick_20_*.zip; do
+  ym=$(basename "$z" .zip); ym=${ym#option_tick_20_}
+  unzip -p "$z" "option_tick_20_$ym.csv" > "$W/dc/option_tick_20_$ym.csv" || { echo "failed: $z"; break; }
+done
+ls $W/dc/option_tick_20_*.csv | wc -l   # 26
+for f in $W/dc/option_tick_20_*.csv; do head -1 "$f" | awk -F, '{print NF}'; done | sort | uniq -c   # すべて 13
+gcloud storage cp --no-clobber $W/dc/option_tick_20_*.csv $B/
+gcloud storage ls $B/ | grep -c '\.csv$'   # 26
+```
+
+### 2. 歩み値の取り込み（月ごと）
+
+1 ファイル = 1 取引月 = 1 パーティション。パーティションのデコレータ（`$YYYYMM`）と `--replace` で**その月だけを置き換える**（同じ月を入れ直しても重複しない。月の外の行があれば load が失敗する）。列名は版で違う（2022-07 以前は大文字・`Make_Date`、2022-08 は `make_date`、2022-09 以降は `execution_date`）が、並びは同じなので、見出しの行を飛ばして明示のスキーマで入れる。まず 1 か月だけ入れて確かめる:
+
+```sh
+ld() { local ym=$1; bq load --project_id=$P --location=$L --source_format=CSV --skip_leading_rows=1 \
+  --date_format=YYYYMMDD --time_format=HH24MISSFF3 --replace \
+  "$P:optionchan_tokyo.dc_option_tick\$$ym" "$B/option_tick_20_$ym.csv" schema/tokyo/dc_option_tick.json; }
+ld 202304
+q --location=$L --format=csv '
+SELECT COUNT(*) AS n, MIN(trade_date), MAX(trade_date), MIN(execution_time), MAX(execution_time)
+FROM optionchan_tokyo.dc_option_tick WHERE trade_date BETWEEN "2023-04-01" AND "2023-04-30"'
+awk 'END { print NR - 1 }' $W/dc/option_tick_20_202304.csv   # 上の n と同じ
+```
+
+よければ全月を入れる（流し直しても同じ結果）:
+
+```sh
+for f in $W/dc/option_tick_20_*.csv; do
+  ym=$(basename "$f" .csv); ym=${ym#option_tick_20_}
+  ld "$ym" || { echo "failed: $ym"; break; }
+done
+```
+
+確認（26 か月。スキャン 約 0.3GB）: 月ごとの行数が CSV のデータ行数と同じで、（取引日・銘柄コード・シーケンス No）の重複が 0:
+
+```sh
+for f in $W/dc/option_tick_20_*.csv; do ym=$(basename "$f" .csv); echo "${ym#option_tick_20_},$(awk 'END { print NR - 1 }' "$f")"; done | sort > $W/dc-csv-rows.csv
+q --location=$L --format=csv --maximum_bytes_billed=2147483648 '
+SELECT FORMAT_DATE("%Y%m", trade_date) AS ym, COUNT(*) AS n
+FROM optionchan_tokyo.dc_option_tick WHERE trade_date >= "2018-01-01"
+GROUP BY ym ORDER BY ym' | tail -n +2 | sort > $W/dc-bq-rows.csv
+diff $W/dc-csv-rows.csv $W/dc-bq-rows.csv && echo "rows ok"   # 26 行とも同じ
+q --location=$L --format=csv --maximum_bytes_billed=2147483648 '
+SELECT COUNT(*) AS duplicated FROM (
+  SELECT trade_date, security_code, seq_no FROM optionchan_tokyo.dc_option_tick WHERE trade_date >= "2018-01-01"
+  GROUP BY 1, 2, 3 HAVING COUNT(*) > 1)'   # 0
+```
+
+`--date_format`・`--time_format` で失敗するとき（bq の版が古い等）の代わり: 全列 STRING の一時表に入れてから、トランザクションの中でその月を消して型を付けて入れ直す（月ごと。`ym` を変えて流す。表の列は REQUIRED なので、クエリの結果をパーティションへ書く `--destination_table` は使わない）。一時表は `$IMP` に置く（無ければ「3. 事前確認」のスナップショットの前の `bq mk` で先に作る）:
+
+```sh
+ym=202304; d0="${ym:0:4}-${ym:4:2}-01"
+bq load --project_id=$P --location=$L --source_format=CSV --skip_leading_rows=1 --replace $P:$IMP.dc_tick_stage "$B/option_tick_20_$ym.csv" \
+  trade_date:STRING,execution_date:STRING,index_type:STRING,put_call_type:STRING,security_code:STRING,execution_time:STRING,trade_price:STRING,price_type:STRING,trade_volume:STRING,seq_no:STRING,contract_month:STRING,exercise_price:STRING,cash_futures_type:STRING
+q --location=$L '
+BEGIN TRANSACTION;
+DELETE FROM optionchan_tokyo.dc_option_tick
+WHERE trade_date >= DATE "'"$d0"'" AND trade_date < DATE_ADD(DATE "'"$d0"'", INTERVAL 1 MONTH);
+INSERT INTO optionchan_tokyo.dc_option_tick
+SELECT CAST(trade_date AS DATE FORMAT "YYYYMMDD"), CAST(execution_date AS DATE FORMAT "YYYYMMDD"),
+  index_type, CAST(put_call_type AS INT64), security_code,
+  CAST(execution_time AS TIME FORMAT "HH24MISSFF3"), CAST(trade_price AS NUMERIC), price_type,
+  CAST(trade_volume AS INT64), CAST(seq_no AS INT64), contract_month,
+  CAST(exercise_price AS NUMERIC), CAST(cash_futures_type AS INT64)
+FROM '"$IMP"'.dc_tick_stage;
+COMMIT TRANSACTION;'
+bq rm -f -t $P:$IMP.dc_tick_stage   # 全月が済んだら
+```
+
+列の並びは `schema/tokyo/dc_option_tick.json` と同じ順。月の外の行があっても DELETE の範囲の外に入るので、入れた後に 2. の確認（月ごとの行数・重複 0）を流す。
+
+### 3. 事前確認
+
+一致率（正解の期間。読み取りだけ、約 0.5GB）:
+
+```sh
+render111 accuracy | q --location=$L --format=json --maximum_bytes_billed=10737418240 \
+  --parameter="start_at:TIMESTAMP:$AS" --parameter="end_at:TIMESTAMP:$AE" > $W/fill111-accuracy.json
+jq -c '.[-1][] | del(.start_at, .end_at)' $W/fill111-accuracy.json
+```
+
+- `matched` の `price_ok / n`・`hhmm_ok / n`・`datetime_ok_fix4 / n_fix4` が 99.9% 以上（#111 の AC。調査時の実測は 100%）。`datetime_ok / n` が少し低いのは #4 で日付を直さなかった行（`n_fix4` の外）
+- `matched` 以外（`no_match` など）の `n` が 0 に近い。`volume_null_priced_rows` が 0（ページの表示が空の行は `volume` も空）
+- 満たさなければ止める
+
+補完の前の基準値と内訳（書き込まない。それぞれ 約 1GB 以下）:
+
+```sh
+vf111 --maximum_bytes_billed=10737418240 > $W/fill111-verify-before.json
+jq -c '.[-1][0]' $W/fill111-verify-before.json
+# marked_rows = 0、target_rows = 1,184,423 前後。volume_null_rows・new_rows を控える
+fl dryrun --maximum_bytes_billed=10737418240 > $W/fill111-dryrun.json
+jq -c '.[-1][] | {basis, rows_total, rows_pending, rows_kept, rows_base_checked, rows_base_inconsistent}' $W/fill111-dryrun.json
+echo "pending=$(sum111 rows_pending $W/fill111-dryrun.json) kept=$(sum111 rows_kept $W/fill111-dryrun.json) target=$(jq '.[-1][0].target_rows' $W/fill111-verify-before.json)"
+```
+
+- `rows_pending`（書く行）+ `rows_kept`（残す行）= `verify` の `target_rows`
+- `rows_base_inconsistent / rows_base_checked` が 0.1% 以下（`matched` の行）
+- `rows_kept` はほぼ `ambiguous_holiday` だけ（見込み 約 5.3 万行）。`no_match`・`late_trade` が多ければ止めて調べる
+
+書き込む前に `option_price` のテーブルスナップショットを取る（期限 14 日。保存料は UPDATE で書き換えたパーティションの分だけ）。一時データセット `$IMP` が無ければ同じコマンドで作る:
+
+```sh
+bq show $P:$IMP >/dev/null 2>&1 || bq mk --dataset --location=$L --storage_billing_model=PHYSICAL --max_time_travel_hours=48 \
+  --default_table_expiration=1209600 --description='#12・#4・#111 の一時データセット（期限で消える）' $P:$IMP
+bq cp --snapshot --no_clobber --expiration=1209600 $P:optionchan_tokyo.option_price $P:$IMP.fill111_option_price
+```
+
+### 4. 補完
+
+```sh
+fl apply --maximum_bytes_billed=10737418240 > $W/fill111-apply.json
+echo "plan=$(sum111 rows_pending $W/fill111-dryrun.json) applied=$(jq '.[-1][0].updated_option | tonumber' $W/fill111-apply.json)"   # 同じ
+fl dryrun --maximum_bytes_billed=10737418240 > $W/fill111-again.json
+echo "pending=$(sum111 rows_pending $W/fill111-again.json) mismatch=$(sum111 rows_mismatch $W/fill111-again.json)"   # 0 0
+```
+
+- UPDATE は 1 文（全部書くか何も書かない）。失敗したら原因（`tick_fill: ...` の `ERROR()`・クォータ）を直して同じコマンドを流し直す
+- `tick_fill: dc_option_tick has no rows for trade days [...]`: その取引日の月を入れていない（2.）
+- `tick_fill: N rows filled by another version`: 別の版（`legacy-fill111-*`）の補完が残っている。`rollback.sql` で戻してから流す
+- `tick_fill: dc_option_tick has N duplicated ...`: 歩み値に同じ約定が 2 回ある。2. の `ld` で、その月を入れ直す
+
+### 5. 検証
+
+```sh
+vf111 --maximum_bytes_billed=10737418240 > $W/fill111-verify-after.json
+jq -c '.[-1][0]' $W/fill111-verify-after.json
+```
+
+- 0 になる項目: `out_of_scope_rows`・`null_marked_rows`・`future_rows`・`off_session_rows`・`wrong_trade_day_rows`・`volume_null_changed_rows`
+- `marked_rows` = 4. の `applied`、`target_rows` = 3. の dryrun の `rows_kept` の合計
+- `volume_null_rows`・`new_rows` が補完の前（`fill111-verify-before.json`）と同じ
+- `base_inconsistent_rows / base_checked_rows` が 0.1% 以下
+- ビューアーの `/smile` で欠け 2 の日時（例: 2023-05-01 の日中）を選び、取引高がある行使価格に約定値・取引時刻が出ること（オーナーが目視）
+
+結果は件数・割合だけを #111 にコメントする（一致率、dryrun の basis ごとの件数、`applied`、`verify` の 0 の項目、スキャン量）。JSON の全文・行・値は貼らない。テーブルスナップショット `fill111_option_price` は期限（14 日）で消える（`$IMP` を消すときに一緒に消えてよい）。
+
+### 切り戻し
+
+補完の対象は元がすべて NULL の行なので、印（`parser_version = 'legacy-fill111-1'`）で正確に戻せる:
+
+```sh
+render111 rollback | q --location=$L --format=json --maximum_bytes_billed=10737418240 \
+  --parameter="start_at:TIMESTAMP:$GS" --parameter="end_at:TIMESTAMP:$GE" | jq -c '.[-1][0]'
+vf111 --maximum_bytes_billed=10737418240 | jq -c '.[-1][0] | {marked_rows, target_rows}'
+# marked_rows = 0、target_rows が 3. の基準値と同じ
+```
+
+- 最後の手段: 3. のテーブルスナップショット（14 日）・タイムトラベル（7 日）。スナップショットからの復元は補完の後に新系が書いた行も消すので、#12 の「切り戻し」と同じく新系を止めて再処理で補う
+- 規則を変えてやり直すときは、`rollback.sql` で戻してから版（`fill_version`。4 つの SQL で同じ値）を上げて流す
+- 歩み値の表: Terraform の revert では消えない（`prevent_destroy`）。消すときは別の作業で保護を外す。CSV は `gcloud storage rm $B/*`（ソフト削除 7 日）
+
+### 費用
+
+| 項目 | 見込み |
+|---|---|
+| `bq load` | 無料（共有スロット） |
+| 取り込みの確認 | 約 0.3GB × 2 |
+| 一致率・dryrun 2 回・verify 2 回 | 各 1GB 未満（`option_price` の欠け 2 の推定の列 約 0.1〜0.2GB、正解の期間 約 0.4GB、歩み値の 2 か月 0.1GB 未満） |
+| apply | 1GB 未満（推定 + 欠け 2 のパーティションの全列の書き換え 約 0.4GB） |
+| 合計 | 数 GB。クエリ量上限（32GiB/日）を上げる必要は無い |
+| 保存 | CSV 約 1GB（GCS）・表 約 1.2 千万行、UPDATE で書き換えたパーティションの古い版（タイムトラベル・スナップショット）。月に数円 |
+
+### 他の仕組みとの関係
+
+- **#4 の `fix.sql`**: 補完した行も旧系の `price_time` のある行なので、#4 の範囲（〜2026-10-12）を流し直すと推定の文脈に入る（UPDATE は `parser_version` が NULL の行だけなので補完した行は書き換わらない）。#4 は 1 回だけの作業で済んでいるので、#111 の後に #4 を流し直さない（流し直すときは先に #111 の `rollback.sql` で戻す）
+- **品質チェック・新旧の突き合わせ・1 時間足**: 欠け 2 の期間を定期では読まない（過去の日を手で再実行したときだけ値が変わる）
+- **新系の取り込み**: `<P>-raw` の `raw/` だけを読むので、`datacube/` の CSV は読まない。`sa-ingest` はバケット単位の読み取りを持つが、このプロジェクトの中だけ
+- **ビューアー**: `/smile` の欠け 2 の日時に約定値・取引時刻が出る（決まらない行は従来どおり空）
+
 ## 1 時間足（#49）
 
 旧系の `insert_ohlc`（Cloud Functions、python37、毎日 00:01 UTC）の置き換え（target.md 3.2）。新系の最新版から ATM の 1 時間足を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の 3 表（+ #98 で足した mid IV の `atm_mid_iv`。旧系に無い表）。旧系（`insert_ohlc`・旧 `optionchan.atm_*`）は変えない（止めるのは #14）。定義は `infra/prod/sq.tf`、SQL は `sql/ohlc/`（試験は `tests/test_ohlc.py`・`tests/test_ohlc_bq.py`）。
