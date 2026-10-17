@@ -105,12 +105,13 @@ cm_month AS (
 -- SQ = 最終取引日の次の営業日（土日・休業日を飛ばす）の 09:00 JST
 cm_sq AS (
   SELECT m.last_trading_day, TIMESTAMP(DATETIME(MIN(d), TIME(9, 0, 0)), 'Asia/Tokyo') AS sq_at
-  FROM (SELECT DISTINCT last_trading_day FROM cm_atm) AS m,
+  FROM (SELECT DISTINCT last_trading_day FROM quote) AS m,
     UNNEST(GENERATE_DATE_ARRAY(DATE_ADD(m.last_trading_day, INTERVAL 1 DAY), DATE_ADD(m.last_trading_day, INTERVAL 15 DAY))) AS d
   WHERE EXTRACT(DAYOFWEEK FROM d) NOT IN (1, 7) AND d NOT IN (SELECT calendar_date FROM holiday)
   GROUP BY m.last_trading_day
 ),
--- SQ 前の限月を最終取引日の順に 1 限月・2 限月とする（F・IV が出ない限月も数える）。days = SQ までの暦日の日数
+-- SQ 前の限月を最終取引日の順に 1 限月・2 限月とする（ATM の印・F・IV が無い限月も数える。数えないと 2 限月が繰り上がる）。
+-- days = SQ までの暦日の日数
 cm_rank AS (
   SELECT
     created_at,
@@ -119,7 +120,8 @@ cm_rank AS (
     fwd,
     iv,
     ROW_NUMBER() OVER (PARTITION BY created_at ORDER BY last_trading_day) AS rk
-  FROM cm_atm JOIN cm_sq USING (last_trading_day) LEFT JOIN cm_month USING (created_at, last_trading_day)
+  FROM (SELECT DISTINCT created_at, last_trading_day FROM quote)
+    JOIN cm_sq USING (last_trading_day) LEFT JOIN cm_month USING (created_at, last_trading_day)
   WHERE sq_at > created_at
 ),
 cm_pair AS (

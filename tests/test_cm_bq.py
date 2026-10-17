@@ -147,3 +147,11 @@ def test_dry_run_real_tables():
         out = bq(text, dry_run=True, params=[f'{names[0]}:TIMESTAMP:{start}', f'{names[1]}:TIMESTAMP:{end}'])
         print(f'dry run {os.path.basename(path)}: {out / MiB:.1f} MiB')
         assert 0 < out < limit, out
+
+
+def test_month_without_atm_flag_is_still_ranked():
+    """1 限月に ATM の印が無くても数える（2 限月を 1 限月に繰り上げない）。1 限月の値が無いので 30 日の IV は NULL"""
+    m1 = [dict(r, is_atm=False) for r in month_rows(T0, M1, 60200, smile1)]
+    [row] = run(m1 + month_rows(T0, M2, 60300, smile2)).values()
+    assert (row['m1_last_trading_day'], row['m2_last_trading_day']) == (M1, M2)
+    assert row['m1_iv'] is None and row['iv30'] is None
