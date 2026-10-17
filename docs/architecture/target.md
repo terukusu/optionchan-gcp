@@ -180,6 +180,11 @@ flowchart LR
 - 補正は移行行の `price_time` をその場で UPDATE し（日付だけ。時刻は変えない）、`price_time_raw` に補正前の `price_time`（`YYYY-MM-DD HH:MM:SS`）を残し、`parser_version = 'legacy-fix4-1'` を補正の印にする（スキーマは変えない。2026-10-14 オーナー判断）。`price_time_raw` から正確に戻せる（`sql/price_time_fix/rollback.sql`）。推定・手順は `sql/price_time_fix/` と runbook「過去データの補正（#4、3b）」。日付が一意に決まる行（前回の表示より後に同じ時刻の別の候補が無い約定）だけを直し、一意に決まらない行（取り込みの空白の後・系列の最初）・カレンダー上の休業日の取得（2019-01-01〜03 など。祝日取引のあった 2023〜2025 年の 1/3 は立会中として直す）・立会の外の時刻の行は、同じ約定が続く行も含めて元のまま残し（印も付けない）、件数を記録する
 - 推定ロジックの検証: 並行稼働中の生 HTML を正解とし、旧ロジックで解析 → 推定 SQL で戻した結果との**一致率を AC にする**（目標値は #4 で決める）
 
+**DataCube の歩み値（#111）**
+
+- J-Quants DataCube の日経225オプション歩み値（オーナーの購入データ。自己使用で第三者への提供・公開は不可）を、非公開の表 `optionchan_tokyo.dc_option_tick` に置く（取引日の MONTH パーティション・`require_partition_filter`・クラスタは限月・種別・行使価格。Terraform は `infra/prod/datacube.tf`、列の正は `schema/tokyo/dc_option_tick.json`。取り込みの表ではないので `tables.json` の外）。CSV は `<P>-raw` の `datacube/option_tick/`（新系の取り込みは `raw/` だけを読む）。月ごとに `bq load --replace` でそのパーティションを置き換える。2022-07 以前の夜間の約定日は CSV のまま入れ、読む SQL で直す
+- #110 の欠け 2（2023-04-25〜05-08 の旧系の `price`・`price_time` が NULL の行）は、取引高（`volume`）が取引日の約定の累計と一致する約定で埋める（`sql/tick_fill/`、印は `parser_version = 'legacy-fill111-1'`、手順は runbook「DataCube の歩み値での穴埋め（#111）」）。リポジトリ・Issue にはデータ・値を書かない（件数・割合だけ）
+
 ### 3.3 ビューアー（App Engine をやめる）
 
 - **Cloud Run サービス 1 つ**に UI（静的ファイル）と API をまとめる。最小インスタンス 0

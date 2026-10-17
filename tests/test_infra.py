@@ -227,3 +227,22 @@ def test_trading_calendar_resources():
     # 定期起動は ingest サービスの 06:40 のリクエスト（Scheduler を足さない）
     assert 'google_cloud_scheduler_job' not in tf
 
+
+
+def test_datacube_tick_table():
+    """DataCube の歩み値（#111）: 非公開の購入データの表。取引日の MONTH パーティション（月ごとに --replace で入れる）、削除は二重に止める"""
+    tf = dict(all_tf())['prod/datacube.tf']
+    table = re.search(r'resource "google_bigquery_table" "dc_option_tick" \{(.*?)\n\}', tf, re.S).group(1)
+    assert 'table_id                 = "dc_option_tick"' in table
+    assert 'schema/tokyo/dc_option_tick.json' in table
+    assert re.search(r'time_partitioning \{\n\s+type  = "MONTH"\n\s+field = "trade_date"', table)
+    assert 'require_partition_filter = true' in table
+    assert 'clustering               = ["contract_month", "put_call_type", "exercise_price"]' in table
+    assert 'deletion_protection      = true' in table
+    assert 'deletion_policy          = "PREVENT"' in table
+    assert 'prevent_destroy = true' in table
+    # 取り込みのテーブルではない（tables.json の for_each・apps/ingest の検査に入れない）
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'tables.json'), encoding='utf-8') as f:
+        assert 'dc_option_tick' not in f.read()
+    # 付与は足さない（データセット単位の既存の付与だけ）
+    assert not re.search(r'google_bigquery_(table|dataset)_iam', tf)

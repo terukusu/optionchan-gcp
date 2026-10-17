@@ -1,0 +1,80 @@
+[
+  {
+    "name": "trade_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "取引日（CSV の 1 列目 Trade_Date / trade_date、YYYYMMDD）。夜間の約定は翌営業日、祝日取引の日の約定はその後の最初の現物の営業日。パーティション列（MONTH。1 ファイル = 1 取引月）"
+  },
+  {
+    "name": "execution_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "約定日（2 列目 Make_Date / make_date / execution_date、YYYYMMDD）。trade_date < 2022-08-01 の行は、夜間の 00:00〜08:00 の約定が夜間の始まりの日（実際の日付の前日）。2022-08 以降は実際の日付。読む SQL（sql/tick_fill/ の exec_at）で直す"
+  },
+  {
+    "name": "index_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "指数区分（3 列目 Index_Type / underlying_security_code）。日経225 は '18'"
+  },
+  {
+    "name": "put_call_type",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "1 = プット、2 = コール（option_price.type は 1 = コール・2 = プットで逆）"
+  },
+  {
+    "name": "security_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "銘柄コード（9 桁）"
+  },
+  {
+    "name": "execution_time",
+    "type": "TIME",
+    "mode": "REQUIRED",
+    "description": "約定時刻（6 列目 time、HHMMSSmmm の 9 桁。JST）"
+  },
+  {
+    "name": "trade_price",
+    "type": "NUMERIC",
+    "mode": "REQUIRED",
+    "description": "約定値段（〜2022-07 は整数表記、2022-08 以降は小数 4 桁の表記）"
+  },
+  {
+    "name": "price_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "値段の種類（O / E / P / N）"
+  },
+  {
+    "name": "trade_volume",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "約定数量"
+  },
+  {
+    "name": "seq_no",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "シーケンス No（10 列目 no。取引日・銘柄ごとの約定の順。（trade_date, security_code, seq_no）で一意）"
+  },
+  {
+    "name": "contract_month",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "限月（YYYYMM。Weekly は MM が 12 より大きい限月コード）"
+  },
+  {
+    "name": "exercise_price",
+    "type": "NUMERIC",
+    "mode": "REQUIRED",
+    "description": "行使価格"
+  },
+  {
+    "name": "cash_futures_type",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "現先区分（13 列目 cash_futures_type）"
+  }
+]
