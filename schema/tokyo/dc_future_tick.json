@@ -1,0 +1,68 @@
+[
+  {
+    "name": "trade_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "取引日（CSV の 1 列目 Trade_Date / trade_date、YYYYMMDD）。夜間の約定は翌営業日、祝日取引の日の約定はその後の最初の現物の営業日。パーティション列（MONTH。1 ファイル = 1 取引月）"
+  },
+  {
+    "name": "execution_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "約定日（2 列目 Make_Date / execution_date、YYYYMMDD）。trade_date < 2022-08-01 の行は、夜間の 00:00〜08:00 の約定が夜間の始まりの日（実際の日付の前日）。2022-08 以降は実際の日付。読む SQL（sql/tick_build/ の exec_at）で直す（dc_option_tick と同じ）"
+  },
+  {
+    "name": "index_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "指数区分（3 列目 Index_Type / index_type）。日経225 先物（ラージ）は '18'（ファイルには 18 だけが入っている）"
+  },
+  {
+    "name": "security_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "銘柄コード（9 桁）"
+  },
+  {
+    "name": "execution_time",
+    "type": "TIME",
+    "mode": "REQUIRED",
+    "description": "約定時刻（5 列目 Time / time、HHMMSSmmm の 9 桁。JST）"
+  },
+  {
+    "name": "trade_price",
+    "type": "NUMERIC",
+    "mode": "REQUIRED",
+    "description": "約定値段（ファイルの版で整数表記と小数 4 桁の表記がある）"
+  },
+  {
+    "name": "price_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "値段の種類（O / E / N）"
+  },
+  {
+    "name": "trade_volume",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "約定数量"
+  },
+  {
+    "name": "seq_no",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "シーケンス No（9 列目 No / no。取引日・銘柄ごとの約定の順。（trade_date, security_code, seq_no）で一意）"
+  },
+  {
+    "name": "contract_month",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "限月（YYYYMM。3・6・9・12 月）"
+  },
+  {
+    "name": "sco_category",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "11 列目 sco_category（2022-09 以降のファイルだけ。0 / 1）。2022-08 以前のファイルは 10 列なので NULL（bq load の --allow_jagged_rows）"
+  }
+]
