@@ -7,7 +7,7 @@ const path = require('node:path');
 
 const AtmSeries = require(path.join(__dirname, '..', '..', 'src', 'optionchan_viewer', 'static', 'atm_series.js'));
 const { SERIES, DEFAULT_SERIES, seriesOf, barsUrl, parseCsv, mergeBars, resample, monthLabel, monthLegend,
-  rollMarkers } = AtmSeries;
+  rollMarkers, jumpView } = AtmSeries;
 
 const T0 = Date.UTC(2026, 8, 30, 6, 0) / 1000;  // 2026-09-30 06:00 UTC（15:00 JST）
 
@@ -93,4 +93,17 @@ test('monthLabel・monthLegend', () => {
   assert.equal(monthLabel('2026-12-10'), '12月限');
   assert.equal(monthLabel('2027-01-14'), '1月限');
   assert.equal(monthLegend('2026-12-10'), '12月限（最終取引日 2026-12-10）');
+});
+
+test('jumpView: その日の 12:00 JST を中心に、足ごとの幅の範囲。不正・未来・2010 年より前は null', () => {
+  const now = Date.UTC(2026, 9, 17, 3) / 1000;  // 2026-10-17 12:00 JST
+  const noon = Date.UTC(2020, 2, 16, 3) / 1000;  // 2020-03-16 12:00 JST
+  assert.deepEqual(jumpView('2020-03-16', '1h', now), { from: noon - 3 * 86400, to: noon + 3 * 86400, atRight: false });
+  assert.deepEqual(jumpView('2020-03-16', '1d', now), { from: noon - 60 * 86400, to: noon + 60 * 86400, atRight: false });
+  assert.equal(jumpView('2020-03-16', '1m', now).to - jumpView('2020-03-16', '1m', now).from, 4 * 3600);
+  assert.ok(jumpView('2026-10-17', '1h', now));  // 今日は可
+  for (const v of ['', '2026-10-18', '2009-12-31', '2020-02-30', '2020-3-16', '2020-03-16x']) {
+    assert.equal(jumpView(v, '1h', now), null, v);
+  }
+  assert.equal(jumpView('2020-03-16', '2h', now), null);
 });
