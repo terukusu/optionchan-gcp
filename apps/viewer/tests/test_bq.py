@@ -10,7 +10,7 @@ import pytest
 from conftest import NOW
 
 from optionchan_viewer import bq, settings
-from optionchan_viewer.api import atm_iv_params, roll_hourly_params
+from optionchan_viewer.api import atm_iv_params, cm_params, roll_hourly_params
 
 CFG = settings.Settings(project="example-project")
 
@@ -55,6 +55,8 @@ PARAMS = {
     "atm_mid_months": roll_hourly_params(NOW, None, NOW, NOW),
     "atm_iv_minute_months": {"start_at": NOW, "end_at": NOW},
     "atm_mid_minute_months": {"start_at": NOW, "end_at": NOW},
+    "atm_cm_meta": {"start_at": NOW, "end_at": NOW},
+    "atm_cm": cm_params(NOW, None, NOW, NOW, 3600),
 }
 
 

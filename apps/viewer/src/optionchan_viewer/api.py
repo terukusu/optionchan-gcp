@@ -114,9 +114,10 @@ def parse_n(raw: str | None) -> int:
 
 
 def parse_bars_n(raw: str | None) -> int | str:
-    """/atm_iv_bars の n: parse_n の値に加え、roll（期近つなぎ、#101。完全一致）。/atm_iv_data は parse_n のまま"""
-    if raw == st.N_ROLL:
-        return st.N_ROLL
+    """/atm_iv_bars の n: parse_n の値に加え、roll（期近つなぎ、#101）・cm（30 日固定、#100）。完全一致。
+    /atm_iv_data は parse_n のまま"""
+    if raw in (st.N_ROLL, st.N_CM):
+        return raw
     return parse_n(raw)
 
 
@@ -217,10 +218,13 @@ def atm_iv_bars(runner, now: datetime, tf: str, n: int | str, rng=None,
     """/atm_iv_bars（#68・#77）: 足 tf の ATM IV の OHLC（/atm_iv_data と同じ CSV。値の無い足は除く）と、
     読んだ範囲 (start, end)。rng = parse_range の (start, end)（足の started_at が入る範囲。日足は取引日の 00:00 JST）。
     None なら既定（_bars_range）。iv = parse_iv の値（mid は分足が sql/atm_mid_minute.sql（#93）、1 時間足・日足が
-    sql/atm_mid.sql（#98））。n = parse_bars_n の値。roll（期近つなぎ、#101）は _roll_bars（CSV は 6 列目に限月）"""
+    sql/atm_mid.sql（#98））。n = parse_bars_n の値。roll（期近つなぎ、#101）は _roll_bars（CSV は 6 列目に限月）、
+    cm（30 日固定、#100）は _cm_bars（iv は使わない）"""
     now = _utc(now)
     if n == st.N_ROLL:
         return _roll_bars(runner, now, tf, rng, iv)
+    if n == st.N_CM:
+        return _cm_bars(runner, now, tf, rng)
     rng = _bars_range(runner, now, tf, rng)
     if rng[2]:
         return "", rng[0], rng[1]
@@ -325,3 +329,50 @@ def _roll_bars(runner, now: datetime, tf: str, rng, iv: str) -> tuple[str, datet
         # 束ねるのは乗り換えた後（違う限月の足は 1 本にしない）
         rows = bars.resample(rows, st.TIMEFRAMES[tf])
     return csvfmt.atm_iv_months_csv(rows), start, end
+
+
+def cm_params(now: datetime, last_created_at: datetime | None, start: datetime, end: datetime, step: int) -> dict:
+    """sql/atm_cm.sql（30 日固定、#100）のパラメータ（純粋関数）: 取り込み 1 回ごとの値の created_at が
+    [start, end) のものを step 秒の足にする。atm_cm_iv に無い分（最後の行の 1 秒後から。最大
+    ATM_IV_FILL_MAX_DAYS 日前まで）は生データから計算する。
+    end が補う分の始まり以前なら生データを読まない（hourly_params と同じく逆向きの区間にする）"""
+    now = _utc(now)
+    floor = utc_hour(now - timedelta(days=st.ATM_IV_FILL_MAX_DAYS))
+    fill_start = floor if last_created_at is None else max(last_created_at + timedelta(seconds=1), floor)
+    fill_end = now if end > fill_start else fill_start - DAY
+    return {
+        "fill_start": fill_start,
+        "fill_end": fill_end,
+        # SQ の日を決める休業日（2 限月の SQ は約 2 か月先。sql/cm/atm_cm.sql と同じ 120 日）
+        "holiday_start": jst_date(fill_start),
+        "holiday_end": jst_date(fill_end) + timedelta(days=st.CM_HOLIDAYS_AHEAD_DAYS),
+        "range_start": start,
+        "range_end": end,
+        "step": step,
+    }
+
+
+def _cm_bars(runner, now: datetime, tf: str, rng) -> tuple[str, datetime, datetime]:
+    """/atm_iv_bars?n=cm（30 日固定の ATM IV、#100）: 分足は 1 分の足（5m・15m は束ねる）、1 時間足は
+    1 時間の足、日足は 1 時間の足を
+    取引日ごとに束ねる（_daily。範囲の決め方は n=0 と同じ _bars_range・_daily_read）。CSV は /atm_iv_data と同じ 5 列"""
+    rng = _bars_range(runner, now, tf, rng)
+    if rng[2]:
+        return "", rng[0], rng[1]
+    start, end = rng[:2]
+    [meta] = runner("atm_cm_meta", {"start_at": now - timedelta(days=st.SEARCH_DAYS), "end_at": now})
+    last = meta["last_created_at"]
+    if st.TIMEFRAMES[tf] < 3600:
+        rows = bars.drop_empty(runner("atm_cm", cm_params(now, last, start, end, 60)))
+        if tf != "1m":
+            rows = bars.resample(rows, st.TIMEFRAMES[tf])
+    elif tf == "1h":
+        rows = bars.drop_empty(runner("atm_cm", cm_params(now, last, start, end, 3600)))
+    else:
+        read_start, read_end = _daily_read(start, end, now)
+        hourly = runner("atm_cm", cm_params(now, last, read_start, read_end, 3600))
+        if not hourly:
+            return "", start, end
+        holidays = _holidays(runner, read_start, end, st.HOLIDAYS_AHEAD_DAYS)
+        rows = _daily(hourly, holidays, read_start, start, end, now)
+    return csvfmt.atm_iv_csv(rows), start, end

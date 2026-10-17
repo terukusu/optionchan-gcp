@@ -4,11 +4,14 @@
 //   パラメータ、months = CSV の 6 列目（その足の限月 = 最終取引日）を読み、乗り換えの印・凡例の限月を出す
 // - 期近つなぎ（n=roll）: サーバーが取引日ごとに期近の最終取引日の 5 営業日前で 2 限月へ乗り換えた足を返す。
 //   印は限月が前の足と変わった最初の足に付ける（左・右に読み足してつないだ後の列全体から作り直す）
+// - 30 日固定（n=cm、#100）: 限月ごとにフォワードの位置で補間した ATM IV から、満期 30 日に補間した IV。気配の中値から作るので
+//   IV（約定 / mid）は選べない（fixedIv。URL に iv を付けない）
 var AtmSeries = (function() {
   var SERIES = [
     { value: '0', label: '0', query: { n: '0' }, months: false },
     { value: '1', label: '1', query: { n: '1' }, months: false },
     { value: 'roll', label: '期近つなぎ', query: { n: 'roll' }, months: true },
+    { value: 'cm', label: '30日固定', query: { n: 'cm' }, months: false, fixedIv: true },
   ];
   var DEFAULT_SERIES = '0';
 
@@ -27,7 +30,7 @@ var AtmSeries = (function() {
     Object.keys(series.query).forEach(function(k) {
       url += '&' + encodeURIComponent(k) + '=' + encodeURIComponent(series.query[k]);
     });
-    if (iv === 'mid') {
+    if (iv === 'mid' && !series.fixedIv) {
       url += '&iv=mid';
     }
     if (start !== null) {

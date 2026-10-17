@@ -1,0 +1,68 @@
+[
+  {
+    "name": "created_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "取り込み（スナップショット）の時刻。1 回 1 行。パーティション（月）の列"
+  },
+  {
+    "name": "iv30",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "30 日固定の ATM IV（%）。1 限月の SQ まで 30 日以上なら 1 限月の補間 ATM IV（method = m1）、3〜30 日なら 1 限月・2 限月の補間 ATM IV の総分散を満期について線形に補間した値（method = interp）、3 日未満なら 2 限月の補間 ATM IV（method = m2）。出せなければ NULL"
+  },
+  {
+    "name": "method",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "iv30 の出し方: m1（1 限月だけ）/ interp（2 限月の補間）/ m2（2 限月だけ）。iv30 が NULL なら NULL"
+  },
+  {
+    "name": "m1_last_trading_day",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "1 限月（SQ 前で最終取引日が最も早い限月）の最終取引日"
+  },
+  {
+    "name": "m1_days",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "1 限月の SQ（最終取引日の次の営業日の 09:00 JST）までの暦日の日数"
+  },
+  {
+    "name": "m1_forward",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "1 限月のフォワード（ATM に近い 5 本のうち call・put の両方に気配のある行使価格の C − P + K の中央値。3 本未満は NULL）"
+  },
+  {
+    "name": "m1_iv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "1 限月の補間 ATM IV（%）: フォワードをはさむ 2 本の行使価格の IV（call・put の mid IV の平均）を log(K / F) で線形に補間"
+  },
+  {
+    "name": "m2_last_trading_day",
+    "type": "DATE",
+    "mode": "NULLABLE",
+    "description": "2 限月の最終取引日"
+  },
+  {
+    "name": "m2_days",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "2 限月の SQ までの暦日の日数"
+  },
+  {
+    "name": "m2_forward",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "2 限月のフォワード（m1_forward と同じ出し方）"
+  },
+  {
+    "name": "m2_iv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "2 限月の補間 ATM IV（%。m1_iv と同じ出し方）"
+  }
+]

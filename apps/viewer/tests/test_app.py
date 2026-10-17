@@ -991,6 +991,110 @@ def test_roll_hourly_params():
     assert past["fill_end"] < past["fill_start"]
 
 
-@pytest.mark.parametrize("raw,want", [(None, 0), ("0", 0), ("1", 1), ("roll", "roll")])
+@pytest.mark.parametrize("raw,want", [(None, 0), ("0", 0), ("1", 1), ("roll", "roll"), ("cm", "cm")])
 def test_parse_bars_n(raw, want):
     assert api.parse_bars_n(raw) == want
+
+
+# ---- /atm_iv_bars?n=cm（30 日固定の ATM IV、#100） ----
+
+# atm_cm_iv の最後の行（10-13 05:55 JST。定期クエリの窓の終わりの前）
+CM_LAST = datetime(2026, 10, 12, 20, 55, tzinfo=UTC)
+
+
+def cm_results(tf):
+    """sql/atm_cm.sql の行: 分足は 1 分の足（値の無い分を含む）、1h・1d は 1 時間の足
+    （bars_results の atm_iv と同じ時刻）"""
+    results = bars_results()
+    results["atm_cm_meta"] = [{"last_created_at": CM_LAST}]
+    results["atm_cm"] = results["atm_iv_minute"] if tf in ("1m", "5m", "15m") else results["atm_iv"]
+    return results
+
+
+@pytest.mark.parametrize("tf,names,count", [
+    ("1m", ["latest_snapshot", "atm_cm_meta", "atm_cm"], 3),
+    ("5m", ["latest_snapshot", "atm_cm_meta", "atm_cm"], 2),
+    ("15m", ["latest_snapshot", "atm_cm_meta", "atm_cm"], 1),
+    ("1h", ["atm_cm_meta", "atm_cm"], 4),
+    ("1d", ["atm_cm_meta", "atm_cm", "trading_holidays"], 2),
+])
+def test_atm_iv_bars_cm_each_tf(make, tf, names, count):
+    client, runner = make(cm_results(tf))
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=cm")
+    assert res.status_code == 200
+    lines = res.get_data(as_text=True).splitlines()
+    assert len(lines) == count and all(len(line.split(",")) == 5 for line in lines)
+    assert [name for name, _ in runner.calls] == names
+    # 足・範囲のヘッダ・日足の束ね方は n=0 と同じ（同じ行を返すので同じ CSV）
+    runner.calls.clear()
+    zero = client.get(f"/atm_iv_bars?tf={tf}&n=0")
+    assert res.get_data(as_text=True) == zero.get_data(as_text=True)
+    assert (res.headers["X-Bars-Start"], res.headers["X-Bars-End"]) == (zero.headers["X-Bars-Start"],
+                                                                         zero.headers["X-Bars-End"])
+
+
+def test_atm_iv_bars_cm_ignores_iv(make):
+    client, runner = make(cm_results("1h"))
+    mid = client.get("/atm_iv_bars?tf=1h&n=cm&iv=mid").get_data(as_text=True)
+    calls = list(runner.calls)
+    runner.calls.clear()
+    assert client.get("/atm_iv_bars?tf=1h&n=cm").get_data(as_text=True) == mid
+    assert runner.calls == calls
+
+
+def test_atm_iv_bars_cm_params(make):
+    client, runner = make(cm_results("1m"))
+    # 分足: 1 分（step 60）。補うのは atm_cm_iv の最後の行の 1 秒後から now まで
+    client.get(f"/atm_iv_bars?tf=5m&n=cm&start={ep(utc(12))}&end={ep(utc(13, 6))}")
+    assert runner.calls[0] == ("atm_cm_meta", {"start_at": NOW - timedelta(days=14), "end_at": NOW})
+    assert runner.calls[1] == ("atm_cm", {
+        "fill_start": CM_LAST + timedelta(seconds=1), "fill_end": NOW,
+        "holiday_start": date(2026, 10, 13), "holiday_end": date(2026, 10, 13) + timedelta(days=120),
+        "range_start": utc(12), "range_end": utc(13, 6), "step": 60})
+    # 1h: step 3600
+    runner.calls.clear()
+    client.get(f"/atm_iv_bars?tf=1h&n=cm&start={ep(utc(3))}&end={ep(NOW)}")
+    assert runner.calls[1][1]["step"] == 3600 and runner.calls[1][1]["range_start"] == utc(3)
+    # 1d: 1 時間の足を start の 10 日前〜min(end + 1 日, now) で読む。
+    # 表に入っている範囲だけなら生データを読まない（逆向き）
+    runner.calls.clear()
+    client.get(f"/atm_iv_bars?tf=1d&n=cm&start={ep(utc(8))}&end={ep(utc(10))}")
+    params = runner.calls[1][1]
+    assert (params["range_start"], params["range_end"], params["step"]) == (utc(28, month=9), utc(11), 3600)
+    assert params["fill_end"] < params["fill_start"]
+
+
+def test_cm_params_fill_floor():
+    # 表が空・古いときに補うのは最大 3 日前の正時から（/atm_iv_data の 1 時間足と同じ）
+    floor = utc(10, 6)
+    assert api.cm_params(NOW, None, utc(1), NOW, 3600)["fill_start"] == floor
+    assert api.cm_params(NOW, utc(1), utc(1), NOW, 3600)["fill_start"] == floor
+
+
+@pytest.mark.parametrize("tf", ["1m", "1h", "1d"])
+def test_atm_iv_bars_cm_no_rows_is_empty_200(make, tf):
+    results = cm_results(tf)
+    results["atm_cm"] = []
+    client, runner = make(results)
+    res = client.get(f"/atm_iv_bars?tf={tf}&n=cm")
+    assert res.status_code == 200 and res.get_data(as_text=True) == ""
+    # 行が無ければ休業日を読まない
+    assert "trading_holidays" not in [name for name, _ in runner.calls]
+
+
+@pytest.mark.parametrize("path", ["/atm_iv_bars?n=CM", "/atm_iv_bars?n=cm%0A", "/atm_iv_data?n=cm",
+                                  "/atm_iv_bars?tf=1h&n=cm&iv=MID"])
+def test_atm_iv_bars_cm_bad_request(make, path):
+    client, runner = make(cm_results("1h"))
+    assert client.get(path).status_code == 400
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize("name", ["atm_cm_meta", "atm_cm"])
+def test_atm_iv_bars_cm_query_error_is_500(make, capsys, name):
+    results = cm_results("1h")
+    results[name] = RuntimeError("secret detail: project 123456789012")
+    client, _ = make(results)
+    res = client.get("/atm_iv_bars?tf=1h&n=cm")
+    assert res.status_code == 500
+    assert "secret" not in capsys.readouterr().out

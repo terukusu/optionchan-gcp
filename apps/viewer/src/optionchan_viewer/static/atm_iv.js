@@ -13,7 +13,9 @@
 // - サーバーの 1 日のクエリ量の上限（#95）に達すると 429 が返る。そのときは上限に達したことを出す
 // - 限月の選択肢は static/atm_series.js の系列の表（AtmSeries.SERIES）から作る。「期近つなぎ」（n=roll。#101）は
 //   取引日ごとに期近の最終取引日の 5 営業日前で 2 限月へ乗り換えてつないだ足で、乗り換えた足に印（新しい限月）を付け、
-//   凡例にカーソルの足の限月を出す。CSV・束ね・つなぎ・印の純粋関数は atm_series.js
+//   凡例にカーソルの足の限月を出す。「30日固定」（n=cm。#100）は満期 30 日に補間した IV で、IV の選択は使わない（選べなくする）。
+//   CSV・束ね・つなぎ・印の純粋関数は atm_series.js
+// - 表示はローソク足か折れ線（終値を結ぶ）。切り替えは描き直すだけで読み直さない
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
@@ -39,8 +41,10 @@ var MARKER_COLOR = '#2962ff';  // 乗り換えの印（チャートの canvas �
 
 var chart = null;
 var series = null;
+var seriesStyle = null;  // 'candle' / 'line'（series の種類）
 var markers = null;  // 乗り換えの印（createSeriesMarkers）
 var monthAt = new Map();  // チャートの time → その足の限月（期近つなぎのときだけ）
+var barAt = new Map();  // チャートの time → 足（凡例。折れ線の点は OHLC を持たないので、ここから引く）
 var shown = [];  // 描いている足（UTC 秒の time）
 var currentTf = null;
 var shownTf = '1h';  // 描いている足（読み込み中は currentTf と違う）
@@ -87,12 +91,17 @@ function showLegend(bar) {
     return;
   }
   var month = monthAt.get(bar.time);
-  el('legend').textContent = (shownIv === 'mid' ? 'mid  ' : '') + formatTime(bar.time) + '  O ' + bar.open.toFixed(2) + '  H ' + bar.high.toFixed(2) +
+  var kind = AtmSeries.seriesOf(shownN).fixedIv ? '30日  ' : (shownIv === 'mid' ? 'mid  ' : '');
+  el('legend').textContent = kind + formatTime(bar.time) + '  O ' + bar.open.toFixed(2) + '  H ' + bar.high.toFixed(2) +
     '  L ' + bar.low.toFixed(2) + '  C ' + bar.close.toFixed(2) + (month ? '  ' + AtmSeries.monthLegend(month) : '');
 }
 
 function toChart(bar) {
   return { time: bar.time + JST_OFFSET, open: bar.open, high: bar.high, low: bar.low, close: bar.close };
+}
+
+function toSeries(bar) {
+  return seriesStyle === 'line' ? { time: bar.time + JST_OFFSET, value: bar.close } : toChart(bar);
 }
 
 function entryKey(tf, n, iv) {
@@ -219,7 +228,8 @@ function render(view, keep) {
   shownN = currentN;
   shownIv = currentIv;
   chart.applyOptions({ timeScale: { timeVisible: currentTf !== '1d' } });
-  series.setData(shown.map(toChart));
+  barAt = new Map(shown.map(function(b) { return [b.time + JST_OFFSET, toChart(b)]; }));
+  series.setData(shown.map(toSeries));
   renderMonths();
   if (lr && oldFirst !== null) {
     var shift = 0;
@@ -301,7 +311,10 @@ function select(view) {
   clearError();
   var tf = el('tf').value;
   var n = el('nmonth').value;
-  var iv = el('ivkind').value;
+  // 30日固定は IV を選べない（読み込み済みの足を覚えるキーは mid に揃える）
+  var fixedIv = !!AtmSeries.seriesOf(n).fixedIv;
+  el('ivkind').disabled = fixedIv;
+  var iv = fixedIv ? 'mid' : el('ivkind').value;
   var conf = TF[tf];
   var key = entryKey(tf, n, iv);
   var entry = entries[key];
@@ -482,17 +495,29 @@ function createChart() {
     localization: { locale: 'ja-JP', timeFormatter: formatTime },
     timeScale: { timeVisible: true, secondsVisible: false, rightOffset: RIGHT_OFFSET },
   });
-  series = chart.addSeries(LightweightCharts.CandlestickSeries, {
-    priceFormat: { type: 'price', precision: 2, minMove: 0.01 },
-  });
-  markers = LightweightCharts.createSeriesMarkers(series, []);
+  setStyle(el('style').value);
   chart.subscribeCrosshairMove(function(param) {
-    var bar = param.time !== undefined ? param.seriesData.get(series) : null;
+    var bar = param.time !== undefined ? barAt.get(param.time) : null;
     showLegend(bar || (shown.length ? toChart(shown[shown.length - 1]) : undefined));
   });
   chart.timeScale().subscribeVisibleLogicalRangeChange(function() {
     scheduleCheck();
   });
+}
+
+// 表示（ローソク足 / 折れ線）の series を作り直す。印も付け直し、描いている足を描き直す（表示範囲は時刻の軸なので保たれる）
+function setStyle(style) {
+  if (series) {
+    chart.removeSeries(series);
+  }
+  seriesStyle = style === 'line' ? 'line' : 'candle';
+  var opts = { priceFormat: { type: 'price', precision: 2, minMove: 0.01 } };
+  series = seriesStyle === 'line' ?
+    chart.addSeries(LightweightCharts.LineSeries, Object.assign({ lineWidth: 2 }, opts)) :
+    chart.addSeries(LightweightCharts.CandlestickSeries, opts);
+  markers = LightweightCharts.createSeriesMarkers(series, []);
+  series.setData(shown.map(toSeries));
+  renderMonths();
 }
 
 // ライセンス（Apache-2.0）の帰属表記のリンク。テンプレートに外部の URL を書かないため、ここで設定する
@@ -517,6 +542,9 @@ function onSelect() {
 el('tf').addEventListener('change', onSelect);
 el('nmonth').addEventListener('change', onSelect);
 el('ivkind').addEventListener('change', onSelect);
+el('style').addEventListener('change', function() {
+  setStyle(el('style').value);
+});
 el('chart-retry').addEventListener('click', function() {
   if (retry) {
     retry();

@@ -2103,6 +2103,57 @@ GROUP BY y ORDER BY y"
 - 全部を戻す（この Issue の revert）: 3 表の `deletion_protection = false` の PR → revert の PR（delete 7）。#98 の `atm_mid_iv` だけを戻すときも同じ（`deletion_protection = false` の PR → #98 の revert の PR。delete 1）。旧系の `insert_ohlc` は動いたままなので、旧ビューアーには影響しない
 - 旧系の停止（#14）: `insert_ohlc` と Scheduler `create_timeframe` を止める前に、「旧系の同値の確認」を直近 30 日でもう一度流して記録する。止めた後は新系の 3 表だけになる（旧 3 表は #15 で消すまで残る）
 
+## 30 日固定の ATM IV（#100）
+
+`/atm_iv` の「30日固定」（`n=cm`）の値を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の表。計算の式は README の「30 日固定の ATM IV（#100）」。定義は `infra/prod/sq.tf`、SQL は `sql/cm/`（試験は `tests/test_cm.py`・`tests/test_cm_bq.py`）。
+
+| もの | 内容 |
+|---|---|
+| DTS `optionchan atm-cm`（asia-northeast1、`sa-sq-dts`、毎日 07:45 JST = `every day 22:45` UTC） | `sql/cm/atm_cm.sql`。窓は「1 時間足（#49）」と同じ `[D-1 07:00, D 07:00) JST`。最新版の全行使価格の気配から取り込み 1 回ごとに 1 行を作り、`atm_cm_iv` の窓の中を置き換える（結果が 0 行の窓では何もしない）。失敗の M2 の抑制は 08:45 に終わる |
+| `optionchan_tokyo.atm_cm_iv` | 列は `schema/cm/atm_cm_iv.json`（`created_at`・`iv30`・`method` と、限月ごとの最終取引日・SQ までの日数・フォワード・補間 ATM IV）。パーティションは月（`created_at`）。1 日 約 1,000 行 |
+| `sql/cm/cm_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)` の作り直し（下の「過去分」） |
+
+- ビューアーは表の最後の行の 1 秒後から now まで（最大 3 日）を同じ計算で補う（`apps/viewer` の `sql/atm_cm.sql`）。読み込み 1 回 約 200 MiB（UTC の 2 日分のパーティション。mid の 1 時間足の補う分 約 175 MiB と同じ程度）
+- 料金: 定期クエリは 1 日 約 200 MiB（窓が UTC の 2 日にまたがる。dry run）
+
+### 確認（prod の apply の後）
+
+```sh
+# 定期クエリができている（表示名で選ぶ）
+bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json | jq -r '.[] | select(.displayName == "optionchan atm-cm") | .schedule'
+# 翌朝 07:45 の後: 前日の窓の行数と、iv30 のある割合
+q --location=$L --format=pretty "SELECT COUNT(*) n, COUNTIF(iv30 IS NOT NULL) with_iv30, COUNTIF(method = 'interp') interp
+FROM \`$P.optionchan_tokyo.atm_cm_iv\` WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)"
+```
+
+失敗を受けたとき・手動の再実行は「1 時間足（#49）」と同じ（`rt` の `atm-hourly` を `atm-cm`、`22:40` を `22:45` に替える）。
+
+### 過去分
+
+表ができる前（デプロイの後に定期クエリが最初に作った窓の始まり E より前）は `sql/cm/cm_backfill.sql` で作り直す（同じ計算で範囲の中を置き換える。冪等）。
+
+- 範囲: 2018-10-01 〜 E（範囲は正時で now より前。SQL が検査する）。データの無い期間（2022-09 中旬〜2023-04 下旬）は何もしない
+- 量: 全部で 約 35 GiB（必要な列を全期間で読んだときの dry run）。1 か月 0.3〜1.2 GiB（行数の多い 2026 年が大きい）。プロジェクトのクエリ量の上限（32 GiB/日）を超えるので、**1 日に流すのは 20 GiB まで**（2018〜2023 年で約 15 GiB、2024 年〜E で約 20 GiB の 2 日に分ける）
+- 1 年ずつ流す（`ro` は「1 時間足（#49）」の変数。`sql/cm/` を読むように替える）:
+
+```sh
+rc() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" "sql/cm/$1.sql"; }
+E=<定期クエリが最初に作った窓の始まり>   # 例: 2026-10-16 22:00:00+00
+for y in 2018 2019 2020 2021 2022 2023; do
+  s="$y-01-01 00:00:00+00"; e="$((y + 1))-01-01 00:00:00+00"
+  rc cm_backfill | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=10737418240 | jq -c '.[-1][0]'
+done
+# 翌日: 2024・2025 年と、2026-01-01〜E
+```
+
+- 結果は 1 行（`snapshots` = 取り込みの回数、`with_iv30` = 30 日の IV のある回数）。年ごとの件数を #100 にコメントする（全文は貼らない）
+- 確認: 年ごとの `with_iv30 / snapshots` が README の「出せる割合」と同じ程度（日中・夜間の前半はほぼ 100%、2021〜2025 年は深夜が NULL で 72〜100%）
+
+### 停止・削除
+
+- 一時停止: `infra/prod/sq.tf` の `atm_cm` に `disabled = true` を足す PR。ビューアーは表が古いと補う分（最大 3 日）だけを計算し、それより前の期間は空になる
+- 戻す: `atm_cm_iv` の `deletion_protection = false` の PR → #100 の revert の PR
+
 ## ビューアー（#13）
 
 新しいビューアー（`apps/viewer`、#52）を Cloud Run `viewer` に IAP（Cloud Run への直接設定。ロードバランサ不要・追加費用なし）の後ろでデプロイする（#53）。旧ビューアー（App Engine + 旧 HTTP 関数）とは独立していて、旧ビューアーには触れない。

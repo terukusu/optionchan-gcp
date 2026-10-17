@@ -22,6 +22,9 @@ CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
 - /atm_iv_bars?n=roll（#101）: 全限月のクエリ（1 時間足 + 補完、分足 trade・mid）の各限月の足が、同じ入力の n=0・n=1 の
   クエリの足と同じ（限月の列が足されただけ）。期近つなぎの API が乗り換えの無い期間で n=0 と同じ足。
   dry run が 512 MiB 以下
+- /atm_iv_bars?n=cm（#100）: 表（atm_cm_iv）の値と、まだ表に無い分を生の気配から計算した 30 日の IV を
+  つなぎ、範囲で絞って足に束ねる。計算の値は README の式（ルートの tests/test_cm_bq.py と同じ）。
+  dry run が 512 MiB 以下（表ができた後）
 """
 import json
 import os
@@ -147,10 +150,13 @@ def bar(at, month, o, h, low, c):
             "started_at": at}
 
 
-def fixtures(options=(), hourly=(), runs=(), calendar=(), mid_hourly=()):
+CM = [("created_at", "TIMESTAMP"), ("iv30", "FLOAT64")]
+
+
+def fixtures(options=(), hourly=(), runs=(), calendar=(), mid_hourly=(), cm=()):
     return ",\n".join([cte("option_price", OPTION, list(options)), cte("atm_iv", HOURLY, list(hourly)),
                        cte("ingest_runs", RUNS, list(runs)), cte("trading_calendar_latest", CALENDAR, list(calendar)),
-                       cte("atm_mid_iv", HOURLY, list(mid_hourly))])
+                       cte("atm_mid_iv", HOURLY, list(mid_hourly)), cte("atm_cm_iv", CM, list(cm))])
 
 
 def with_fixtures(sql, fx):
@@ -171,6 +177,7 @@ def new_sql(name, fx):
                   r"(SELECT * FROM ingest_runs WHERE snapshot_at >= \1 AND snapshot_at < \2)", text)
     text = text.replace("`${project}.${dataset}.atm_iv`", "atm_iv")
     text = text.replace("`${project}.${dataset}.atm_mid_iv`", "atm_mid_iv")
+    text = text.replace("`${project}.${dataset}.atm_cm_iv`", "atm_cm_iv")
     text = text.replace("`${project}.${dataset}.trading_calendar_latest`", "trading_calendar_latest")
     assert "${" not in text, name
     return with_fixtures(text, fx)
@@ -926,6 +933,10 @@ def bars_dry_run_params(end):
         "trading_holidays_roll": ("trading_holidays", {
             "start_date": api.jst_date(daily_start) - timedelta(days=1),
             "end_date": api.jst_date(end) + timedelta(days=api.st.ROLL_HOLIDAYS_AHEAD_DAYS)}),
+        # 30 日固定（#100）: 表が空（補う分が最大の 3 日）の分足・日足の最大の範囲と、過去だけの範囲
+        "atm_cm_minute": ("atm_cm", api.cm_params(end, None, end - timedelta(days=minute_max), end, 60)),
+        "atm_cm_daily": ("atm_cm", api.cm_params(end, None, daily_start, end, 3600)),
+        "atm_cm_past": ("atm_cm", api.cm_params(end, None, daily_start, end - timedelta(days=5), 3600)),
     }
 
 
@@ -953,7 +964,7 @@ def test_dry_run_smile_snapshot_within_512mib(name, record_property):
 @pytest.mark.parametrize("name", ["atm_iv_minute", "atm_mid_minute", "trading_holidays", "atm_iv", "atm_iv_past",
                                   "atm_iv_minute_months", "atm_mid_minute_months", "atm_iv_months",
                                   "atm_iv_months_past", "trading_holidays_roll", "atm_mid", "atm_mid_past",
-                                  "atm_mid_months"])
+                                  "atm_mid_months", "atm_cm_minute", "atm_cm_daily", "atm_cm_past"])
 def test_dry_run_bars_within_512mib(name, record_property):
     now = datetime.now(UTC)
     # UTC の 1 日（JST 09:00〜翌 08:59）は日中 + 夜間。夜間が終わった後（22:00 UTC = 07:00 JST 以降）なら
@@ -964,3 +975,63 @@ def test_dry_run_bars_within_512mib(name, record_property):
     record_property("bytes", nbytes)
     print(f"dry run {name} (end {end:%Y-%m-%d}): {nbytes} bytes ({nbytes / MiB:.1f} MiB)")
     assert nbytes <= 512 * MiB
+
+
+# ---- /atm_iv_bars?n=cm（30 日固定の ATM IV、#100） ----
+
+CM_STRIKES = range(58500, 62001, 500)
+
+
+def cm_month(at, month, fwd, base):
+    """1 限月分の気配（ルートの tests/test_cm_bq.py の month_rows と同じ形）: C − P + K = fwd、
+    mid IV = base + (K − 60000) / 500"""
+    rows = []
+    for k in CM_STRIKES:
+        iv = base + (k - 60000) / 500
+        for typ, mid in ((1, 1000 + fwd - k), (2, 1000)):
+            rows.append(opt(at, typ, k, month, is_atm=k == 60000, bid=mid - 10, ask=mid + 10,
+                            bid_iv=iv - 0.5, ask_iv=iv + 0.5))
+    return rows
+
+
+def cm_expected(at):
+    """README の式: F = 60200 / 60300、60000 と 60500 の間を log(K / F) で補間、1 限月の SQ まで 30 日以上なら
+    1 限月の値、それより短ければ総分散を 30 日に補間"""
+    import math
+
+    def interp(fwd, base):
+        return base + math.log(fwd / 60000) / math.log(60500 / 60000)
+
+    days = [(datetime(2026, 11, 13, tzinfo=UTC) - at).total_seconds() / 86400,
+            (datetime(2026, 12, 11, tzinfo=UTC) - at).total_seconds() / 86400]
+    (d1, d2), s1, s2 = days, interp(60200, 20), interp(60300, 22)
+    if d1 >= 30:
+        return s1
+    return math.sqrt(((d2 - 30) * s1 * s1 * d1 + (30 - d1) * s2 * s2 * d2) / (d2 - d1) / 30)
+
+
+def test_atm_cm_joins_table_and_fill():
+    last = datetime(2026, 10, 12, 21, 59, tzinfo=UTC)  # 表の最後の行（10-13 06:59 JST）
+    stored = [{"created_at": utc(12, 19, 0), "iv30": 30.0},  # 範囲の前
+              {"created_at": utc(12, 20, 1), "iv30": 21.0}, {"created_at": utc(12, 20, 30), "iv30": 23.0},
+              {"created_at": utc(12, 20, 59), "iv30": 22.0}, {"created_at": utc(12, 21, 5), "iv30": None},
+              {"created_at": utc(12, 21, 59), "iv30": 24.0}]
+    t1, t2 = datetime(2026, 10, 13, 0, 0, tzinfo=UTC), datetime(2026, 10, 13, 0, 1, tzinfo=UTC)
+    options = []
+    for at in (utc(13, 0, 0), utc(13, 0, 1), utc(13, 7, 0)):  # 07:00 は範囲の後
+        options += cm_month(at, M1, 60200, 20) + cm_month(at, M2, 60300, 22)
+    run = fixture_runner(fixtures(options, cm=stored))
+    start, end = datetime(2026, 10, 12, 20, tzinfo=UTC), datetime(2026, 10, 13, 6, tzinfo=UTC)
+    hourly = run("atm_cm", api.cm_params(NOW, last, start, end, 3600))
+    got = [(r["started_at"], r["open"], r["high"], r["low"], r["close"]) for r in hourly]
+    e1, e2 = cm_expected(t1), cm_expected(t2)
+    assert [g[0] for g in got] == [datetime(2026, 10, 12, h, tzinfo=UTC) for h in (20, 21)] + [t1]
+    assert got[0][1:] == (21.0, 23.0, 21.0, 22.0)
+    assert got[1][1:] == (24.0, 24.0, 24.0, 24.0)  # NULL は飛ばす
+    assert got[2][1] == pytest.approx(e1, abs=1e-9) and got[2][4] == pytest.approx(e2, abs=1e-9)
+    # 分足: 1 分 1 本
+    minute = run("atm_cm", api.cm_params(NOW, last, datetime(2026, 10, 13, tzinfo=UTC), end, 60))
+    assert [(r["started_at"], round(r["close"], 9)) for r in minute] == [(t1, round(e1, 9)), (t2, round(e2, 9))]
+    # 表に入っている範囲だけなら生データを読まない（逆向きの区間）: 補う分の値は出ない
+    past = run("atm_cm", api.cm_params(NOW, last, start, datetime(2026, 10, 12, 22, tzinfo=UTC), 3600))
+    assert [r["started_at"] for r in past] == [datetime(2026, 10, 12, h, tzinfo=UTC) for h in (20, 21)]

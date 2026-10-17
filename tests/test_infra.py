@@ -60,6 +60,8 @@ DTS_EXPECTED = {
     'prod/sq.tf:google_bigquery_data_transfer_config.legacy_compare': ('scheduled_query', 'every day 22:30'),
     # 1 時間足（#49）。上の 4 本（07:02〜07:30 JST）の後の 07:40。失敗の M2 の抑制は 08:40 に終わる
     'prod/sq.tf:google_bigquery_data_transfer_config.atm_hourly': ('scheduled_query', 'every day 22:40'),
+    # 30 日固定の ATM IV（#100）。1 時間足の後の 07:45。失敗の M2 の抑制は 08:45 に終わる
+    'prod/sq.tf:google_bigquery_data_transfer_config.atm_cm': ('scheduled_query', 'every day 22:45'),
 }
 
 

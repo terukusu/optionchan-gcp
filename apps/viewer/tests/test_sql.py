@@ -17,7 +17,11 @@ SQL_DIR = PKG_DIR / "sql"
 SQL = {p.stem: p.read_text(encoding="utf-8") for p in SQL_DIR.glob("*.sql")}
 ALLOWED_FUNCS = {"latest_runs", "option_price_latest"}
 # 表 → 期間で絞る列
-ALLOWED_TABLES = {"atm_iv": "started_at", "atm_mid_iv": "started_at", "trading_calendar_latest": "calendar_date"}
+ALLOWED_TABLES = {"atm_iv": "started_at", "atm_mid_iv": "started_at", "trading_calendar_latest": "calendar_date",
+                  "atm_cm_iv": "created_at"}
+# 文字列リテラル: タイムゾーン名と、30 日固定（#100）の計算の出し方の名前（sql/cm/atm_cm.sql と同じ本文）
+LITERALS = {"Asia/Tokyo"}
+CM_METHODS = {"m1", "interp", "m2"}
 
 
 def body(text):
@@ -43,7 +47,7 @@ def test_names_are_placeholders(name):
     for ref in re.findall(r"`([^`]+)`", text):
         assert re.match(r"\$\{project\}\.\$\{dataset\}\.\w+$", ref), (name, ref)
     # 文字列リテラルに値を埋め込まない（タイムゾーン名だけ）
-    assert set(re.findall(r"'([^']*)'", text)) <= {"Asia/Tokyo"}
+    assert set(re.findall(r"'([^']*)'", text)) <= (LITERALS | CM_METHODS if name == "atm_cm" else LITERALS)
 
 
 @pytest.mark.parametrize("name", sorted(SQL))

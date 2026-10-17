@@ -56,6 +56,11 @@ HOLIDAYS_AHEAD_DAYS = 15  # 日足の取引日の判定に読む休業日の先�
 # 2 限月へ乗り換える（残存営業日数 <= ROLL_BUSINESS_DAYS の取引日から。bars.roll）。日数は限月の間隔（約 20 営業日）より
 # 十分小さい値（0〜ROLL_BUSINESS_DAYS_MAX）にする
 N_ROLL = "roll"
+# /atm_iv_bars の n=cm（30 日固定の ATM IV、#100）: 取り込み 1 回ごとの 30 日の IV（atm_cm_iv と、
+# まだ表に入っていない分の計算。気配の中値から作るので iv（約定 / mid）は使わない）。
+# 1 時間足になっていない分と同じく、補うのは最大 ATM_IV_FILL_MAX_DAYS 日
+N_CM = "cm"
+CM_HOLIDAYS_AHEAD_DAYS = 120  # n=cm の補う分で SQ の日を決める休業日の先（sql/cm/atm_cm.sql の 120 日と同じ）
 ROLL_BUSINESS_DAYS = 5
 ROLL_BUSINESS_DAYS_MAX = 10
 # n=roll で読む休業日の先（読んだ上端の JST の日付から。最後の取引日の後の ROLL_BUSINESS_DAYS + 1 営業日目まで数える。

@@ -6,6 +6,7 @@
 #   quality-daily  07:15 JST  東京  品質チェック → quality_daily。違反があれば失敗（新系の M2 で通知）。ingest の 07:00 の照合・回収の後
 #   legacy-compare 07:30 JST  東京  コピーと最新版を比べる → legacy_compare_daily。コピーの欠けは失敗、説明できない差分は下の切り替え（と日付の下限）で
 #   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price（#49。旧系の insert_ohlc の置き換え）と atm_mid_iv（#98）に MERGE
+#   atm-cm         07:45 JST  東京  最新版の全行使価格の気配から 30 日固定の ATM IV を作り atm_cm_iv の窓を置き換える（#100）
 # 時刻を 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
 # legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ。旧系の停止（#14）で legacy-* を無効にし（var.legacy_stopped）、
 # 旧系の削除（#24）で消す。品質チェックと 1 時間足は残す。
@@ -240,4 +241,50 @@ resource "google_bigquery_data_transfer_config" "atm_hourly" {
   }
 
   depends_on = [google_bigquery_dataset_iam_member.sq_tokyo_viewer, google_bigquery_table_iam_member.sq_atm_ohlc_editor]
+}
+
+# ---- 30 日固定の ATM IV（#100） ----
+# 取り込み 1 回 1 行（1 日 約 1,000 行）。列の正は schema/cm/atm_cm_iv.json。パーティションは月（created_at）。
+# データは最新版から作り直せる（sql/cm/cm_backfill.sql）ので deletion_protection だけ（消すときは外す PR を先に出す）
+
+resource "google_bigquery_table" "atm_cm_iv" {
+  project                  = var.project_id
+  dataset_id               = google_bigquery_dataset.tokyo.dataset_id
+  table_id                 = "atm_cm_iv"
+  description              = "30 日固定の ATM IV（#100。sql/cm/atm_cm.sql）。取り込み 1 回 1 行: 限月ごとのフォワード・補間 ATM IV・SQ までの日数と、30 日の IV"
+  schema                   = file("${path.module}/../../schema/cm/atm_cm_iv.json")
+  require_partition_filter = false
+  deletion_protection      = true
+
+  time_partitioning {
+    type  = "MONTH"
+    field = "created_at"
+  }
+}
+
+# 定期クエリが窓の行を置き換える（テーブル単位。データセットは sq_tokyo_viewer の読み取りだけ）
+resource "google_bigquery_table_iam_member" "sq_atm_cm_editor" {
+  project    = var.project_id
+  dataset_id = google_bigquery_table.atm_cm_iv.dataset_id
+  table_id   = google_bigquery_table.atm_cm_iv.table_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${local.sa_sq}"
+}
+
+# atm-hourly（07:40）の後。失敗の M2 の抑制は 08:45 に終わる
+resource "google_bigquery_data_transfer_config" "atm_cm" {
+  project              = var.project_id
+  display_name         = "optionchan atm-cm"
+  location             = local.bq.dataset.location
+  data_source_id       = "scheduled_query"
+  schedule             = "every day 22:45"
+  service_account_name = local.sa_sq
+  params = {
+    query = templatefile("${path.module}/../../sql/cm/atm_cm.sql", {
+      project = var.project_id
+      dataset = google_bigquery_dataset.tokyo.dataset_id
+    })
+  }
+
+  depends_on = [google_bigquery_dataset_iam_member.sq_tokyo_viewer, google_bigquery_table_iam_member.sq_atm_cm_editor]
 }
