@@ -107,3 +107,17 @@ test('jumpView: その日の 12:00 JST を中心に、足ごとの幅の範囲�
   }
   assert.equal(jumpView('2020-03-16', '2h', now), null);
 });
+
+test('足が 0 本の説明: 0・1 は期近つなぎへ、mid は約定へ、ほかは説明だけ', () => {
+  const { emptyHint } = AtmSeries;
+  assert.deepEqual(SERIES.filter((s) => s.fromToday).map((s) => s.value), ['0', '1']);
+  for (const iv of ['mid', 'trade']) {
+    assert.equal(emptyHint(seriesOf('0'), iv).action, 'roll');
+    assert.match(emptyHint(seriesOf('1'), iv).text, /限月「1」/);
+  }
+  assert.equal(emptyHint(seriesOf('roll'), 'mid').action, 'trade');
+  assert.equal(emptyHint(seriesOf('roll'), 'trade').action, null);
+  // 30日固定は IV を選べない（mid として扱う）ので、約定へは誘わない
+  assert.equal(emptyHint(seriesOf('cm'), 'mid').action, null);
+  assert.equal(emptyHint(seriesOf('cm'), 'mid').text, 'データがありません');
+});
