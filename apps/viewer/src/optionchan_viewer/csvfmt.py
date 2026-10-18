@@ -5,6 +5,7 @@
 """
 
 import math
+import re
 from datetime import UTC, date, datetime
 
 SMILE_COLUMNS = (
@@ -21,6 +22,8 @@ SMILE_COLUMNS = (
 ATM_IV_COLUMNS = ("open", "high", "low", "close", "started_at")
 # /atm_iv_bars?n=roll（期近つなぎ、#101）: 6 列目にその足の限月（最終取引日）
 ATM_IV_MONTHS_COLUMNS = (*ATM_IV_COLUMNS, "last_trading_day")
+# /data_gaps（#123）: 欠けの区間（prev_at・next_at は UTC の UNIX 秒）
+DATA_GAPS_COLUMNS = ("prev_at", "next_at", "cause", "status")
 # /smile_snapshot（#79）: 2 行目以降の列（縦持ち。1 行 = 限月 × 行使価格 × call / put。smile.snapshot_rows の行）
 SNAPSHOT_COLUMNS = (
     "month",
@@ -47,6 +50,11 @@ def cell(value) -> str:
         return "" if math.isnan(value) else repr(value)
     if isinstance(value, int):
         return str(value)
+    if isinstance(value, str):
+        # 区間の種類・状態・source（#123）。固定の語だけで、区切り・引用符・改行を含むものは出さない
+        if re.search(r'[,"\r\n]', value):
+            raise ValueError("CSV に出せない文字を含む")
+        return value
     if isinstance(value, datetime):
         # pandas の to_csv と同じ表記（YYYY-MM-DD HH:MM:SS+00:00）。JS は Date.parse で読む
         if value.tzinfo is None:
@@ -78,10 +86,15 @@ def atm_iv_months_csv(rows: list[dict]) -> str:
     return "".join(line([r[c] for c in ATM_IV_MONTHS_COLUMNS]) for r in rows)
 
 
-def snapshot_csv(snapshot_at: datetime, months: dict, rows: list[dict]) -> str:
+def snapshot_csv(snapshot_at: datetime, months: dict, rows: list[dict], source: str | None) -> str:
     """/smile_snapshot（#79）: 1 行目 `<スナップショットの UNIX 秒>,<1 限月の最終取引日>,<1 限月の ATM>,
-    <2 限月の最終取引日>,<2 限月の ATM>`（ATM が無ければ空）、
-    以降 SNAPSHOT_COLUMNS（month, target_price, type の昇順）"""
+    <2 限月の最終取引日>,<2 限月の ATM>,<source>`（ATM が無ければ空。source は smile.snapshot_source の値で、
+    無ければ空。#123）、以降 SNAPSHOT_COLUMNS（month, target_price, type の昇順）"""
     head = line([int(snapshot_at.timestamp()), months[1]["last_trading_day"], months[1]["atm"],
-                 months[2]["last_trading_day"], months[2]["atm"]])
+                 months[2]["last_trading_day"], months[2]["atm"], source])
     return head + "".join(line([r[c] for c in SNAPSHOT_COLUMNS]) for r in rows)
+
+
+def data_gaps_csv(rows: list[dict]) -> str:
+    """/data_gaps（#123）: ヘッダなし、DATA_GAPS_COLUMNS（並びは rows のまま）"""
+    return "".join(line([r[c] for c in DATA_GAPS_COLUMNS]) for r in rows)

@@ -1,0 +1,62 @@
+[
+  {
+    "name": "prev_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "欠けの直前の旧系のスナップショット（欠けているのは分の終わり c が prev_at < c < next_at のもの）"
+  },
+  {
+    "name": "next_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "欠けの直後の旧系のスナップショット"
+  },
+  {
+    "name": "prev_jst",
+    "type": "DATETIME",
+    "mode": "REQUIRED",
+    "description": "prev_at の JST"
+  },
+  {
+    "name": "next_jst",
+    "type": "DATETIME",
+    "mode": "REQUIRED",
+    "description": "next_at の JST"
+  },
+  {
+    "name": "gap_minutes",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "next_at − prev_at（分）"
+  },
+  {
+    "name": "session_minutes",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "区間の中の立会中の分の数"
+  },
+  {
+    "name": "built_minutes",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "区間の中で #114 が行を作った分の数"
+  },
+  {
+    "name": "cause",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "原因（bug_format = 欠け 1、bug_comma = 欠け 3、no_change = 値が変わらず保存しなかった、unknown = 停止・取得の失敗など）"
+  },
+  {
+    "name": "status",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "今の状態（none = 作った行なし、filled = 立会中の分の 90% 以上を #114 が作った、partial = それ以外）"
+  },
+  {
+    "name": "max_abs_diff",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "前後のスナップショットの現物・先物の前日比の絶対値の最大（欠け 3 の判定に使う）"
+  }
+]

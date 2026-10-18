@@ -176,7 +176,15 @@ def smile_snapshot(runner, at: datetime, nxt: bool = False) -> str:
         return ""
     rows = runner("smile_snapshot", {"start_at": snapshot_at, "end_at": snapshot_at + timedelta(seconds=1)})
     months, out = smile.snapshot_rows(rows)
-    return csvfmt.snapshot_csv(snapshot_at, months, out)
+    return csvfmt.snapshot_csv(snapshot_at, months, out, smile.snapshot_source(rows))
+
+
+def data_gaps(runner) -> str:
+    """/data_gaps（#123）: 表 data_gaps の区間のうち、値が変わらず保存しなかった区間（cause = no_change かつ
+    status = none。欠けではない）を除いたものを prev_at 昇順で（csvfmt.data_gaps_csv）。行が無ければ空"""
+    rows = [r for r in runner("data_gaps", {}) if (r["cause"], r["status"]) != ("no_change", "none")]
+    rows.sort(key=lambda r: r["prev_at"])
+    return csvfmt.data_gaps_csv(rows)
 
 
 def atm_iv_params(now: datetime, last_started_at: datetime | None, d: int, n: int) -> dict:

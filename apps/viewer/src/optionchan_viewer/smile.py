@@ -1,17 +1,22 @@
 """スマイルカーブの曲線の規則（/smile_snapshot、#79）。純粋関数。
 
 行は sql/smile_snapshot.sql の行（month, type, target_price, last_trading_day, is_atm, iv, price, price_time, bid_iv,
-ask_iv, bid, ask。type は 1 = call / 2 = put）。
+ask_iv, bid, ask, ingest_run_id。type は 1 = call / 2 = put）。
 - ATM（限月ごと）: その限月の put で is_atm の行の行使価格の最小（/smile_data の「1 限月 put の is_atm の最初」と
   同じ規則を限月ごとに）。無ければ None
 - IV（iv・bid_iv・ask_iv）は 0 以下を欠損（None）にする（気配の IV が 0 の行がある）
 - mid_iv = (bid_iv + ask_iv) / 2。正規化した後に両方あるときだけ（片方だけ・0 は None）
 - otm = OTM 合成に使う行: put で K < ATM、call で K >= ATM（ATM ちょうどは call）。ATM が無い限月はすべて False
+- source（#123）: 行の実行 ID が FILL114_PREFIX で始まれば、DataCube の歩み値から作ったスナップショット（#114）で
+  "fill114"。それ以外（旧系の取り込み・新系）は None。期間では決めない（作った分と旧系の分が分単位で混ざる区間がある）
 画面（static/smile.js）はこの列で絞って描くだけで、規則を持たない。
 """
 
 CALL, PUT = 1, 2
 MONTHS = (1, 2)
+# #114 で作った行の実行 ID の接頭辞（sql/tick_build/build.sql）
+FILL114_PREFIX = "legacy-fill114-"
+FILL114 = "fill114"
 
 
 def positive_iv(v):
@@ -40,6 +45,16 @@ def atm_by_month(rows: list[dict]) -> dict:
             m = r["month"]
             out[m] = r["target_price"] if out[m] is None else min(out[m], r["target_price"])
     return out
+
+
+def snapshot_source(rows: list[dict]) -> str | None:
+    """スナップショットの行（1 スナップショットの行は同じ実行）の source: #114 で作ったなら "fill114"、
+    それ以外は None"""
+    for r in rows:
+        run_id = r.get("ingest_run_id")
+        if isinstance(run_id, str) and run_id.startswith(FILL114_PREFIX):
+            return FILL114
+    return None
 
 
 def snapshot_rows(rows: list[dict]) -> tuple[dict, list[dict]]:

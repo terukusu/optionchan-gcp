@@ -142,16 +142,24 @@ var AtmSeries = (function() {
   }
 
   // 足が 0 本のときの説明: { text, action }。action は表示できそうな選び方（'roll' = 期近つなぎ、'trade' = 約定）か null。
-  // 今日から数えた限月（0・1）を先に見る（過去の日付で 0 本になるのはほぼこれ）。次に mid（気配の無い期間がある）
-  function emptyHint(series, iv) {
+  // 今日から数えた限月（0・1）を先に見る（過去の日付で 0 本になるのはほぼこれ）。次に mid（気配の無い期間がある）。
+  // gaps（#123）: 読んだ範囲にかかる過去データの欠けの区間（DataGaps.overlapping の結果。省略可）。mid・30日固定なら
+  // 欠けの期間を文に足す（約定は #114 で作った区間に足があるので足さない）
+  function emptyHint(series, iv, gaps) {
+    var hint;
     if (series.fromToday) {
-      return { text: 'この期間に限月「' + series.label + '」（今日から数えた限月）の足はありません。過去の日付は期近つなぎで見られます',
+      hint = { text: 'この期間に限月「' + series.label + '」（今日から数えた限月）の足はありません。過去の日付は期近つなぎで見られます',
         action: 'roll' };
+    } else if (!series.fixedIv && iv === 'mid') {
+      hint = { text: 'この期間は気配（mid）の足がありません。約定なら表示できることがあります', action: 'trade' };
+    } else {
+      hint = { text: 'データがありません', action: null };
     }
-    if (!series.fixedIv && iv === 'mid') {
-      return { text: 'この期間は気配（mid）の足がありません。約定なら表示できることがあります', action: 'trade' };
+    if (gaps && gaps.length && (series.fixedIv || iv === 'mid')) {
+      hint.text += '。この期間は欠け（' + gaps[0].period + (gaps.length > 1 ? ' ほか ' + (gaps.length - 1) + ' 件' : '') +
+        '）にかかっています';
     }
-    return { text: 'データがありません', action: null };
+    return hint;
   }
 
   return {

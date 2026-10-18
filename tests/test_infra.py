@@ -265,6 +265,37 @@ def test_datacube_tick_table():
     assert not re.search(r'google_bigquery_(table|dataset)_iam', tf)
 
 
+def test_data_gaps_table():
+    """過去データの欠けの一覧（#123）: gaps.sql の結果を runbook の手順で入れる小さい表。パーティションなし、作り直せるので削除は
+    止めない。付与は足さない。ビューアーより先に作る"""
+    tf = dict(all_tf())['prod/gaps.tf']
+    table = re.search(r'resource "google_bigquery_table" "data_gaps" \{(.*?)\n\}', tf, re.S).group(1)
+    assert 'table_id            = "data_gaps"' in table
+    assert 'schema/tokyo/data_gaps.json' in table
+    assert 'deletion_protection = false' in table
+    for word in ('time_partitioning', 'require_partition_filter', 'clustering', 'prevent_destroy', 'deletion_policy'):
+        assert word not in table, word
+    assert len(re.findall(r'^resource ', tf, re.M)) == 1
+    assert not re.search(r'google_bigquery_(table|dataset)_iam', tf)
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'tables.json'), encoding='utf-8') as f:
+        assert 'data_gaps' not in f.read()
+    # 列は gaps.sql の出力の列と同じ（名前・順序）
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'data_gaps.json'), encoding='utf-8') as f:
+        columns = json.load(f)
+    with open(os.path.join(INFRA_DIR, '..', 'sql', 'gaps', 'gaps.sql'), encoding='utf-8') as f:
+        gaps = f.read()
+    last = gaps[gaps.rindex('\nSELECT\n'):gaps.rindex('\nFROM listed')]
+    items = re.split(r',\n(?=  [a-zA-Z])', last[len('\nSELECT\n'):])
+    names = [re.split(r'\s+AS\s+', item.strip())[-1].strip() for item in items]
+    assert [c['name'] for c in columns] == names
+    assert all(c['description'] for c in columns)
+    assert [c['name'] for c in columns if c['mode'] == 'NULLABLE'] == ['max_abs_diff']
+    # ビューアーは表を作った後に（/data_gaps が無い表を読まない）
+    viewer = dict(all_tf())['prod/viewer.tf']
+    service = re.search(r'resource "google_cloud_run_v2_service" "viewer" \{(.*?)\n\}', viewer, re.S).group(1)
+    assert re.search(r'depends_on = \[[^\]]*google_bigquery_table\.data_gaps[^\]]*\]', service)
+
+
 def test_datacube_future_tick_table():
     """DataCube の先物の歩み値（#114）: dc_option_tick と同じ扱い。取引日の MONTH パーティション、削除は二重に止める"""
     tf = dict(all_tf())['prod/datacube.tf']

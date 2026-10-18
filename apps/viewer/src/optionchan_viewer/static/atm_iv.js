@@ -22,11 +22,17 @@
 // - 日付の欄で、選んだ時点で（他の選択と同じく。ボタンは無い）選んでいる足のままその日（JST）のまわりへ移動する（AtmSeries.jumpView の範囲を select で読み直す。そこから
 //   左右へスクロールすると続きを読む。1 時間足の 400 日・分足の 31 日の上限はそのまま）
 // - 配色は theme.js（既定はダーク）。チャートの色は CHART_THEME から選び、切り替えたら applyOptions で塗り直す
+// - 過去データの欠け（#123）: ページを開いたときに /data_gaps を 1 回だけ読み（足・限月・IV の切り替え・スクロールでは読まない）、
+//   描いている足ごとに、約定で #114 が作った区間は帯（右の値の軸を変えない別の価格軸のヒストグラム。ローソク足の後ろ）、
+//   それ以外は欠けの印（■。乗り換えの印と 1 つの配列）を付け、凡例にカーソルの足の区間を出す。足が 0 本の説明にも区間を足す。
+//   区間の時刻はこのファイルに持たない（表 data_gaps の値）。読み込みに失敗・空なら帯・印を出さずに今どおり描く。
+//   足と区間の対応・文は data_gaps.js の DataGaps
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
 var JST_OFFSET = 9 * 3600;
 var DAY = 86400;
+var DAILY_SHIFT = DAY - JST_OFFSET;  // 日足の描く time（UTC の 0 時）と取引日の 00:00 JST の差（#123 の区間との対応）
 // 足 → src: 読む足（API の tf）、seconds: 足の長さ、chunkDays: 1 回に読む日数（サーバーの settings.BARS_RANGE の 1 回の最大以下）、
 // maxDays: 足・限月ごとに覚える日数の上限（null は上限なし。BARS_EPOCH まで）、floorDays: 遡れる日数（サーバーの遡れる上限の内側）、
 // initialBars: 最初に見せる右端の本数
@@ -45,16 +51,22 @@ var DEBOUNCE_MS = 250;
 var RIGHT_OFFSET = 3;  // 最新の足の右の余白（本）
 // テーマごとのチャートの色（背景・文字・目盛りの線・軸の枠）と折れ線・乗り換えの印の色（チャートの canvas に描く）。
 // ライトは Lightweight Charts の既定に近い値、ダークは viewer.css の --bg に合わせる
+// band・gap は過去データの欠け（#123）の帯（半透明）・印
 var CHART_THEME = {
-  dark: { bg: '#12141c', text: '#c3c8d4', grid: '#222634', border: '#2c3040', line: '#5c8dff', marker: '#5c8dff' },
-  light: { bg: '#ffffff', text: '#191919', grid: '#eef0f4', border: '#d6dcde', line: '#2962ff', marker: '#2962ff' },
+  dark: { bg: '#12141c', text: '#c3c8d4', grid: '#222634', border: '#2c3040', line: '#5c8dff', marker: '#5c8dff',
+    band: 'rgba(240, 180, 60, 0.16)', gap: '#f0a830' },
+  light: { bg: '#ffffff', text: '#191919', grid: '#eef0f4', border: '#d6dcde', line: '#2962ff', marker: '#2962ff',
+    band: 'rgba(240, 160, 0, 0.14)', gap: '#d98a00' },
 };
 
 var chart = null;
 var series = null;
 var seriesStyle = null;  // 'candle' / 'line'（series の種類）
-var markers = null;  // 乗り換えの印（createSeriesMarkers）
+var markers = null;  // 乗り換えの印・欠けの印（createSeriesMarkers）
 var monthAt = new Map();  // チャートの time → その足の限月（期近つなぎのときだけ）
+var gaps = [];  // 過去データの欠けの区間（#123。DataGaps.parse の値。読めなければ空）
+var band = null;  // 帯（#114 で作った区間の足の背景）のヒストグラム
+var gapAt = new Map();  // チャートの time → その足の区間の説明（凡例）
 var barAt = new Map();  // チャートの time → 足（凡例。折れ線の点は OHLC を持たないので、ここから引く）
 var shown = [];  // 描いている足（UTC 秒の time）
 var currentTf = null;
@@ -103,8 +115,10 @@ function showLegend(bar) {
   }
   var month = monthAt.get(bar.time);
   var kind = AtmSeries.seriesOf(shownN).fixedIv ? '30日  ' : (shownIv === 'mid' ? 'mid  ' : '');
+  var gap = gapAt.get(bar.time);
   el('legend').textContent = kind + formatTime(bar.time) + '  O ' + bar.open.toFixed(2) + '  H ' + bar.high.toFixed(2) +
-    '  L ' + bar.low.toFixed(2) + '  C ' + bar.close.toFixed(2) + (month ? '  ' + AtmSeries.monthLegend(month) : '');
+    '  L ' + bar.low.toFixed(2) + '  C ' + bar.close.toFixed(2) + (month ? '  ' + AtmSeries.monthLegend(month) : '') +
+    (gap ? '  ' + gap : '');
 }
 
 function toChart(bar) {
@@ -168,7 +182,9 @@ var lastView = null;  // 最後に select で読みに行った時間の範囲�
 
 // 足が 0 本のときの説明と、選び直すボタン（チャートの真ん中に出す）
 function noteEmpty() {
-  var hint = AtmSeries.emptyHint(AtmSeries.seriesOf(currentN), currentIv);
+  var entry = currentEntry();
+  var hint = AtmSeries.emptyHint(AtmSeries.seriesOf(currentN), currentIv,
+    entry ? DataGaps.overlapping(gaps, entry.start, entry.end) : []);
   note('');
   emptyAction = hint.action ? EMPTY_ACTIONS[hint.action] : null;
   el('chart-empty-text').textContent = hint.text;
@@ -185,22 +201,42 @@ function displayBars(entry) {
   return entry ? AtmSeries.resample(entry.bars, TF[currentTf].seconds) : [];
 }
 
-// 期近つなぎの乗り換えの印と凡例の限月。印は描く足の全体（左・右に読み足してつないだ後）から作り直す
-function renderMonths() {
+// 期近つなぎの乗り換えの印と凡例の限月、過去データの欠け（#123）の帯・印と凡例の区間。描く足の全体（左・右に読み足して
+// つないだ後）から作り直す
+function renderMarks() {
+  var t = chartTheme();
   monthAt = new Map();
-  if (!AtmSeries.seriesOf(shownN).months) {
-    markers.setMarkers([]);
-    return;
+  gapAt = new Map();
+  var roll = [];
+  if (AtmSeries.seriesOf(shownN).months) {
+    shown.forEach(function(b) {
+      if (b.month !== undefined) {
+        monthAt.set(b.time + JST_OFFSET, b.month);
+      }
+    });
+    roll = AtmSeries.rollMarkers(shown).map(function(m) {
+      return { time: m.time + JST_OFFSET, position: 'aboveBar', shape: 'arrowDown', color: t.marker, text: m.text };
+    });
   }
-  shown.forEach(function(b) {
-    if (b.month !== undefined) {
-      monthAt.set(b.time + JST_OFFSET, b.month);
-    }
+  var mode = DataGaps.modeOf(AtmSeries.seriesOf(shownN), shownIv);
+  // 日足の shown の time は displayBars の resample（UTC の日で切り捨て）で、取引日の 00:00 JST（前日 15:00 UTC）より
+  // DAILY_SHIFT 前の UTC の 0 時になっている。区間との対応（DataGaps.spans の 16:00 JST の境目）は取引日の 00:00 JST で決め、
+  // 帯・印は shown の time に戻して付ける
+  var shift = shownTf === '1d' ? DAILY_SHIFT : 0;
+  var r = DataGaps.assign(shift ? shown.map(function(b) { return { time: b.time + shift }; }) : shown,
+    TF[shownTf].seconds, gaps, mode);
+  [r.bands, r.marks].forEach(function(list) {
+    list.forEach(function(x) { x.time -= shift; });
   });
-  markers.setMarkers(AtmSeries.rollMarkers(shown).map(function(m) {
-    return { time: m.time + JST_OFFSET, position: 'aboveBar', shape: 'arrowDown', color: chartTheme().marker,
-      text: m.text };
-  }));
+  // 乗り換えの印（矢印・文字あり）と見分けられるよう、欠けの印は足の下の ■（文字なし）
+  var marks = r.marks.map(function(m) {
+    return { time: m.time + JST_OFFSET, position: 'belowBar', shape: 'square', color: t.gap };
+  });
+  markers.setMarkers(DataGaps.mergeMarkers(roll, marks));
+  band.setData(r.bands.map(function(b) { return { time: b.time + JST_OFFSET, value: 1 }; }));
+  r.bands.concat(r.marks).forEach(function(x) {
+    gapAt.set(x.time + JST_OFFSET, DataGaps.legendText(x.gaps, mode));
+  });
 }
 
 // 表示している時間の範囲（UTC 秒）。atRight は最新の足が見えているか
@@ -268,7 +304,7 @@ function render(view, keep) {
   }
   barAt = new Map(shown.map(function(b) { return [b.time + JST_OFFSET, toChart(b)]; }));
   series.setData(shown.map(toSeries));
-  renderMonths();
+  renderMarks();
   if (lr && oldFirst !== null) {
     var shift = 0;
     while (shift < shown.length && shown[shift].time < oldFirst) {
@@ -395,7 +431,7 @@ function select(view) {
   if (conf.src === '1m' && start !== null && minuteDays + (end - start) / DAY > MINUTE_BUDGET_DAYS) {
     shown = [];
     series.setData([]);
-    renderMonths();
+    renderMarks();
     showLegend(undefined);
     el('chart-empty').hidden = true;
     note('分足の読み込みの上限（この画面で ' + MINUTE_BUDGET_DAYS + ' 日分）に達しました。ページを読み直してください');
@@ -423,7 +459,7 @@ function select(view) {
     }
     shown = [];
     series.setData([]);
-    renderMonths();
+    renderMarks();
     showLegend(undefined);
     el('chart-empty').hidden = true;
     note('');
@@ -555,6 +591,14 @@ function createChart() {
   opts.localization = { locale: 'ja-JP', timeFormatter: formatTime };
   Object.assign(opts.timeScale, { timeVisible: true, secondsVisible: false, rightOffset: RIGHT_OFFSET });
   chart = LightweightCharts.createChart(el('chart'), opts);
+  // 帯（#123）: 別の価格軸（表示しない・0〜1 に固定・上下の余白なし）のヒストグラムで足の背景を全高で塗る。右の値の軸の範囲・
+  // クロスヘアはローソク足だけで決まる。setStyle で作り直す series より先に足すので、常にその後ろに描かれる
+  band = chart.addSeries(LightweightCharts.HistogramSeries, {
+    priceScaleId: 'gap-band', color: chartTheme().band, base: 0, lastValueVisible: false, priceLineVisible: false,
+    crosshairMarkerVisible: false,
+    autoscaleInfoProvider: function() { return { priceRange: { minValue: 0, maxValue: 1 } }; },
+  });
+  chart.priceScale('gap-band').applyOptions({ visible: false, scaleMargins: { top: 0, bottom: 0 } });
   setStyle(el('style').value);
   chart.subscribeCrosshairMove(function(param) {
     var bar = param.time !== undefined ? barAt.get(param.time) : null;
@@ -577,7 +621,7 @@ function setStyle(style) {
     chart.addSeries(LightweightCharts.CandlestickSeries, opts);
   markers = LightweightCharts.createSeriesMarkers(series, []);
   series.setData(shown.map(toSeries));
-  renderMonths();
+  renderMarks();
 }
 
 // ライセンス（Apache-2.0）の帰属表記のリンク。テンプレートに外部の URL を書かないため、ここで設定する
@@ -611,7 +655,8 @@ ViewerTheme.onChange(function() {
   if (seriesStyle === 'line') {
     series.applyOptions({ color: chartTheme().line });
   }
-  renderMonths();  // 印の色
+  band.applyOptions({ color: chartTheme().band });
+  renderMarks();  // 印・帯の色
 });
 function jump() {
   var view = AtmSeries.jumpView(el('jump-date').value, el('tf').value, nowSec());
@@ -653,6 +698,29 @@ el('chart-retry').addEventListener('click', function() {
   }
 });
 
+// 過去データの欠けの区間（#123）をページを開いたときに 1 回だけ読む。失敗（HTTP エラー・上限・ネットワーク）・空なら
+// 帯・印を出さない（エラーにしない）
+function loadGaps() {
+  fetch('/data_gaps', { cache: 'no-store', credentials: 'same-origin' })
+    .then(function(res) {
+      return res.ok ? res.text() : '';
+    })
+    .then(function(text) {
+      gaps = DataGaps.parse(text);
+      if (!gaps.length) {
+        return;
+      }
+      el('gap-help').hidden = false;
+      renderMarks();
+      showLegend(shown.length ? toChart(shown[shown.length - 1]) : undefined);
+      if (!el('chart-empty').hidden) {
+        noteEmpty();  // 足が 0 本の説明に区間を足す
+      }
+    })
+    .catch(function() {});
+}
+
 fillSeriesOptions();
 createChart();
 select(null);
+loadGaps();

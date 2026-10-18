@@ -26,7 +26,8 @@
 --   partial  それ以外
 -- 原因と状態は別に決める（unknown の区間も #114 が作っていれば filled になる）。欠け 2（2023-04-25 13:42 〜 2023-05-08 16:31 JST の
 -- option の price・price_time の NULL）は行の欠けではないので出さない（#111 で埋めた。docs/data-gaps.md）。
--- 表に残さない理由: 旧系は停止していて（#14）過去の旧系の行はもう増えないので、一度流して docs に要約すれば足りる。
+-- 結果は docs/runbook.md の手順で表 data_gaps に入れる（#123。ビューアーの /data_gaps が読む）。旧系は停止していて（#14）過去の
+-- 旧系の行はもう増えないので一度きり（穴埋めを足したときは同じ手順で作り直す）。
 -- 読む列: ingest_runs の snapshot_at・trigger、spot_price・future_price の旧系の行の created_at・price・diff（option_price は読まない）。
 -- 名前（${project} 等）は runbook の render が、範囲は bq のクエリパラメータが入れる。試験は tests/test_gaps.py・tests/test_gaps_bq.py。
 DECLARE start_at TIMESTAMP DEFAULT @start_at;

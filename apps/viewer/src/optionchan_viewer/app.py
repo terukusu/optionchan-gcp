@@ -1,11 +1,12 @@
-"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 4 つ（/smile_data /smile_snapshot /atm_iv_data
-/atm_iv_bars）。
+"""ビューアー（Flask）。ページ 3 つ（/ /smile /atm_iv）と CSV の API 5 つ（/smile_data /smile_snapshot /atm_iv_data
+/atm_iv_bars /data_gaps）。
 
 /smile_data・/atm_iv_data の URL・CSV の形式は現行（appengine/ + HTTP 関数）と同じ。/atm_iv_bars は /atm_iv の足の
 切り替え・表示範囲に応じた読み込み用（#68・#77。CSV は /atm_iv_data と同じ列。期間は start・end。n=roll（期近つなぎ、
 #101）は 6 列目に限月。n=cm（30 日固定の ATM IV、#100）は同じ 5 列）。
 /smile_snapshot は /smile の時点の移動用（#79。at 以前で最新のスナップショットの 1 時点。dir=next は at 以後で最初
-（#80）。曲線の列は smile.py）。
+（#80）。曲線の列は smile.py。1 行目の 6 列目は #114 で作ったスナップショットの印（#123））。
+/data_gaps は過去データの欠けの区間（#123。表 data_gaps の全体。/atm_iv がページを開いたときに 1 回読む）。
 1 日のクエリ量はプロセスごとに数え、上限を超えたら 429（#95。budget.py）。
 認証はアプリでは行わない（Cloud Run の IAP。#13 の 13b）。
 """
@@ -148,6 +149,11 @@ def create_app(runner=None, clock=None, daily=None) -> Flask:
             return body, {"X-Bars-Start": str(int(start.timestamp())), "X-Bars-End": str(int(end.timestamp()))}
 
         return csv_response("atm_iv_bars", produce)
+
+    @app.get("/data_gaps")
+    def data_gaps():
+        # パラメータを読まない（表全体。数百行）
+        return csv_response("data_gaps", lambda: api.data_gaps(runner))
 
     return app
 

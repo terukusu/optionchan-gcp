@@ -16,6 +16,7 @@
 // - 表示の切り替えは hidden 属性・classList・disabled だけ（CSP の style-src 'self'）
 // - 約定 IV の点は約定からの経過（smile_age.js の SmileAge。#82）で段ごとに塗り・枠・大きさを変える（Chart.js の点ごとの配列）。
 //   「経過時間」をオンにすると経過（分）を右軸に描く（サーバーに要求しない）
+// - CSV の読み取りは smile_csv.js の SmileCsv。#114 で約定から作ったスナップショット（1 行目の source、#123）には注記を出す
 // - 配色は theme.js（既定はダーク）。線の色・軸の色・ATM の縦線は PALETTES から選び、切り替えたら描き直す
 // 時刻は UTC の UNIX 秒で持ち、表示は JST（日本に夏時間は無いので 9 時間を足す）。
 var JST_OFFSET = 9 * 3600;
@@ -55,8 +56,6 @@ var TIER_STYLE = [
   { fill: null, border: 1, radius: 2.5 },
   { fill: null, border: 0.35, radius: 2.5 },
 ];
-var COLUMNS = ['month', 'type', 'target_price', 'iv', 'price', 'price_time', 'bid_iv', 'ask_iv', 'bid', 'ask', 'mid_iv',
-  'otm'];
 
 var chart = null;
 var snapshots = {};  // スナップショットの時刻 → 解析した 1 時点
@@ -119,10 +118,6 @@ function toJstInput(t) {
   return formatJst(t).replace(' ', 'T');
 }
 
-function num(x) {
-  return x === '' || x === undefined ? null : Number(x);
-}
-
 function fmtIv(v) {
   return v === null ? '—' : v.toFixed(2);
 }
@@ -147,51 +142,6 @@ function fmtPriceTime(snapshot, priceTime) {
   }
   var ago = SmileAge.agoText(SmileAge.ageSeconds(snapshot, priceTime));
   return formatJst(priceTime) + '（' + (ago === null ? '時点より後' : ago) + '）';
-}
-
-// ---- CSV ----
-
-// /smile_snapshot の CSV → { s, months: {1: {ltd, atm}, 2: ...}, byMonth: {1: [行], 2: [行]}, hasQuote, lo, hi }。
-// 本文が空（データなし）なら null
-function parseSnapshot(text) {
-  var lines = text.split('\n').filter(function(line) { return line !== ''; });
-  if (!lines.length) {
-    return null;
-  }
-  var meta = lines[0].split(',');
-  // 想定の CSV でない応答（HTML 等）はエラーにする（snapshots に NaN の時刻を入れない）
-  if (meta.length !== 5 || !/^[0-9]+$/.test(meta[0])) {
-    throw new Error('invalid response');
-  }
-  var snap = {
-    s: Number(meta[0]),
-    months: {
-      1: { ltd: meta[1] || null, atm: num(meta[2]) },
-      2: { ltd: meta[3] || null, atm: num(meta[4]) },
-    },
-    byMonth: { 1: [], 2: [] },
-    hasQuote: false,
-    lo: null,
-    hi: null,
-  };
-  for (var i = 1; i < lines.length; i++) {
-    var cells = lines[i].split(',');
-    if (cells.length !== COLUMNS.length) {
-      continue;
-    }
-    var row = {};
-    COLUMNS.forEach(function(c, j) { row[c] = num(cells[j]); });
-    if (!snap.byMonth[row.month]) {
-      continue;
-    }
-    snap.byMonth[row.month].push(row);
-    if (row.bid_iv !== null || row.ask_iv !== null) {
-      snap.hasQuote = true;
-    }
-    snap.lo = snap.lo === null ? row.target_price : Math.min(snap.lo, row.target_price);
-    snap.hi = snap.hi === null ? row.target_price : Math.max(snap.hi, row.target_price);
-  }
-  return snap;
 }
 
 // ---- 読み込み中・エラーの表示（#77 と同じ） ----
@@ -568,7 +518,10 @@ function renderNotes(extra) {
   if (shown && noNewer) {
     lines.push('これより新しいデータはありません');
   }
-  if (shown && !shown.hasQuote) {
+  if (shown && shown.source === 'fill114') {
+    // #114 で約定（DataCube の歩み値）から作ったスナップショット（#123）。気配が無い理由が分かっているので「取引時間外」は出さない
+    lines.push('約定から作成・IV は再計算・気配なし（#114）');
+  } else if (shown && !shown.hasQuote) {
     lines.push('気配がありません（取引時間外）。約定の IV の点だけを表示しています');
   }
   if (shown && mode() === 'otm') {
@@ -757,7 +710,7 @@ function request(at, next) {
         throw new Error('HTTP ' + res.status);
       }
       // 解析の失敗（想定の CSV でない）は catch でエラーにする
-      return res.text().then(parseSnapshot);
+      return res.text().then(SmileCsv.parseSnapshot);
     })
     .then(function(snap) {
       if (inflight !== mine) {

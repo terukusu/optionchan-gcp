@@ -2,7 +2,8 @@
 
 - SQL は sql/*.sql にだけ置く（Python で組み立てない）。名前は ${project}・${dataset}、値は @パラメータだけ
 - 読むのは最新版のテーブル関数（*_latest・latest_runs）と 1 時間足 atm_iv・atm_mid_iv（#98）・取引カレンダーの最新版
-  trading_calendar_latest（#68）だけ（生テーブルを直接読まない）。期間で絞る
+  trading_calendar_latest（#68）だけ（生テーブルを直接読まない）。期間で絞る。欠けの一覧の表 data_gaps（#123。数百行）は
+  data_gaps.sql からだけ全体を読んでよい
 - 書き込み・DDL をしない
 """
 
@@ -19,6 +20,8 @@ ALLOWED_FUNCS = {"latest_runs", "option_price_latest"}
 # 表 → 期間で絞る列
 ALLOWED_TABLES = {"atm_iv": "started_at", "atm_mid_iv": "started_at", "trading_calendar_latest": "calendar_date",
                   "atm_cm_iv": "created_at"}
+# 全体を読んでよい小さい表 → 読んでよい SQL（#123。表は runbook の手順で入れる数百行）
+FULL_TABLES = {"data_gaps": "data_gaps"}
 # 文字列リテラル: タイムゾーン名と、30 日固定（#100）の計算の出し方の名前（sql/cm/atm_cm.sql と同じ本文）
 LITERALS = {"Asia/Tokyo"}
 CM_METHODS = {"m1", "interp", "m2"}
@@ -59,6 +62,9 @@ def test_reads_only_latest_and_hourly(name):
         if table in ALLOWED_FUNCS:
             # テーブル関数の引数はパラメータ（定数。option_price のパーティションの除去が効く）
             assert re.fullmatch(r"\(@\w+, @\w+\)", args or ""), (name, table, args)
+        elif table in FULL_TABLES:
+            assert FULL_TABLES[table] == name, (name, table)
+            assert args is None
         else:
             assert table in ALLOWED_TABLES, (name, table)
             assert args is None
@@ -156,6 +162,26 @@ def test_mid_hourly_same_as_trade_hourly():
                 .replace("iv_open AS open, iv_high AS high, iv_low AS low, iv_close AS close",
                          "mid_open AS open, mid_high AS high, mid_low AS low, mid_close AS close"))
         assert after_bars(text, "mid_bars") == want, mid
+
+
+def test_full_tables_only_from_own_sql():
+    # #123: data_gaps を読むのは data_gaps.sql だけ（他の SQL が読めば test_reads_only_latest_and_hourly で落ちる）
+    readers = {name for name, text in SQL.items() if "`${project}.${dataset}.data_gaps`" in body(text)}
+    assert readers == {"data_gaps"}
+    text = body(SQL["data_gaps"])
+    # 表全体（パラメータなし）を UNIX 秒で prev_at 昇順に
+    assert "@" not in text
+    assert "UNIX_SECONDS(prev_at) AS prev_at" in text and "UNIX_SECONDS(next_at) AS next_at" in text
+    assert "ORDER BY prev_at" in text
+
+
+def test_smile_snapshot_returns_ingest_run_id():
+    # #123: 実行 ID をそのまま返す（判定は smile.snapshot_source の 1 か所。SQL に接頭辞を書かない）
+    text = body(SQL["smile_snapshot"])
+    snap = r"SELECT [^\n]*\bingest_run_id\b[^\n]*\n\s*FROM `\$\{project\}\.\$\{dataset\}\.option_price_latest`"
+    assert re.search(snap, text)
+    assert "ingest_run_id\nFROM m CROSS JOIN" in text
+    assert "fill114" not in SQL["smile_snapshot"]
 
 
 def test_trading_holidays_reads_latest_calendar():

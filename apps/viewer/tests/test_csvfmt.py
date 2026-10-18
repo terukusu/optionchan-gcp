@@ -23,6 +23,11 @@ def test_cell():
         csvfmt.cell(datetime(2026, 10, 13))
     with pytest.raises(TypeError):
         csvfmt.cell(True)
+    # 文字列（#123: 区間の種類・状態・source）はそのまま。区切り・引用符・改行を含むものは出さない
+    assert csvfmt.cell("bug_comma") == "bug_comma"
+    for bad in ("a,b", 'a"b', "a\nb", "a\rb"):
+        with pytest.raises(ValueError):
+            csvfmt.cell(bad)
 
 
 @pytest.mark.parametrize("value", [0.1, 18.25, 1e-7, 123456789.125, 20.0])
@@ -77,13 +82,34 @@ def test_snapshot_csv():
         {"month": 2, "type": 1, "target_price": 25000, "iv": 17.25, "price": None, "price_time": None,
          "bid_iv": None, "ask_iv": 18.0, "bid": None, "ask": 610, "mid_iv": None, "otm": 0},
     ]
-    text = csvfmt.snapshot_csv(at, months, rows)
+    text = csvfmt.snapshot_csv(at, months, rows, None)
     lines = text.split("\n")
-    assert lines[0] == f"{int(at.timestamp())},2026-11-12,25000,2026-12-10,"
+    # 1 行目の 6 列目は source（#123。#114 で作ったスナップショットなら fill114、それ以外は空）
+    assert lines[0] == f"{int(at.timestamp())},2026-11-12,25000,2026-12-10,,"
     assert lines[1] == "1,2,24750,,150,1760335080,20.0,21.0,145,155,20.5,1"
     assert lines[2] == "2,1,25000,17.25,,,,18.0,,610,,0"
     assert all(len(line.split(",")) == len(csvfmt.SNAPSHOT_COLUMNS) == 12 for line in lines[1:-1])
     assert text.endswith("\n") and lines[-1] == ""
+    assert csvfmt.snapshot_csv(at, months, rows, "fill114").split("\n")[0] == (
+        f"{int(at.timestamp())},2026-11-12,25000,2026-12-10,,fill114")
+    # 2 行目以降は source で変わらない
+    assert csvfmt.snapshot_csv(at, months, rows, "fill114").split("\n")[1:] == lines[1:]
+
+
+def test_snapshot_csv_requires_source():
+    # source は必須の引数（渡し忘れを落とす）
+    with pytest.raises(TypeError):
+        csvfmt.snapshot_csv(datetime(2026, 10, 13, tzinfo=UTC), {1: {"last_trading_day": None, "atm": None},
+                                                                  2: {"last_trading_day": None, "atm": None}}, [])
+
+
+def test_data_gaps_csv():
+    # /data_gaps（#123）: ヘッダなし、prev_at,next_at（UTC の UNIX 秒）,cause,status。値は合成
+    rows = [{"prev_at": 1700000000, "next_at": 1700003600, "cause": "unknown", "status": "none"},
+            {"prev_at": 1700010000, "next_at": 1700020000, "cause": "bug_comma", "status": "partial"}]
+    assert csvfmt.DATA_GAPS_COLUMNS == ("prev_at", "next_at", "cause", "status")
+    assert csvfmt.data_gaps_csv(rows) == "1700000000,1700003600,unknown,none\n1700010000,1700020000,bug_comma,partial\n"
+    assert csvfmt.data_gaps_csv([]) == ""
 
 
 def test_atm_iv_months_csv():

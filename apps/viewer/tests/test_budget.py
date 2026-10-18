@@ -66,7 +66,8 @@ class BillingRunner(FakeRunner):
         return rows
 
 
-@pytest.mark.parametrize("path", ["/smile_snapshot", "/atm_iv_bars?tf=1m", "/atm_iv_data", "/smile_data"])
+@pytest.mark.parametrize("path", ["/smile_snapshot", "/atm_iv_bars?tf=1m", "/atm_iv_data", "/smile_data",
+                                  "/data_gaps"])
 def test_over_limit_is_429_without_query(path, capsys):
     clock = Clock(NOW)
     daily = budget.DailyBudget(GiB, clock)

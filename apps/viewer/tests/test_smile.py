@@ -128,3 +128,19 @@ def test_empty():
     months, rows = smile.snapshot_rows([])
     assert months == {1: {"last_trading_day": None, "atm": None}, 2: {"last_trading_day": None, "atm": None}}
     assert rows == []
+
+
+# ---- 1 行目の source（#123）。実行 ID は合成 ----
+
+@pytest.mark.parametrize("ids,want", [
+    (["legacy-fill114-20000101T000000Z"], "fill114"),
+    ([None, "legacy-fill114-20000101T000100Z"], "fill114"),
+    # 旧系の取り込みの形・新系の形・NULL・行なし
+    (["legacy-20000101T000000Z"], None),
+    (["legacy-fill114"], None),
+    (["00000000-0000-0000-0000-000000000000"], None),
+    ([None], None),
+    ([], None),
+])
+def test_snapshot_source(ids, want):
+    assert smile.snapshot_source([{"ingest_run_id": i} for i in ids]) == want
