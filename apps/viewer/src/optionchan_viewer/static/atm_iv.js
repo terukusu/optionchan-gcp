@@ -16,6 +16,7 @@
 //   凡例にカーソルの足の限月を出す。「30日固定」（n=cm。#100）は満期 30 日に補間した IV で、IV の選択は使わない（選べなくする）。
 //   CSV・束ね・つなぎ・印の純粋関数は atm_series.js
 // - 表示はローソク足か折れ線（終値を結ぶ）。切り替えは描き直すだけで読み直さない
+// - 足が 0 本の間はスクロール・拡縮を止め、選び直し・移動のたびに縦の範囲を自動に戻す
 // - 足が 0 本なら理由と、表示できる選び方のボタン（期近つなぎ / 約定。AtmSeries.emptyHint）を出す。
 //   0・1 は今日から数えた限月なので、過去の日付へ移動すると 0 本になる
 // - 日付の欄で、選んだ時点で（他の選択と同じく。ボタンは無い）選んでいる足のままその日（JST）のまわりへ移動する（AtmSeries.jumpView の範囲を select で読み直す。そこから
@@ -257,7 +258,13 @@ function render(view, keep) {
   shownTf = currentTf;
   shownN = currentN;
   shownIv = currentIv;
-  chart.applyOptions({ timeScale: { timeVisible: currentTf !== '1d' } });
+  // 足が 0 本の間はスクロール・拡縮を止める（軸をドラッグすると縦の自動の範囲が切れ、足を読んだ後も潰れたままになる）
+  var has = shown.length > 0;
+  chart.applyOptions({ timeScale: { timeVisible: currentTf !== '1d' }, handleScroll: has, handleScale: has });
+  if (!keep) {
+    // 選び直し・移動のたびに縦の範囲を自動に戻す（前の表示で軸を動かしていても、新しい足に合わせる）
+    series.priceScale().applyOptions({ autoScale: true });
+  }
   barAt = new Map(shown.map(function(b) { return [b.time + JST_OFFSET, toChart(b)]; }));
   series.setData(shown.map(toSeries));
   renderMonths();
