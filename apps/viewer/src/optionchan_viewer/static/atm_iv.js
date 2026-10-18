@@ -30,9 +30,9 @@
 // 読み込み中はチャートを薄くしてスピナー（最初・切り替え）か、端にバッジ（追加の読み込み）を出す。失敗したら「再試行」を出す。
 // 時刻は UTC の UNIX 秒で持ち、チャートには 9 時間を足して渡す（ライブラリは UTC として表示するので、目盛り・ラベルが JST になる。
 // 日本に夏時間は無い）。足は時刻の並び（データのある足だけ）で描かれるので、取引の無い時間・週末・休日は詰まる。
+// 日足の time は取引日の 00:00 JST（サーバーの日足のまま。束ねない。#124）なので、日付の表記が取引日になる。
 var JST_OFFSET = 9 * 3600;
 var DAY = 86400;
-var DAILY_SHIFT = DAY - JST_OFFSET;  // 日足の描く time（UTC の 0 時）と取引日の 00:00 JST の差（#123 の区間との対応）
 // 足 → src: 読む足（API の tf）、seconds: 足の長さ、chunkDays: 1 回に読む日数（サーバーの settings.BARS_RANGE の 1 回の最大以下）、
 // maxDays: 足・限月ごとに覚える日数の上限（null は上限なし。BARS_EPOCH まで）、floorDays: 遡れる日数（サーバーの遡れる上限の内側）、
 // initialBars: 最初に見せる右端の本数
@@ -198,7 +198,7 @@ function noteEmpty() {
 // ---- 描画 ----
 
 function displayBars(entry) {
-  return entry ? AtmSeries.resample(entry.bars, TF[currentTf].seconds) : [];
+  return entry ? AtmSeries.displayBars(entry.bars, TF[currentTf].seconds) : [];
 }
 
 // 期近つなぎの乗り換えの印と凡例の限月、過去データの欠け（#123）の帯・印と凡例の区間。描く足の全体（左・右に読み足して
@@ -219,15 +219,7 @@ function renderMarks() {
     });
   }
   var mode = DataGaps.modeOf(AtmSeries.seriesOf(shownN), shownIv);
-  // 日足の shown の time は displayBars の resample（UTC の日で切り捨て）で、取引日の 00:00 JST（前日 15:00 UTC）より
-  // DAILY_SHIFT 前の UTC の 0 時になっている。区間との対応（DataGaps.spans の 16:00 JST の境目）は取引日の 00:00 JST で決め、
-  // 帯・印は shown の time に戻して付ける
-  var shift = shownTf === '1d' ? DAILY_SHIFT : 0;
-  var r = DataGaps.assign(shift ? shown.map(function(b) { return { time: b.time + shift }; }) : shown,
-    TF[shownTf].seconds, gaps, mode);
-  [r.bands, r.marks].forEach(function(list) {
-    list.forEach(function(x) { x.time -= shift; });
-  });
+  var r = DataGaps.assign(shown, TF[shownTf].seconds, gaps, mode);
   // 乗り換えの印（矢印・文字あり）と見分けられるよう、欠けの印は足の下の ■（文字なし）
   var marks = r.marks.map(function(m) {
     return { time: m.time + JST_OFFSET, position: 'belowBar', shape: 'square', color: t.gap };

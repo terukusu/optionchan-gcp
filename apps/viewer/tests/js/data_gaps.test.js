@@ -129,6 +129,22 @@ test('日足: 金曜 17:00〜土曜 02:00 JST → 月曜の足、木曜 10:00〜
   assert.deepEqual(band.bands.map((b) => b.time), [jst(1, 8, 0)]);
 });
 
+test('日足: displayBars を通した足に、補正なしで取引日の足へ帯・印が付く（#124）', () => {
+  const daily = AtmSeries.displayBars(bars([jst(1, 3, 0), jst(1, 4, 0), jst(1, 5, 0), jst(1, 8, 0), jst(1, 9, 0)]), DAY);
+  // 足の time は取引日の 00:00 JST のまま
+  assert.deepEqual(daily.map((b) => b.time), [jst(1, 3, 0), jst(1, 4, 0), jst(1, 5, 0), jst(1, 8, 0), jst(1, 9, 0)]);
+  // 金曜 17:00〜土曜 02:00 JST の欠け → 月曜の足に印
+  const fri = gaps([jst(1, 5, 17), jst(1, 6, 2), 'unknown', 'none']);
+  assert.deepEqual(assign(daily, DAY, fri, 'quote').marks.map((m) => m.time), [jst(1, 8, 0)]);
+  // 木曜 10:00〜11:00 JST → 木曜の足
+  const thu = gaps([jst(1, 4, 10), jst(1, 4, 11), 'unknown', 'none']);
+  assert.deepEqual(assign(daily, DAY, thu, 'quote').marks.map((m) => m.time), [jst(1, 4, 0)]);
+  // 作った区間（約定・filled）: 木曜 15:00〜金曜 10:00 JST → 木曜・金曜の足に帯（16:00 JST の境目）
+  const band = assign(daily, DAY, gaps([jst(1, 4, 15), jst(1, 5, 10), 'bug_format', 'filled']), 'trade');
+  assert.deepEqual(band.bands.map((b) => b.time), [jst(1, 4, 0), jst(1, 5, 0)]);
+  assert.deepEqual(band.marks, []);
+});
+
 test('5 分・15 分足・期近つなぎでも足の時刻と長さだけで同じ規則', () => {
   const g = gaps([jst(1, 4, 10, 7), jst(1, 4, 10, 21), 'unknown', 'none']);  // 欠けは 10:08〜10:20
   const five = bars([0, 5, 10, 15, 20, 25].map((m) => jst(1, 4, 10, m)));

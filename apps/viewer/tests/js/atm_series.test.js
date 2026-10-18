@@ -6,7 +6,7 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 
 const AtmSeries = require(path.join(__dirname, '..', '..', 'src', 'optionchan_viewer', 'static', 'atm_series.js'));
-const { SERIES, DEFAULT_SERIES, seriesOf, barsUrl, parseCsv, mergeBars, resample, monthLabel, monthLegend,
+const { SERIES, DEFAULT_SERIES, seriesOf, barsUrl, parseCsv, mergeBars, resample, displayBars, monthLabel, monthLegend,
   rollMarkers, jumpView } = AtmSeries;
 
 const T0 = Date.UTC(2026, 8, 30, 6, 0) / 1000;  // 2026-09-30 06:00 UTC（15:00 JST）
@@ -63,6 +63,44 @@ test('resample: 同じ限月は今と同じ結果、違う限月は同じ区間�
     { time: T0, open: 30, high: 32, low: 29, close: 31, month: '2026-11-12' },
   ]);
   assert.equal(resample(mixed, 60), mixed);
+});
+
+// 取引日（'YYYY-MM-DD'）の 00:00 JST → UTC 秒（合成）
+function tradingDay(day) {
+  return Date.parse(day + 'T00:00:00+09:00') / 1000;
+}
+
+// UTC 秒 → JST の日付（'YYYY-MM-DD'。チャートに渡す time + 9 時間の UTC の日付 = 凡例・目盛りの日付）
+function jstDate(t) {
+  return new Date((t + 9 * 3600) * 1000).toISOString().slice(0, 10);
+}
+
+test('displayBars: 日足（time = 取引日の 00:00 JST）は time を変えない。日付は取引日（#124）', () => {
+  // 木・金・月（週末明け）・火（10-12 を休業日とした休み明け）
+  const days = ['2026-10-01', '2026-10-02', '2026-10-05', '2026-10-13'];
+  const plain = days.map((d, i) => bar(tradingDay(d), 20 + i));
+  const months = days.map((d, i) => bar(tradingDay(d), 20 + i, i < 2 ? '2026-10-08' : '2026-11-12'));
+  [plain, months].forEach((daily) => {
+    const copy = JSON.parse(JSON.stringify(daily));
+    const out = displayBars(daily, 86400);
+    assert.deepEqual(out, copy);
+    assert.deepEqual(out.map((b) => b.time), days.map(tradingDay));
+    assert.deepEqual(out.map((b) => jstDate(b.time)), days);
+  });
+  // UTC の日で切る resample では前日（09:00 JST）になる（直す前の挙動の確認）
+  assert.deepEqual(resample(plain, 86400).map((b) => jstDate(b.time)),
+    ['2026-09-30', '2026-10-01', '2026-10-04', '2026-10-12']);
+});
+
+test('displayBars: 日足以外は resample と同じ（60 は同じ配列）', () => {
+  const same = [bar(T0, 20), bar(T0 + 60, 22), bar(T0 + 300, 21), bar(T0 + 3600, 19)];
+  const mixed = [bar(T0, 20, '2026-10-08'), bar(T0 + 60, 30, '2026-11-12'), bar(T0 + 120, 31, '2026-11-12')];
+  [same, mixed].forEach((x) => {
+    [60, 300, 900, 3600].forEach((s) => {
+      assert.deepEqual(displayBars(x, s), resample(x, s));
+    });
+    assert.equal(displayBars(x, 60), x);
+  });
 });
 
 test('rollMarkers: 限月が変わった最初の足だけ。限月の無い列は空', () => {
