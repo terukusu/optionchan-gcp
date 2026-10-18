@@ -16,6 +16,8 @@
 //   凡例にカーソルの足の限月を出す。「30日固定」（n=cm。#100）は満期 30 日に補間した IV で、IV の選択は使わない（選べなくする）。
 //   CSV・束ね・つなぎ・印の純粋関数は atm_series.js
 // - 表示はローソク足か折れ線（終値を結ぶ）。切り替えは描き直すだけで読み直さない
+// - 足が 0 本なら理由と、表示できる選び方のボタン（期近つなぎ / 約定。AtmSeries.emptyHint）を出す。
+//   0・1 は今日から数えた限月なので、過去の日付へ移動すると 0 本になる
 // - 日付の欄で、選んだ時点で（他の選択と同じく。ボタンは無い）選んでいる足のままその日（JST）のまわりへ移動する（AtmSeries.jumpView の範囲を select で読み直す。そこから
 //   左右へスクロールすると続きを読む。1 時間足の 400 日・分足の 31 日の上限はそのまま）
 // - 配色は theme.js（既定はダーク）。チャートの色は CHART_THEME から選び、切り替えたら applyOptions で塗り直す
@@ -154,6 +156,25 @@ function clearError() {
 
 function note(text) {
   el('message').textContent = text || '';
+  el('empty-action').hidden = true;
+}
+
+var EMPTY_ACTIONS = {
+  roll: { label: '期近つなぎで表示', id: 'nmonth', value: 'roll' },
+  trade: { label: '約定で表示', id: 'ivkind', value: 'trade' },
+};
+var emptyAction = null;
+var lastView = null;  // 最後に select で読みに行った時間の範囲（足が 0 本で表示範囲が取れないときに選び直しで使う）
+
+// 足が 0 本のときの説明と、選び直すボタン
+function noteEmpty() {
+  var hint = AtmSeries.emptyHint(AtmSeries.seriesOf(currentN), currentIv);
+  note(hint.text);
+  emptyAction = hint.action ? EMPTY_ACTIONS[hint.action] : null;
+  if (emptyAction) {
+    el('empty-action').textContent = emptyAction.label;
+    el('empty-action').hidden = false;
+  }
 }
 
 // ---- 描画 ----
@@ -253,8 +274,8 @@ function render(view, keep) {
   if (!entry) {
     note('');
   } else if (!shown.length && !entry.note) {
-    // 前を読み続けている間（データの無い週末・休日）は出さない
-    note(entry.leftDone ? 'データがありません' : '');
+    // 前を読み続けている間（データの無い週末・休日）も出す（読み終えて見つかれば描き直しで消える）
+    noteEmpty();
   } else {
     note(entry.note);
   }
@@ -312,6 +333,7 @@ function request(mode, src, n, iv, start, end, onData, onFail) {
 // 足・限月・IV を選んだとき・最初: view（保つ時間の範囲）を読み込み済みなら描くだけ、無ければ読む。
 function select(view) {
   gen++;
+  lastView = view;
   if (inflight) {
     inflight.ctrl.abort();
     inflight = null;
@@ -372,8 +394,11 @@ function select(view) {
   var myGen = gen;
   // 読んでいる間は前の足を薄く見せたまま（失敗したら消す）
   request('main', conf.src, n, iv, start, end, function(bars, s, e) {
+    // 選んだ範囲（日付へ移動・選び直し）に足が 0 本なら、前を探しに行かない（遠くの足が出て、移動した日付から外れるため）。
+    // 理由と選び直しのボタン（noteEmpty）を出して止まる
     entries[key] = {
-      bars: bars, start: s, end: e, leftDone: s <= EPOCH, rightDone: start === null || e < end,
+      bars: bars, start: s, end: e, leftDone: s <= EPOCH || (view !== null && !bars.length),
+      rightDone: start === null || e < end,
       empty: bars.length ? 0 : 1, note: '',
     };
     render(view, false);
@@ -559,8 +584,9 @@ function fillSeriesOptions() {
   select.value = AtmSeries.DEFAULT_SERIES;
 }
 
+// 足が 0 本（日付へ移動した先に足が無かった）なら、移動した範囲のまま選び直す
 function onSelect() {
-  select(visibleTimeRange());
+  select(visibleTimeRange() || lastView);
 }
 
 el('tf').addEventListener('change', onSelect);
@@ -601,6 +627,14 @@ el('jump-date').addEventListener('keydown', function(e) {
 });
 // 選べる日付の上限は今日（JST）
 el('jump-date').max = new Date((nowSec() + JST_OFFSET) * 1000).toISOString().slice(0, 10);
+// 選び直して、見ていた時間の範囲を読み直す（日付へ移動した直後なら、その日のまわり）
+el('empty-action').addEventListener('click', function() {
+  if (!emptyAction) {
+    return;
+  }
+  el(emptyAction.id).value = emptyAction.value;
+  select(visibleTimeRange() || lastView);
+});
 el('chart-retry').addEventListener('click', function() {
   if (retry) {
     retry();

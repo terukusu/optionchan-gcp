@@ -6,10 +6,12 @@
 //   印は限月が前の足と変わった最初の足に付ける（左・右に読み足してつないだ後の列全体から作り直す）
 // - 30 日固定（n=cm、#100）: 限月ごとにフォワードの位置で補間した ATM IV から、満期 30 日に補間した IV。気配の中値から作るので
 //   IV（約定 / mid）は選べない（fixedIv。URL に iv を付けない）
+// - 0・1（fromToday）は今日から数えた限月なので、過去の日付にはその限月の足が無い（旧系は 2 限月しか取り込んでいない）。
+//   足が 0 本のときは emptyHint で理由と、表示できる選び方（期近つなぎ / 約定）を出す
 var AtmSeries = (function() {
   var SERIES = [
-    { value: '0', label: '0', query: { n: '0' }, months: false },
-    { value: '1', label: '1', query: { n: '1' }, months: false },
+    { value: '0', label: '0', query: { n: '0' }, months: false, fromToday: true },
+    { value: '1', label: '1', query: { n: '1' }, months: false, fromToday: true },
     { value: 'roll', label: '期近つなぎ', query: { n: 'roll' }, months: true },
     { value: 'cm', label: '30日固定', query: { n: 'cm' }, months: false, fixedIv: true },
   ];
@@ -139,10 +141,23 @@ var AtmSeries = (function() {
     return out;
   }
 
+  // 足が 0 本のときの説明: { text, action }。action は表示できそうな選び方（'roll' = 期近つなぎ、'trade' = 約定）か null。
+  // 今日から数えた限月（0・1）を先に見る（過去の日付で 0 本になるのはほぼこれ）。次に mid（気配の無い期間がある）
+  function emptyHint(series, iv) {
+    if (series.fromToday) {
+      return { text: 'この期間に限月「' + series.label + '」（今日から数えた限月）の足はありません。過去の日付は期近つなぎで見られます',
+        action: 'roll' };
+    }
+    if (!series.fixedIv && iv === 'mid') {
+      return { text: 'この期間は気配（mid）の足がありません。約定なら表示できることがあります', action: 'trade' };
+    }
+    return { text: 'データがありません', action: null };
+  }
+
   return {
     SERIES: SERIES, DEFAULT_SERIES: DEFAULT_SERIES, seriesOf: seriesOf, barsUrl: barsUrl, parseCsv: parseCsv,
     mergeBars: mergeBars, resample: resample, monthLabel: monthLabel, monthLegend: monthLegend, rollMarkers: rollMarkers,
-    jumpView: jumpView,
+    jumpView: jumpView, emptyHint: emptyHint,
   };
 })();
 

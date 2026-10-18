@@ -67,7 +67,11 @@
         </div>
     </div>
 </div>
-<div id="message" class="chart-note"></div>
+<div class="chart-note-row">
+    <div id="message" class="chart-note"></div>
+    <!-- 足が 0 本のときの「期近つなぎで表示」「約定で表示」（atm_iv.js が AtmSeries.emptyHint から出す） -->
+    <button id="empty-action" type="button" hidden></button>
+</div>
 <p class="attribution">
     チャート: <a id="attribution-link" rel="noopener noreferrer" target="_blank">TradingView Lightweight Charts™</a>
     Copyright (c) 2025 TradingView, Inc.
