@@ -16,7 +16,9 @@
 // - 表示の切り替えは hidden 属性・classList・disabled だけ（CSP の style-src 'self'）
 // - 約定 IV の点は約定からの経過（smile_age.js の SmileAge。#82）で段ごとに塗り・枠・大きさを変える（Chart.js の点ごとの配列）。
 //   「経過時間」をオンにすると経過（分）を右軸に描く（サーバーに要求しない）
-// - CSV の読み取りは smile_csv.js の SmileCsv。#114 で約定から作ったスナップショット（1 行目の source、#123）には注記を出す
+// - CSV の読み取りは smile_csv.js の SmileCsv。#114 で約定から作ったスナップショット（1 行目の source、#123）・気配の無い時点には
+//   注記を出す（文は smile_view.js の SmileView。注記の行はグラフのすぐ上で、スクロールせずに見える。#127）
+// - 初めの横の範囲（view が未定のとき・表示のリセット）は、描いている限月・表示の行使価格の全体（SmileView.initialView。#127）
 // - 配色は theme.js（既定はダーク）。線の色・軸の色・ATM の縦線は PALETTES から選び、切り替えたら描き直す
 // 時刻は UTC の UNIX 秒で持ち、表示は JST（日本に夏時間は無いので 9 時間を足す）。
 var JST_OFFSET = 9 * 3600;
@@ -25,7 +27,6 @@ var SEARCH_DAYS = 14;  // サーバーが at から遡って探す日数（setti
 var DEBOUNCE_MS = 250;
 var MAX_REQUESTS = 20;
 var LATEST_FRESH_MS = 60 * 1000;  // 「最新」を読み直さずに使う時間（毎分のスナップショットを見られるように）
-var INITIAL_WIDTH = 0.10;  // 初期の表示範囲: ATM ±10%
 var MIN_WIDTH = 500;  // 横の表示幅の最小（円）
 var WHEEL_FACTOR = 1.2;
 var CALL = 1;
@@ -291,53 +292,18 @@ function datasets() {
 // ---- 横の表示範囲 ----
 
 function bounds() {
-  var lo = null;
-  var hi = null;
-  [shown, pinned].forEach(function(s) {
-    if (s && s.lo !== null) {
-      lo = lo === null ? s.lo : Math.min(lo, s.lo);
-      hi = hi === null ? s.hi : Math.max(hi, s.hi);
-    }
-  });
-  if (lo === null) {
-    return null;
-  }
-  var margin = Math.max(250, (hi - lo) * 0.02);
-  return { min: lo - margin, max: hi + margin };
+  return SmileView.bounds([shown, pinned]);
 }
 
 function initialView() {
-  var b = bounds();
-  if (!b || !shown) {
+  if (!shown) {
     return null;
   }
-  var months = shownMonths();
-  var m = months.indexOf(1) >= 0 || !months.length ? 1 : 2;
-  var atm = shown.months[m].atm !== null ? shown.months[m].atm : shown.months[m === 1 ? 2 : 1].atm;
-  if (atm === null) {
-    return b;
-  }
-  return clampView(atm * (1 - INITIAL_WIDTH), atm * (1 + INITIAL_WIDTH));
+  return SmileView.initialView([shown, pinned], shownMonths(), mode() === 'otm', MIN_WIDTH);
 }
 
 function clampView(min, max) {
-  var b = bounds();
-  if (!b) {
-    return { min: min, max: max };
-  }
-  var width = Math.min(Math.max(max - min, MIN_WIDTH), b.max - b.min);
-  var center = (min + max) / 2;
-  min = center - width / 2;
-  max = center + width / 2;
-  if (min < b.min) {
-    max += b.min - min;
-    min = b.min;
-  }
-  if (max > b.max) {
-    min -= max - b.max;
-    max = b.max;
-  }
-  return { min: min, max: max };
+  return SmileView.clamp(min, max, bounds(), MIN_WIDTH);
 }
 
 function applyView() {
@@ -518,12 +484,8 @@ function renderNotes(extra) {
   if (shown && noNewer) {
     lines.push('これより新しいデータはありません');
   }
-  if (shown && shown.source === 'fill114') {
-    // #114 で約定（DataCube の歩み値）から作ったスナップショット（#123）。気配が無い理由が分かっているので「取引時間外」は出さない
-    lines.push('約定から作成・IV は再計算・気配なし（#114）');
-  } else if (shown && !shown.hasQuote) {
-    lines.push('気配がありません（取引時間外）。約定の IV の点だけを表示しています');
-  }
+  // #114 で約定（DataCube の歩み値）から作ったスナップショット（#123）・気配の無い時点（取引時間外）
+  lines.push(SmileView.snapshotNote(shown));
   if (shown && mode() === 'otm') {
     shownMonths().forEach(function(m) {
       if (shown.months[m].atm === null && shown.byMonth[m].length) {

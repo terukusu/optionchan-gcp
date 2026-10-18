@@ -223,7 +223,7 @@ def test_today_is_jst():
 @pytest.mark.parametrize("path", ["/", "/smile", "/atm_iv", "/smile_data", "/atm_iv_data?d=0", "/static/smile.js",
                                   "/static/smile_age.js", "/static/smile_touch.js", "/static/viewer.css",
                                   "/nonexistent", "/smile_snapshot", "/smile_snapshot?at=abc", "/data_gaps",
-                                  "/static/data_gaps.js", "/static/smile_csv.js"])
+                                  "/static/data_gaps.js", "/static/smile_csv.js", "/static/smile_view.js"])
 def test_security_headers(make, path):
     # N2: すべての応答（ページ・CSV・400・静的ファイル・404）に付ける
     client, _ = make()
@@ -435,9 +435,17 @@ def test_data_gaps_query_error_is_500(make, capsys):
 
 def test_data_gaps_static_files_are_served(make):
     client, runner = make()
-    for path in ("/static/data_gaps.js", "/static/smile_csv.js"):
+    for path in ("/static/data_gaps.js", "/static/smile_csv.js", "/static/smile_view.js"):
         assert client.get(path).status_code == 200, path
     assert runner.calls == []
+
+
+@pytest.mark.parametrize("path", ["/smile", "/atm_iv"])
+def test_pages_show_no_issue_numbers(make, path):
+    # #127: 画面に出る文（HTML のコメントの外）に Issue 番号（#1xx）を出さない
+    client, _ = make()
+    html = re.sub(r"<!--.*?-->", "", client.get(path).get_data(as_text=True), flags=re.S)
+    assert not re.search(r"#1[0-9]", html)
 
 
 # ---- /atm_iv_bars（#68） ----
