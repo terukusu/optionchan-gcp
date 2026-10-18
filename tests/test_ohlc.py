@@ -190,6 +190,22 @@ def test_mid_bars_identical():
         assert re.search(r'\n\s*WHERE is_atm AND type = 2\n', SQL[name]), name
 
 
+def test_backfill_limited_to_iv_keys():
+    """過去分の作り直し（#122）: mid の足は範囲の中の atm_iv の 1 時間足のキーに限る（atm_iv の過去分は旧系から移した値で、
+    UTC 23 時台などの足が無い。最新版から作った mid の足だけが多くならないように）"""
+    text = SQL['mid_backfill.sql']
+    iv_keys = re.search(r'\niv_keys AS \((.*?)\n\),\n', text, re.S)
+    assert iv_keys, 'iv_keys CTE'
+    assert iv_keys.group(1) == ('\n  SELECT DISTINCT last_trading_day, started_at'
+                                '\n  FROM `${project}.${dataset}.atm_iv`'
+                                '\n  WHERE started_at >= start_at AND started_at < end_at AND time_frame = 3600')
+    # source の外に置く（tests/test_ohlc_bq.py は source を固定値に差し替え、atm_iv は一時テーブルにする）
+    assert text.index('\n-- source:end\n') < iv_keys.start() < text.index('\n-- mid_bars:begin\n')
+    assert 'SELECT *, 3600 AS time_frame FROM mid_bars JOIN iv_keys USING (last_trading_day, started_at)\n-- result:end' in text
+    # 何もしない条件（IF EXISTS）は JOIN の後の bars に掛かる: 範囲の中に atm_iv のキーが無ければ mid を消さない
+    assert text.index('\n-- result:end\n') < text.index('IF EXISTS (SELECT 1 FROM bars) THEN')
+
+
 def merges(text):
     return re.findall(r'MERGE `\$\{project\}\.\$\{dataset\}\.(\w+)` AS t\n(.*?);', text, re.S)
 
