@@ -1,5 +1,6 @@
 // /atm_iv の系列（限月の選択肢）と足の列の純粋関数（#101）。DOM・Lightweight Charts に触らない。ブラウザでは global の
 // AtmSeries、node（tests/js/atm_series.test.js）では module.exports。時刻は UTC の UNIX 秒。
+// - 描く足（displayBars）: 分足・1 時間足は 1 分足・1 時間足を束ねる。日足はサーバーの日足（取引日の 00:00 JST）のまま（#124）
 // - 系列: value = #nmonth の選択の値（読み込み済みの足を覚えるキーにも使う）、label = 表示、query = /atm_iv_bars に付ける
 //   パラメータ、months = CSV の 6 列目（その足の限月 = 最終取引日）を読み、乗り換えの印・凡例の限月を出す
 // - 期近つなぎ（n=roll）: サーバーが取引日ごとに期近の最終取引日の 5 営業日前で 2 限月へ乗り換えた足を返す。
@@ -99,6 +100,12 @@ var AtmSeries = (function() {
     return out;
   }
 
+  // 描く足（#124）: 日足（seconds = 86400）はサーバーの日足（time = 取引日の 00:00 JST）をそのまま使う
+  // （UTC の日で切ると前日の UTC の 0 時になり、日付が取引日の前日になる）。それ以外は resample
+  function displayBars(bars, seconds) {
+    return seconds === 86400 ? bars : resample(bars, seconds);
+  }
+
   // '2026-12-10' → '12月限'
   function monthLabel(month) {
     return Number(month.slice(5, 7)) + '月限';
@@ -164,7 +171,7 @@ var AtmSeries = (function() {
 
   return {
     SERIES: SERIES, DEFAULT_SERIES: DEFAULT_SERIES, seriesOf: seriesOf, barsUrl: barsUrl, parseCsv: parseCsv,
-    mergeBars: mergeBars, resample: resample, monthLabel: monthLabel, monthLegend: monthLegend, rollMarkers: rollMarkers,
+    mergeBars: mergeBars, resample: resample, displayBars: displayBars, monthLabel: monthLabel, monthLegend: monthLegend, rollMarkers: rollMarkers,
     jumpView: jumpView, emptyHint: emptyHint,
   };
 })();
