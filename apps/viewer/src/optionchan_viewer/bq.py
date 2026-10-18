@@ -17,7 +17,9 @@ QUERY_NAMES = ("latest_snapshot", "next_snapshot", "smile", "smile_snapshot", "a
                # 期近つなぎ（n=roll、#101）: 全限月の足
                "atm_iv_months", "atm_iv_minute_months", "atm_mid_minute_months", "atm_mid_months",
                # 30 日固定（n=cm、#100）
-               "atm_cm_meta", "atm_cm")
+               "atm_cm_meta", "atm_cm",
+               # 過去データの欠けの一覧（#123）
+               "data_gaps")
 _PLACEHOLDER = re.compile(r"\$\{(\w+)\}")
 
 

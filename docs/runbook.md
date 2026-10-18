@@ -2337,6 +2337,62 @@ vf114 "$RA" "$RE" | jq -c '.[-1][0] | {built_runs, built_option_rows, built_futu
 - **ビューアー**: `/smile` の欠け 1・3 の日時に、約定のあった行使価格の約定値・取引時刻・IV が出る（気配・mid IV・デルタは空。約定の無い行使価格は行が無い）。`/atm_iv` の約定の IV がつながる（mid は欠けのまま）
 - **新系の取り込み**: `<P>-raw` の `raw/` だけを読むので、`datacube/` の CSV は読まない
 
+## 欠けの一覧の表 data_gaps（#123）
+
+過去データの欠けの一覧（`sql/gaps/gaps.sql`、#110。docs/data-gaps.md）の結果を、データセットの小さい表 `data_gaps`（パーティションなし・数百行）に入れる。ビューアーの `/data_gaps` が全体を読み、`/atm_iv` に帯・印を出す（「ビューアー（#13）」）。表は Terraform（`infra/prod/gaps.tf`。列は `schema/tokyo/data_gaps.json`）が作り、中身はここの手順で所有者が入れる。旧系は止めていて過去の旧系の行はもう増えないので一度きり（定期実行はしない）。#114 の穴埋めを足したとき・`gaps.sql` を直したときは同じ手順で作り直す。
+
+- 表が空（入れていない）なら、ビューアーは印・帯を出さないだけで、ほかは今どおり動く
+- 中身（区間の時刻）は利用者ごとのデータから出る値。結果の CSV はリポジトリ・Issue に貼らない（件数だけを記録する）
+- 表は `gaps.sql` から作り直せるので、Terraform で消せる（`deletion_protection = false`）
+
+### 変数
+
+「過去データの移行（#12）」の「変数」の `P`・`L`・`q`・`qr`・`WDIR` と、docs/data-gaps.md の「流し方」の `rgap` を使う。範囲の終わりは新系の最初のスナップショット（`ingest_runs` の `trigger` が `legacy_` で始まらない行の最初。並行稼働中の旧系の空白は欠けではないので入れない）:
+
+```sh
+# 新系の最初のスナップショット（新系を始めた日より前の日付で絞る。表は小さい）
+q --location=$L --format=csv 'SELECT MIN(snapshot_at) AS c0 FROM `'$P'.optionchan_tokyo.ingest_runs`
+  WHERE snapshot_at >= TIMESTAMP "<新系を始めた月の 1 日> 00:00:00+00" AND NOT STARTS_WITH(trigger, "legacy_")'
+G1='<上の c0>+00'   # 例の書式: 'YYYY-MM-DD HH:MM:SS+00'
+```
+
+### 入れる
+
+```sh
+# 1. 欠けの一覧（約 0.2 GB。docs/data-gaps.md の「流し方」と同じで、範囲の終わりだけが G1）
+rgap | qr '2018-10-01 00:00:00+00' "$G1" --location=$L --format=csv --max_rows=100000 \
+  --maximum_bytes_billed=5000000000 > $WDIR/gaps_raw.txt
+# 2. bq はスクリプトの CSV の前に文を出すので、ヘッダ行から切り出す
+sed -n '/^prev_at,next_at,/,$p' $WDIR/gaps_raw.txt > $WDIR/gaps.csv
+head -1 $WDIR/gaps.csv   # prev_at,next_at,prev_jst,next_jst,gap_minutes,session_minutes,built_minutes,cause,status,max_abs_diff
+echo $(( $(wc -l < $WDIR/gaps.csv) - 1 ))   # 区間の数
+# 3. 表を置き換える（スキーマのファイルを渡す。渡さないと列の説明が消え、Terraform の plan に差分が出る）
+bq load --project_id=$P --location=$L --replace --source_format=CSV --skip_leading_rows=1 \
+  $P:optionchan_tokyo.data_gaps $WDIR/gaps.csv schema/tokyo/data_gaps.json
+```
+
+### 確認
+
+```sh
+q --location=$L --format=pretty 'SELECT COUNT(*) AS n, COUNTIF(NOT (cause = "no_change" AND status = "none")) AS shown,
+  COUNTIF(status = "none") AS none_, COUNTIF(status = "filled") AS filled, COUNTIF(status = "partial") AS partial_
+  FROM `'$P'.optionchan_tokyo.data_gaps`'
+```
+
+- `n` が 2. の区間の数と同じ。`shown` が `/data_gaps` の返す区間の数（`no_change` かつ `none` は値が変わらず保存しなかった区間で、欠けではないので出さない）
+- オーナーの環境（2026-10-18）: `n` 707、`shown` 445（全期間の 708 から、並行稼働中の最後の 1 区間が範囲の外）。違えば `gaps.sql` を流した日・#114 の作成の後かを確かめる
+- 次の PR の CI の plan（か deploy の workflow_dispatch の plan）で `data_gaps` に差分が無い（列の説明を保った）
+- ブラウザで `/atm_iv` に帯・印が出る（「ビューアー（#13）」の確認）
+
+### 費用
+
+| 項目 | 見込み |
+|---|---|
+| `gaps.sql` | 約 0.2 GB（`ingest_runs`・`future_price`・`spot_price` の必要な列。2026-10-18 の実測） |
+| `bq load` | 無料（共有スロット） |
+| 保存 | 数十 KB（ほぼ 0 円） |
+| `/data_gaps` | ページを開くたびに 1 回、表全体（数十 KB）で最小課金の 10 MiB |
+
 ## 1 時間足（#49）
 
 旧系の `insert_ohlc`（Cloud Functions、python37、毎日 00:01 UTC）の置き換え（target.md 3.2）。新系の最新版から ATM の 1 時間足を作る BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の 3 表（+ #98 で足した mid IV の `atm_mid_iv`。旧系に無い表）。旧系（`insert_ohlc`・旧 `optionchan.atm_*`）は変えない（止めるのは #14）。定義は `infra/prod/sq.tf`、SQL は `sql/ohlc/`（試験は `tests/test_ohlc.py`・`tests/test_ohlc_bq.py`）。
@@ -2782,7 +2838,7 @@ done   # optionchan_tokyo は ["READER"]（か roles/bigquery.dataViewer）、op
 curl -s -o /dev/null -w '%{http_code}\n' "$U/smile_data"   # 200 でない（IAP のログインへの 302 等）
 ```
 
-ブラウザ（所有者のアカウント）: `$U/`・`$U/smile`・`$U/atm_iv` を開き（旧型の ATM 推移 `/atm` は #58 で削除した）、`/atm_iv`（#68・#77。期間の選択・Update ボタンは無い）は開発者ツールのネットワーク（`atm_iv_bars` で絞る）を開いたまま次を見る:
+ブラウザ（所有者のアカウント）。`/data_gaps` も IAP の後ろなので、`curl` ではなくブラウザ（か開発者ツールのネットワーク）で見る: `$U/`・`$U/smile`・`$U/atm_iv` を開き（旧型の ATM 推移 `/atm` は #58 で削除した）、`/atm_iv`（#68・#77。期間の選択・Update ボタンは無い）は開発者ツールのネットワーク（`atm_iv_bars` で絞る）を開いたまま次を見る:
 
 1. 開いた直後: チャートが薄くなり中央に「読み込み中…」とスピナーが出て、描けたら消える。要求は `?tf=1h&n=0`（start・end なし）1 本
 2. ドラッグ・ホイール（スマートフォンはスワイプ・ピンチ）で左（過去）へ動かし、読み込んだ範囲の端に近づくと、左上に「前のデータを読み込み中…」のバッジが出て `start=&end=` 付きの要求が 1 本出る（1 時間足は 60 日分。続けて動かしても、読み込み中は次の要求を出さない）。読み込んだ範囲の中で動かしても要求は出ない
@@ -2793,6 +2849,8 @@ curl -s -o /dev/null -w '%{http_code}\n' "$U/smile_data"   # 200 でない（IAP
 7. 失敗の表示（任意）: 開発者ツールのネットワークを「オフライン」にして足を変えると「データを取得できませんでした (network)」と「再試行」が出る。オンラインに戻して「再試行」で描ける
 8. 期近つなぎ（#101）: 開いた直後の限月は「0」。「期近つなぎ」を選ぶと要求は `n=roll`。日足で左へ動かし続けると 2018-10 まで描け（乗り換えの印がおおむね月に 1 つずつ並ぶ。1 時間足に限月が欠けた区間（2022・2023 年の一部）では 2 か月分飛んで 1 つになる）、2018-10-19 より前で読み込みが止まる。期近つなぎのまま足を 1分・5分・15分・1時間・日足に変えても選択が保たれる。限月を 0 / 1 に戻すと印が消え、凡例に限月が出ない
 9. 期近つなぎの乗り換え（1 時間足）: 2026-09-30（水）の日中の最後の足（15 時台）までが 10 月限、夜間（値のある最初の足）から 11 月限で「11月限」の印がある。2025-12-26（金）の日中までが 1 月限、その夜間から 2 月限。カーソルを乗り換えの前後の足に当てると凡例の限月（例: `11月限（最終取引日 2026-11-12）`）が変わる。前後の足の OHLC（3 本以上）が、`atm_iv` を `started_at` の 1 時間の範囲で読んだ凡例の限月の行の値と一致する（下のクエリ。値の要約だけを記録し、結果は貼らない）。スマートフォン幅（390px）で横にはみ出さない（`document.documentElement.scrollWidth <= window.innerWidth`）
+
+10. 過去データの欠け（#123。表 `data_gaps` に入れた後）: 開いた直後に `/data_gaps` の要求が 1 本出て、チャートの下に「帯: 約定から作成した区間…／■: 欠け…」が出る。足・限月・IV・表示を切り替えても、左へ動かして読み足しても `/data_gaps` の要求は増えない（ネットワークを `data_gaps` で絞って 1 本）。日付 2023-04-25・1 時間足で、約定は 2023-04-25 13:35 JST までの足に帯があり凡例に「欠け 1（約定から作成（#114。IV 再計算・気配なし））…」、mid は 2022-09-14 15:00 JST の足の次が 2023-04-25 13:00 JST の足で、2022-09-14 15:00 の足に ■ と凡例に欠け 1 の期間。日付 2021-07-27・1 時間足で、約定は 2021-07-26 17:00〜07-28 02:00 JST の足に帯、mid は 2021-07-26 17:00 JST の足に ■。日足・mid は取引日 2021-07-27 の足に ■（今の日足の凡例・目盛りの日付は取引日の前日の表記なので、2021-07-26 と出る足）。ライト・ダークの切り替えで帯・印の色が変わる。表が空・`/data_gaps` が失敗しても、帯・印が出ないだけで今どおり描ける
 
 ```sh
 # 期近つなぎの確認（2026-09-30 15:00〜20:00 JST = 06:00〜11:00 UTC。2025-12-26 も同じ形）。月パーティションなので数 MiB
@@ -2811,6 +2869,7 @@ bq query --use_legacy_sql=false --maximum_bytes_billed=10737418240 --format=pret
 5. 「この時点を固定」→「−1時間」で、凡例に「表示」と「固定」の 2 つの時刻が出て、固定した曲線が破線で重なる。「固定を解除」・一度読んだ時点への移動（「+1時間」で戻る等）・1限月 / 2限月の切り替え・「OTM合成 / call・put別」の切り替えでは要求が出ない
 6. この画面で読み込めるのは 20 時点まで（超えると「この画面で読み込めるのは 20 時点までです」と出て要求しない。ページを読み直すとリセット）
 7. 失敗の表示（任意）: ネットワークを「オフライン」にして時点を動かすと「データを取得できませんでした (network)」と「再試行」が出る。オンラインに戻して「再試行」で描ける
+8. #114 で作った時点（#123）: 日時 2023-01-10 10:00 JST（欠け 1）を選ぶと注記「約定から作成・IV は再計算・気配なし（#114）」が出る（「気配がありません（取引時間外）」は出ない）。2023-05-01 10:00 JST（欠け 2。値は JPX）・新系の日（例 2026-10-16 10:00 JST）では出ない。`/smile_snapshot` の 1 行目は 6 列（6 列目 `source` が `fill114` か空）。デプロイの前から開いたままのタブは、次の時点の移動で「データを取得できませんでした (invalid response)」になる（1 行目の列の数が変わったため）。ページを読み直せば直る
 
 `/smile_data`（旧ビューアーとの見比べ #54 で使う）は #79 の後も同じ形式の CSV を返す（`/smile` は使わなくなった）。
 
@@ -2850,10 +2909,11 @@ Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、�
 | 期近つなぎ `n=roll`（#101。分足・1h・1d） | 上の各行と同じもの（限月で絞らない全限月の足。読む列・期間は同じ）+ 取引カレンダーの休業日（読んだ範囲の前日〜40 日先。数 KiB） | 上の各行と同じ | 上の各行と同じ（2026-10-16 の dry run で分足 3 日 127.7 MiB・mid 149.4 MiB・1d の最大 139.8 MiB・過去だけ 0.4 MiB。n=0 と同値）+ 休業日の最小課金 10 MiB。行が無い範囲では休業日を読まない。日足で 2018-10 まで遡っても 1 ページ 0.5 GiB 未満 |
 | `/smile_snapshot?at=`（#79。`/smile` の 1 時点） | latest_runs の [at − 14 日, at] でスナップショットを探し（約 0.1 MiB、最小課金 10 MiB）、option_price_latest のその 1 秒を読む | 1 時点（at は探す時点を動かすだけ） | 約 120 MiB（1 日分のパーティション。2026-10-13 の最後のスナップショットの dry run で 119.9 MiB）+ 10 MiB |
 | `/smile_snapshot?at=&dir=next`（#80。`/smile` の「+」方向） | latest_runs の [at, at + 14 日) で最初のスナップショットを探す（無ければ上と同じく at 以前で最新を探す）。あとは上と同じ | 同上 | 上 + 10 MiB（最新より後のときは + 20 MiB） |
+| `/data_gaps`（#123。`/atm_iv` を開くたびに 1 回） | 表 `data_gaps` の全体（数百行・数十 KB） | パラメータなし | 最小課金 10 MiB（400 回開いて 4 GiB） |
 
 取りすぎ防止（画面）: 同時に読むのは 1 本、連続するスクロール・拡縮は 250 ms まとめる、足・限月ごとに読んだ範囲を覚えて読み直さない。足・限月ごとに覚える日数は分足 9 日・1 時間足 400 日、分足をこの画面で読む日数の合計は 24 日（約 2 GiB）まで。データの無い範囲が 3 回続いたらそれより前は無いとみなす。1 ページを開いて分足を上限まで動かすと 約 2 GiB、1 時間足・日足だけなら 数十〜数百 MiB。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。画面側の上限（分足 24 日分など）は 1 ページの中だけのもので、ページを読み直すとリセットされる。
 
-1 日の上限（サーバー、#95）: ビューアーのプロセスが JST の 1 日に BigQuery で課金されたバイト数（ジョブの `total_bytes_billed`）を数え、環境変数 `DAILY_BYTES_BILLED`（既定 4 GiB）に達したら、それ以降の API（`/smile_data`・`/smile_snapshot`・`/atm_iv_data`・`/atm_iv_bars`）は BigQuery を呼ばずに 429 を返す（ログは `daily_limit`。画面は「今日の読み込みの上限に達しました」）。JST の 0 時に数え直す。上限はクエリを出す前に見るので、超えた後の 1 本（最大 `maximum_bytes_billed`）までは通る。数えるのはインスタンスごとで、ほかのインスタンスの分・止まる前の分は数えない（最大 2 インスタンスで 1 日 最大 約 8 GiB + 2 本。インスタンスが止まると 0 から数え直す）。プロジェクト全体の合計（`INFORMATION_SCHEMA`・`jobs.list`）は `sa-viewer` に `bigquery.jobs.list` が無い（`jobUser` だけ）ので使わない。読み込みが続く間はインスタンスは止まらないので、画面の不具合などによる繰り返しの読み込みは止まり、プロジェクトのクエリ量上限（「コスト」。2026-10-18 時点で 100 GiB/日）を取り込み・定期クエリに残す。2026-10 の `sa-viewer` の利用は 1 日 最大 0.6 GiB。上限を変えるときは `infra/prod/viewer.tf` の env に `DAILY_BYTES_BILLED`（バイト数。100 GiB 以下）を足す。429 が出ていないかは `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND jsonPayload.event="daily_limit"' --project=$P --freshness=1d --limit=5 --format='value(timestamp,jsonPayload.endpoint)'`。
+1 日の上限（サーバー、#95）: ビューアーのプロセスが JST の 1 日に BigQuery で課金されたバイト数（ジョブの `total_bytes_billed`）を数え、環境変数 `DAILY_BYTES_BILLED`（既定 4 GiB）に達したら、それ以降の API（`/smile_data`・`/smile_snapshot`・`/atm_iv_data`・`/atm_iv_bars`・`/data_gaps`）は BigQuery を呼ばずに 429 を返す（ログは `daily_limit`。画面は「今日の読み込みの上限に達しました」）。JST の 0 時に数え直す。上限はクエリを出す前に見るので、超えた後の 1 本（最大 `maximum_bytes_billed`）までは通る。数えるのはインスタンスごとで、ほかのインスタンスの分・止まる前の分は数えない（最大 2 インスタンスで 1 日 最大 約 8 GiB + 2 本。インスタンスが止まると 0 から数え直す）。プロジェクト全体の合計（`INFORMATION_SCHEMA`・`jobs.list`）は `sa-viewer` に `bigquery.jobs.list` が無い（`jobUser` だけ）ので使わない。読み込みが続く間はインスタンスは止まらないので、画面の不具合などによる繰り返しの読み込みは止まり、プロジェクトのクエリ量上限（「コスト」。2026-10-18 時点で 100 GiB/日）を取り込み・定期クエリに残す。2026-10 の `sa-viewer` の利用は 1 日 最大 0.6 GiB。上限を変えるときは `infra/prod/viewer.tf` の env に `DAILY_BYTES_BILLED`（バイト数。100 GiB 以下）を足す。429 が出ていないかは `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND jsonPayload.event="daily_limit"' --project=$P --freshness=1d --limit=5 --format='value(timestamp,jsonPayload.endpoint)'`。
 
 `/smile`（#79）: 拡大縮小・スクロール・表示の切り替え・比較用の固定ではサーバーに要求しない。時点の移動は 250 ms まとめて 1 本、前の要求は中断（BigQuery のジョブは止まらないので、中断・再試行も要求の数に数える）、一度読んだ時点は画面で覚えて読み直さない（「最新」は 60 秒まで）。1 ページで出す要求は 20 本まで（20 × 約 130 MiB = 約 2.6 GiB）。「+」方向（+1分〜+1日）は「その時刻以後で最初のスナップショット」を読む（`&dir=next`、#80）ので、取引の切れ目（15:45〜17:00・06:00〜08:45・週末・休業日）の手前から「+1分」を押すと、1 本で次の取引の最初の時点に移る。それより新しいものが無ければ最新を見せ、「これより新しいデータはありません」を出す。`/atm_iv` と `/smile` を両方上限まで使うと 1 ページずつで 約 4.6 GiB になり、何度も読み直すと目安の 8 GiB/日 を超えうる（画面の上限はページを読み直すとリセット。サーバーの 1 日の上限は上の段落）。
 

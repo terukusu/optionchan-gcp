@@ -57,6 +57,8 @@ PARAMS = {
     "atm_mid_minute_months": {"start_at": NOW, "end_at": NOW},
     "atm_cm_meta": {"start_at": NOW, "end_at": NOW},
     "atm_cm": cm_params(NOW, None, NOW, NOW, 3600),
+    # 表全体（#123。パラメータなし）
+    "data_gaps": {},
 }
 
 

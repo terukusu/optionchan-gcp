@@ -121,3 +121,29 @@ test('足が 0 本の説明: 0・1 は期近つなぎへ、mid は約定へ、�
   assert.equal(emptyHint(seriesOf('cm'), 'mid').action, null);
   assert.equal(emptyHint(seriesOf('cm'), 'mid').text, 'データがありません');
 });
+
+test('emptyHint: 欠けの区間（#123）を渡すと mid・30日固定で期間の文が付き、約定・区間なしでは今の文のまま', () => {
+  const { emptyHint } = AtmSeries;
+  // 合成の区間（DataGaps.parse の形）
+  const g1 = { prevAt: 0, nextAt: 3600, cause: 'unknown', status: 'none', period: '2001-01-04 10:00〜2001-01-04 11:00' };
+  const g2 = { prevAt: 7200, nextAt: 9000, cause: 'bug_format', status: 'filled', period: '2001-01-04 12:00〜2001-01-04 12:30' };
+  const base = {};
+  for (const [n, iv] of [['0', 'mid'], ['roll', 'mid'], ['cm', 'mid'], ['cm', 'trade'], ['roll', 'trade'], ['0', 'trade']]) {
+    base[n + iv] = emptyHint(seriesOf(n), iv);
+    // 省略・空は今と同じ
+    assert.deepEqual(emptyHint(seriesOf(n), iv, []), base[n + iv]);
+    assert.deepEqual(emptyHint(seriesOf(n), iv, undefined), base[n + iv]);
+  }
+  const suffix = '。この期間は欠け（2001-01-04 10:00〜2001-01-04 11:00）にかかっています';
+  assert.deepEqual(emptyHint(seriesOf('roll'), 'mid', [g1]), { text: base.rollmid.text + suffix, action: 'trade' });
+  assert.deepEqual(emptyHint(seriesOf('0'), 'mid', [g1]), { text: base['0mid'].text + suffix, action: 'roll' });
+  assert.equal(emptyHint(seriesOf('cm'), 'mid', [g1]).text, 'データがありません' + suffix);
+  assert.equal(emptyHint(seriesOf('cm'), 'trade', [g1]).text, 'データがありません' + suffix);
+  assert.equal(emptyHint(seriesOf('cm'), 'mid', [g1]).action, null);
+  // 約定は区間があっても今の文のまま
+  assert.deepEqual(emptyHint(seriesOf('roll'), 'trade', [g1]), base.rolltrade);
+  assert.deepEqual(emptyHint(seriesOf('0'), 'trade', [g1, g2]), base['0trade']);
+  // 2 件なら「ほか 1 件」
+  assert.equal(emptyHint(seriesOf('roll'), 'mid', [g1, g2]).text,
+    base.rollmid.text + '。この期間は欠け（2001-01-04 10:00〜2001-01-04 11:00 ほか 1 件）にかかっています');
+});

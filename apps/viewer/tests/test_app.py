@@ -23,12 +23,31 @@ def smile_rows():
     ]
 
 
+RUN_ID = "00000000-0000-0000-0000-000000000001"
+
+
+def data_gaps_rows():
+    """sql/data_gaps.sql の行（#123）。時刻は合成（UNIX 秒）。prev_at の順ではなく、(no_change, none) を含む"""
+    def g(prev_at, next_at, cause, status):
+        return {"prev_at": prev_at, "next_at": next_at, "cause": cause, "status": status}
+
+    return [
+        g(1700050000, 1700060000, "bug_comma", "partial"),
+        g(1700000000, 1700003600, "no_change", "none"),
+        g(1700040000, 1700045000, "no_change", "filled"),
+        g(1700010000, 1700020000, "unknown", "none"),
+        g(1700030000, 1700035000, "bug_format", "filled"),
+    ]
+
+
 def snapshot_rows():
     """sql/smile_snapshot.sql の行（#79）。1 限月の ATM は put の 25000、2 限月は ATM なし"""
     def r(month, typ, strike, **kw):
         base = {"month": month, "type": typ, "target_price": strike,
                 "last_trading_day": date(2026, 11, 12) if month == 1 else date(2026, 12, 10), "is_atm": False,
-                "iv": None, "price": None, "price_time": None, "bid_iv": None, "ask_iv": None, "bid": None, "ask": None}
+                "iv": None, "price": None, "price_time": None, "bid_iv": None, "ask_iv": None, "bid": None, "ask": None,
+                # 実行 ID（#123）。既定は新系の形の合成値
+                "ingest_run_id": RUN_ID}
         return base | kw
 
     return [
@@ -45,6 +64,7 @@ def ok_results():
         "latest_snapshot": [{"snapshot_at": SNAP}],
         "smile": smile_rows(),
         "smile_snapshot": snapshot_rows(),
+        "data_gaps": data_gaps_rows(),
         "atm_iv_meta": [{"last_started_at": datetime(2026, 10, 12, 21, tzinfo=UTC)}],
         "atm_iv": [{"open": 18.0, "high": 19.0, "low": 17.5, "close": 18.5,
                     "started_at": datetime(2026, 10, 12, 21, tzinfo=UTC)}],
@@ -202,7 +222,8 @@ def test_today_is_jst():
 
 @pytest.mark.parametrize("path", ["/", "/smile", "/atm_iv", "/smile_data", "/atm_iv_data?d=0", "/static/smile.js",
                                   "/static/smile_age.js", "/static/smile_touch.js", "/static/viewer.css",
-                                  "/nonexistent", "/smile_snapshot", "/smile_snapshot?at=abc"])
+                                  "/nonexistent", "/smile_snapshot", "/smile_snapshot?at=abc", "/data_gaps",
+                                  "/static/data_gaps.js", "/static/smile_csv.js"])
 def test_security_headers(make, path):
     # N2: すべての応答（ページ・CSV・400・静的ファイル・404）に付ける
     client, _ = make()
@@ -238,8 +259,9 @@ def test_smile_snapshot_latest(make):
     assert res.headers["Content-Type"] == "text/csv; charset=utf-8"
     assert res.headers["Cache-Control"] == "no-cache"
     lines = res.get_data(as_text=True).split("\n")
-    # メタ行: スナップショットの UNIX 秒, 1 限月の最終取引日, ATM, 2 限月の最終取引日, ATM（2 限月は ATM なし）
-    assert lines[0] == f"{int(SNAP.timestamp())},2026-11-12,25000,2026-12-10,"
+    # メタ行: スナップショットの UNIX 秒, 1 限月の最終取引日, ATM, 2 限月の最終取引日, ATM（2 限月は ATM なし）,
+    # source（#123。新系の実行は空）
+    assert lines[0] == f"{int(SNAP.timestamp())},2026-11-12,25000,2026-12-10,,"
     # month,type,target_price,iv,price,price_time,bid_iv,ask_iv,bid,ask,mid_iv,otm（ask_iv の 0 は空・mid なし）
     assert lines[1:-1] == [
         "1,2,24875,,,,19.0,20.0,140,150,19.5,1",
@@ -334,9 +356,88 @@ def test_smile_snapshot_one_month_only(make):
     results["smile_snapshot"] = one + [r | {"month": 2} for r in one]
     client, _ = make(results)
     lines = client.get("/smile_snapshot").get_data(as_text=True).split("\n")
-    assert lines[0] == f"{int(SNAP.timestamp())},2026-11-12,25000,2026-11-12,25000"
+    assert lines[0] == f"{int(SNAP.timestamp())},2026-11-12,25000,2026-11-12,25000,"
     body = lines[1:-1]
     assert [line[2:] for line in body if line.startswith("1,")] == [line[2:] for line in body if line.startswith("2,")]
+
+
+@pytest.mark.parametrize("run_id,want", [
+    ("legacy-fill114-20000101T000000Z", "fill114"),
+    # 旧系の取り込みの実行・新系の実行は空
+    ("legacy-20000101T000000Z", ""),
+    (RUN_ID, ""),
+    (None, ""),
+])
+def test_smile_snapshot_source(make, run_id, want):
+    # #123: 1 行目の 6 列目 = source（#114 で作ったスナップショットなら fill114）。実行 ID は合成
+    results = ok_results()
+    results["smile_snapshot"] = [r | {"ingest_run_id": run_id} for r in snapshot_rows()]
+    client, _ = make(results)
+    lines = client.get("/smile_snapshot").get_data(as_text=True).split("\n")
+    head = lines[0].split(",")
+    assert len(head) == 6 and head[5] == want
+    # 2 行目以降は実行 ID で変わらない
+    base = make()[0].get("/smile_snapshot").get_data(as_text=True).split("\n")
+    assert lines[1:] == base[1:]
+
+
+# ---- /data_gaps（#123） ----
+
+def test_data_gaps(make):
+    client, runner = make()
+    res = client.get("/data_gaps")
+    assert res.status_code == 200
+    assert res.headers["Content-Type"] == "text/csv; charset=utf-8"
+    assert res.headers["Cache-Control"] == "no-cache"
+    # (no_change, none) だけを除き、prev_at 昇順。ヘッダなし、prev_at,next_at,cause,status
+    assert res.get_data(as_text=True) == (
+        "1700010000,1700020000,unknown,none\n"
+        "1700030000,1700035000,bug_format,filled\n"
+        "1700040000,1700045000,no_change,filled\n"
+        "1700050000,1700060000,bug_comma,partial\n"
+    )
+    # パラメータなしの 1 本だけ
+    assert runner.calls == [("data_gaps", {})]
+
+
+def test_data_gaps_ignores_query_string(make):
+    # クエリ文字列は読まない（同じ応答・同じクエリ）
+    client, runner = make()
+    res = client.get("/data_gaps?start=1&x=%27")
+    assert res.status_code == 200
+    assert runner.calls == [("data_gaps", {})]
+
+
+@pytest.mark.parametrize("rows", [[], [{"prev_at": 1700000000, "next_at": 1700003600, "cause": "no_change",
+                                         "status": "none"}]])
+def test_data_gaps_no_rows_is_empty_200(make, rows):
+    # 表が空（作っていない利用者）・対象の区間が無い → 空の 200（画面は印を出さないだけ）
+    results = ok_results()
+    results["data_gaps"] = rows
+    client, _ = make(results)
+    res = client.get("/data_gaps")
+    assert res.status_code == 200 and res.get_data(as_text=True) == ""
+
+
+def test_data_gaps_query_error_is_500(make, capsys):
+    results = ok_results()
+    results["data_gaps"] = RuntimeError("secret detail: project 123456789012 user@example.com")
+    client, _ = make(results)
+    res = client.get("/data_gaps")
+    assert res.status_code == 500
+    assert res.get_data(as_text=True) == "internal error\n"
+    out = capsys.readouterr().out
+    record = json.loads(out.strip().splitlines()[-1])
+    assert record["event"] == "query_failed" and record["endpoint"] == "data_gaps"
+    assert record["error_type"] == "RuntimeError"
+    assert "secret" not in out and "123456789012" not in out
+
+
+def test_data_gaps_static_files_are_served(make):
+    client, runner = make()
+    for path in ("/static/data_gaps.js", "/static/smile_csv.js"):
+        assert client.get(path).status_code == 200, path
+    assert runner.calls == []
 
 
 # ---- /atm_iv_bars（#68） ----

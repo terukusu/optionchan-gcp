@@ -63,8 +63,8 @@ resource "google_cloud_run_v2_service" "viewer" {
     }
   }
 
-  # 読み取りの権限より先にリクエストが来ないように
-  depends_on = [google_bigquery_dataset_iam_member.viewer_reader]
+  # 読み取りの権限より先にリクエストが来ないように。/data_gaps（#123）が読む表も先に作る（無い表を読んで 500 にしない）
+  depends_on = [google_bigquery_dataset_iam_member.viewer_reader, google_bigquery_table.data_gaps]
 }
 
 # IAP からだけ呼べるようにする（allUsers・allAuthenticatedUsers は付けない）。

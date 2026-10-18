@@ -25,6 +25,9 @@ CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
 - /atm_iv_bars?n=cm（#100）: 表（atm_cm_iv）の値と、まだ表に無い分を生の気配から計算した 30 日の IV を
   つなぎ、範囲で絞って足に束ねる。計算の値は README の式（ルートの tests/test_cm_bq.py と同じ）。
   dry run が 512 MiB 以下（表ができた後）
+- 過去データの欠け（#123）: /smile_snapshot の 1 行目の 6 列目 source が、#114 で作った実行（実行 ID の接頭辞）の
+  スナップショットだけ fill114。/data_gaps の SQL が表全体を UNIX 秒・prev_at 昇順で返す。dry run が 1 MiB 以下
+  （表を作った後）。実行 ID・時刻は合成
 """
 import json
 import os
@@ -151,12 +154,14 @@ def bar(at, month, o, h, low, c):
 
 
 CM = [("created_at", "TIMESTAMP"), ("iv30", "FLOAT64")]
+GAPS = [("prev_at", "TIMESTAMP"), ("next_at", "TIMESTAMP"), ("cause", "STRING"), ("status", "STRING")]
 
 
-def fixtures(options=(), hourly=(), runs=(), calendar=(), mid_hourly=(), cm=()):
+def fixtures(options=(), hourly=(), runs=(), calendar=(), mid_hourly=(), cm=(), gaps=()):
     return ",\n".join([cte("option_price", OPTION, list(options)), cte("atm_iv", HOURLY, list(hourly)),
                        cte("ingest_runs", RUNS, list(runs)), cte("trading_calendar_latest", CALENDAR, list(calendar)),
-                       cte("atm_mid_iv", HOURLY, list(mid_hourly)), cte("atm_cm_iv", CM, list(cm))])
+                       cte("atm_mid_iv", HOURLY, list(mid_hourly)), cte("atm_cm_iv", CM, list(cm)),
+                       cte("data_gaps", GAPS, list(gaps))])
 
 
 def with_fixtures(sql, fx):
@@ -178,6 +183,7 @@ def new_sql(name, fx):
     text = text.replace("`${project}.${dataset}.atm_iv`", "atm_iv")
     text = text.replace("`${project}.${dataset}.atm_mid_iv`", "atm_mid_iv")
     text = text.replace("`${project}.${dataset}.atm_cm_iv`", "atm_cm_iv")
+    text = text.replace("`${project}.${dataset}.data_gaps`", "data_gaps")
     text = text.replace("`${project}.${dataset}.trading_calendar_latest`", "trading_calendar_latest")
     assert "${" not in text, name
     return with_fixtures(text, fx)
@@ -755,7 +761,7 @@ def latest_sql(name, fx):
 SNAPSHOT_TYPES = {
     "snapshot_at": ts, "month": int, "type": int, "target_price": int, "last_trading_day": date.fromisoformat,
     "is_atm": lambda v: v == "true", "iv": float, "price": int, "price_time": int, "bid_iv": float, "ask_iv": float,
-    "bid": int, "ask": int,
+    "bid": int, "ask": int, "ingest_run_id": str,
 }
 
 
@@ -792,7 +798,8 @@ def test_smile_snapshot_reingest_uses_newest_run():
             {"snapshot_at": SNAP, "ingest_run_id": "b", "finished_at": utc(13, 7, 0)},
             {"snapshot_at": utc(13, 5, 58), "ingest_run_id": "c", "finished_at": utc(13, 5, 58)}]
     lines = snapshot_csv(fixtures(options, runs=runs), NOW).split("\n")
-    assert lines[0] == f"{int(SNAP_DT.timestamp())},2026-11-12,25000,2026-11-12,25000"
+    # 6 列目 source（#123）: 実行 "a"・"b" は #114 で作ったものではないので空
+    assert lines[0] == f"{int(SNAP_DT.timestamp())},2026-11-12,25000,2026-11-12,25000,"
     body = lines[1:-1]
     pt = int(datetime(2026, 10, 13, 5, 50, tzinfo=UTC).timestamp())  # 14:50 JST
     assert [line for line in body if line.startswith("1,")] == [
@@ -869,7 +876,49 @@ def test_smile_snapshot_months_same_as_smile_sql():
     assert {r["last_trading_day"] for r in rows if r["month"] == 2} == {M2}
     # API の結果のメタ行: 限月ごとの ATM（put の is_atm）
     head = api.smile_snapshot(fixture_runner(fx, {"smile_snapshot": SNAPSHOT_TYPES}), NOW).split("\n")[0]
-    assert head == f"{int(SNAP_DT.timestamp())},2026-11-12,25000,2026-12-10,25000"
+    assert head == f"{int(SNAP_DT.timestamp())},2026-11-12,25000,2026-12-10,25000,"
+
+
+def test_smile_snapshot_source():
+    # #123: 6 列目 source は、スナップショットの実行 ID が #114 の接頭辞で始まれば fill114、旧系の取り込みの実行・
+    # 新系の実行なら空。実行 ID・時刻・値は合成
+    snaps = [(9, 10, 0), (9, 11, 0), (9, 12, 0)]  # JST の (日, 時, 分)
+    run_ids = ["legacy-fill114-20000101T000000Z", "legacy-20000101T000100Z", "00000000-0000-0000-0000-000000000001"]
+    pairs = list(zip(snaps, run_ids, strict=True))
+    options = [quote(jt(*s), 2, 25000, M1, 20.0, 19.0, 21.0, rid, is_atm=True) for s, rid in pairs]
+    runs = [{"snapshot_at": jt(*s), "ingest_run_id": rid, "finished_at": jt(*s)} for s, rid in pairs]
+    fx = fixtures(options, runs=runs)
+    heads = [snapshot_csv(fx, jdt(*s)).split("\n")[0].split(",") for s in snaps]
+    assert [h[0] for h in heads] == [str(int(jdt(*s).timestamp())) for s in snaps]
+    assert [len(h) for h in heads] == [6, 6, 6]
+    assert [h[5] for h in heads] == ["fill114", "", ""]
+
+
+# ---- /data_gaps（#123） ----
+
+GAP_ROWS = [  # 合成の区間（prev_at の順ではない）
+    {"prev_at": "2000-01-03 02:00:00+00", "next_at": "2000-01-03 03:00:00+00", "cause": "unknown", "status": "none"},
+    {"prev_at": "2000-01-03 01:00:00+00", "next_at": "2000-01-03 01:30:00+00", "cause": "no_change",
+     "status": "none"},
+    {"prev_at": "2000-01-04 01:00:00+00", "next_at": "2000-01-05 01:00:00+00", "cause": "bug_format",
+     "status": "filled"},
+]
+
+
+def test_data_gaps_sql():
+    rows = fixture_runner(fixtures(gaps=GAP_ROWS), {"data_gaps": {"prev_at": int, "next_at": int, "cause": str,
+                                                                    "status": str}})("data_gaps", {})
+    # 表全体（no_change かつ none も。除くのは api）を UNIX 秒・prev_at 昇順で
+    epoch = [int(datetime.fromisoformat(r["prev_at"]).timestamp()) for r in GAP_ROWS]
+    assert [r["prev_at"] for r in rows] == sorted(epoch)
+    assert rows[0] == {"prev_at": int(datetime(2000, 1, 3, 1, tzinfo=UTC).timestamp()),
+                       "next_at": int(datetime(2000, 1, 3, 1, 30, tzinfo=UTC).timestamp()),
+                       "cause": "no_change", "status": "none"}
+    # API: no_change かつ none を除く
+    run = fixture_runner(fixtures(gaps=GAP_ROWS), {"data_gaps": {"prev_at": int, "next_at": int, "cause": str,
+                                                                   "status": str}})
+    body = api.data_gaps(run).split("\n")
+    assert [line.split(",")[2:] for line in body[:-1]] == [["unknown", "none"], ["bug_format", "filled"]]
 
 
 # ---- 実テーブルの dry run（AC 6） ----
@@ -975,6 +1024,14 @@ def test_dry_run_bars_within_512mib(name, record_property):
     record_property("bytes", nbytes)
     print(f"dry run {name} (end {end:%Y-%m-%d}): {nbytes} bytes ({nbytes / MiB:.1f} MiB)")
     assert nbytes <= 512 * MiB
+
+
+def test_dry_run_data_gaps_within_1mib(record_property):
+    # #123 AC 7: 表全体（数百行）。表を作った後に流す（無ければ BigQuery のエラーで落ちる。skip にしない）
+    nbytes = bq(real_sql("data_gaps"), {}, dry_run=True, maximum_bytes=GiB)
+    record_property("bytes", nbytes)
+    print(f"dry run data_gaps: {nbytes} bytes ({nbytes / MiB:.3f} MiB)")
+    assert nbytes <= MiB
 
 
 # ---- /atm_iv_bars?n=cm（30 日固定の ATM IV、#100） ----
