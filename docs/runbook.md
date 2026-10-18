@@ -9,7 +9,7 @@
 | 項目 | 設定 |
 |---|---|
 | 予算 | 表示名 `optionchan: 月額予算`。このプロジェクトのみ、暦月、500 円（税抜き、クレジット込みの実請求で比較）、実績の 50 / 80 / 100% で通知。通知先は既存の Monitoring メール通知チャネルのみ（請求先アカウントは他プロジェクトと共有のため、IAM ロール保持者への既定メールは無効） |
-| クエリ量上限 | `bigquery.googleapis.com/quota/query/usage`、unit `1/d/{project}` を 32768 MiB（32 GiB/日）。Service Usage の consumer override で設定。ユーザー単位は設定しない |
+| クエリ量上限 | `bigquery.googleapis.com/quota/query/usage`、unit `1/d/{project}`。2026-10-18 時点の effectiveLimit は 102400 MiB（100 GiB/日。2026-10-12 の設定は 32768 MiB = 32 GiB/日。下の「設定の記録」）。Service Usage の consumer override で設定。ユーザー単位は設定しない |
 
 予算は通知だけで課金は止めない。課金データの反映は数時間〜1 日遅れる。クエリ量上限は太平洋時間の 0 時にリセットされる。
 
@@ -164,7 +164,7 @@ gcloud alpha services quota delete \
 
 （`gcloud alpha services quota` が使えない場合の代替: `gcloud services enable cloudquotas.googleapis.com --project=$P` のうえ `gcloud beta quotas preferences create --service=bigquery.googleapis.com --project=$P --quota-id=QueryUsagePerDay --preferred-value=32768 --preference-id=bq-query-usage-per-day --allow-high-percentage-quota-decrease`。変更は `gcloud beta quotas preferences update bq-query-usage-per-day --service=bigquery.googleapis.com --project=$P --quota-id=QueryUsagePerDay --preferred-value=<値>`（10% を超えて下げるときは `--allow-high-percentage-quota-decrease` を付ける）、戻すときは `--preferred-value=209715200`。どちらで設定したかをこの節に記録する。）
 
-設定の記録: 2026-10-12 に `gcloud alpha services quota update`（Service Usage の consumer override）で 32768 に設定した。
+設定の記録: 2026-10-12 に `gcloud alpha services quota update`（Service Usage の consumer override）で 32768 に設定した。2026-10-18 時点の effectiveLimit は 102400（上の「確認」のコマンドで見た値）。
 
 ### クエリ量上限を超えたとき
 
@@ -1255,7 +1255,7 @@ prod の plan の目安: create 13（データセット 2、テーブル 2、デ
 for loc in $L us; do
   bq ls --transfer_config --transfer_location=$loc --project_id=$P --format=json \
     | jq -c '.[] | {displayName, dataSourceId, schedule, disabled: (.disabled // false), owner: (.ownerInfo.email // "" | split("@")[0])}'
-done   # 東京 3 本・US 1 本（#49 の後は東京に atm-hourly（22:40）が加わり 4 本）、owner はすべて sa-sq-dts、schedule は every day 22:15 / 22:10 / 22:30 / 22:02（UTC）
+done   # 東京 3 本・US 1 本（#49 の後は東京に atm-hourly（22:40）が加わり 4 本、#100 の後は atm-cm が加わり 5 本）、owner はすべて sa-sq-dts、schedule は every day 22:15 / 22:10 / 22:30 / 22:02（UTC）（atm-hourly は every day 22:40、atm-cm は every 1 hours（#117。それより前は every day 22:45））
 ```
 
 `ownerInfo` が出ない場合は `bq show --transfer_config --format=json "$(tc quality-daily $L)" | jq .ownerInfo` で見る。plan に DTS の `params` などの update が出続けるなら、API が返す形に `infra/prod/sq.tf` を合わせる PR を出す。
@@ -2571,24 +2571,77 @@ GROUP BY y ORDER BY y"
 
 | もの | 内容 |
 |---|---|
-| DTS `optionchan atm-cm`（asia-northeast1、`sa-sq-dts`、毎日 07:45 JST = `every day 22:45` UTC） | `sql/cm/atm_cm.sql`。窓は「1 時間足（#49）」と同じ `[D-1 07:00, D 07:00) JST`。最新版の全行使価格の気配から取り込み 1 回ごとに 1 行を作り、`atm_cm_iv` の窓の中を置き換える（結果が 0 行の窓では何もしない）。失敗の M2 の抑制は 08:45 に終わる |
+| DTS `optionchan atm-cm`（asia-northeast1、`sa-sq-dts`、毎時 :45 = `every 1 hours`、`schedule_options.start_time` を過去の :45（`2026-10-01T22:45:00Z`）にして分をそろえる。#117） | `sql/cm/atm_cm.sql`。最新版の全行使価格の気配から取り込み 1 回ごとに 1 行を作り、`atm_cm_iv` の窓の中を置き換える（結果が 0 行の窓では何もしない）。窓は 2 つ: **07:45 JST の回**（`@run_time` が JST の 7 時台）は「1 時間足（#49）」と同じ `[D-1 07:00, D 07:00) JST` の作り直し（重ねより遅れた取り込み・再処理の安全網）。**他の回**は増分 `[表の最後の行 − 2 時間, @run_time)`（始まりは `@run_time` − 3 日より前にしない）。増分の回は、3 日の範囲の snapshot で `@run_time` − 65 分以降に終わった取り込み（`ingest_runs`）が無ければ何もしない（週末・休場日・早朝。`ingest_runs` だけを読んで終わる）。失敗の M2（1 時間に 1 回まで）は毎時の回でも出る |
 | `optionchan_tokyo.atm_cm_iv` | 列は `schema/cm/atm_cm_iv.json`（`created_at`・`iv30`・`method` と、限月ごとの最終取引日・SQ までの日数・フォワード・補間 ATM IV）。パーティションは月（`created_at`）。1 日 約 1,000 行 |
 | `sql/cm/cm_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)` の作り直し（下の「過去分」） |
 
-- ビューアーは表の最後の行の 1 秒後から now まで（最大 3 日）を同じ計算で補う（`apps/viewer` の `sql/atm_cm.sql`）。読み込み 1 回 約 200 MiB（UTC の 2 日分のパーティション。mid の 1 時間足の補う分 約 175 MiB と同じ程度）
-- 料金: 定期クエリは 1 日 約 200 MiB（窓が UTC の 2 日にまたがる。dry run）
+- ビューアーは表の最後の行の 1 秒後から now まで（最大 3 日）を同じ計算で補う（`apps/viewer` の `sql/atm_cm.sql`）。表は 1 時間以内に新しくなるので、補う分はふつう UTC の 1 日分のパーティション（約 110 MiB）。表が止まると最大 3〜4 日分
+- 料金（課金バイト。2026-10-16 の値で実測）: 増分の回 約 150 MiB（`option_price` の UTC の日パーティション 1 つ 約 112 MiB + 検査 2 表の最低課金 10 MiB ずつ + INSERT 約 20 MiB。その日のパーティションは日中に育つので早い時刻ほど少ない。09:45〜10:45 JST の回は前日のパーティションも読む）、07:45 JST の回 約 250 MiB（2 パーティション）、何もしない回 10 MiB（`ingest_runs` だけ）。1 日で平日 4 GiB 以下（見積もり 2〜4 GiB）・日曜 0.3 GiB 以下。プロジェクトのクエリ量の上限（2026-10-18 時点の effectiveLimit 102400 MiB/日。「コスト」）の数 %
+- 重ね 2 時間より遅れて終わった取り込みは、翌朝 07:45 の回まで古い値のまま。3 日を超えて止まったとき・前日より前の最新版が変わったとき（再処理・回収）は「過去分」の `cm_backfill.sql` でその範囲を作り直す
 
 ### 確認（prod の apply の後）
+
+`tc`・`q` は「定期クエリ（#40）」・「1 時間足（#49）」の関数。件数・要約だけを #117 に記録する（行・ログの全文は貼らない）。
 
 ```sh
 # 定期クエリができている（表示名で選ぶ）
 bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json | jq -r '.[] | select(.displayName == "optionchan atm-cm") | .schedule'
+# apply の直後（#117）: schedule が every 1 hours、nextRunTime の分が :45。config_id（tc の値の最後）が apply の前と同じ（作り直しでない）
+bq show --transfer_config --format=json "$(tc atm-cm $L)" | jq '{schedule, scheduleOptions, nextRunTime}'
+# 数日後: 回の分が :45 のままずれていない（7 時台の回が毎日 1 回ある）。runTime の JST の時・分を並べる
+bq ls --transfer_run --run_attempt=LATEST --max_results=72 --format=json "$(tc atm-cm $L)" | jq -r '.[].runTime' | sort | tail -72
+# 取引日の 10:00〜15:00 JST: 表の最後の行が 120 分以内（09 時台は 08 時台の回が寄り付き前で新しい取り込みが無いので除く）
+q --location=$L --format=pretty "SELECT TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), MAX(created_at), MINUTE) AS lag_min
+FROM \`$P.optionchan_tokyo.atm_cm_iv\` WHERE created_at >= TIMESTAMP(CURRENT_DATE('Asia/Tokyo'), 'Asia/Tokyo')"
 # 翌朝 07:45 の後: 前日の窓の行数と、iv30 のある割合
 q --location=$L --format=pretty "SELECT COUNT(*) n, COUNTIF(iv30 IS NOT NULL) with_iv30, COUNTIF(method = 'interp') interp
 FROM \`$P.optionchan_tokyo.atm_cm_iv\` WHERE created_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)"
 ```
 
-失敗を受けたとき・手動の再実行は「1 時間足（#49）」と同じ（`rt` の `atm-hourly` を `atm-cm`、`22:40` を `22:45` に替える）。
+07:45 の作り直しと毎時の結果の一致（07:45 の回の後、データセットの time travel（168 時間）の間に。`D` は作り直した日の JST の日付、窓は `[D-1 07:00, D 07:00) JST`）: 07:44 JST の時点の表と今の表を `created_at` で突き合わせ、片方にしか無い行と値の違う行が 0 件であること。違えば件数と `created_at` を #117 に記録し、その取り込みの `ingest_runs.finished_at − snapshot_at` で重ね（2 時間）より遅れた取り込みか確かめる:
+
+```sh
+D=<YYYY-MM-DD>
+q --location=$L --format=pretty "
+DECLARE s TIMESTAMP DEFAULT TIMESTAMP('$D 07:00:00', 'Asia/Tokyo') - INTERVAL 1 DAY;
+DECLARE e TIMESTAMP DEFAULT TIMESTAMP('$D 07:00:00', 'Asia/Tokyo');
+-- 1 つの文で同じ表を時刻つき・なしで読めないので、07:44 の時点の窓を一時テーブルにしてから比べる
+CREATE TEMP TABLE a AS SELECT * FROM \`$P.optionchan_tokyo.atm_cm_iv\` FOR SYSTEM_TIME AS OF TIMESTAMP('$D 07:44:00', 'Asia/Tokyo')
+WHERE created_at >= s AND created_at < e;
+SELECT COUNTIF(a.created_at IS NULL) only_after, COUNTIF(b.created_at IS NULL) only_before,
+  COUNTIF(a.created_at IS NOT NULL AND b.created_at IS NOT NULL AND (
+    a.iv30 IS DISTINCT FROM b.iv30 OR a.method IS DISTINCT FROM b.method
+    OR a.m1_last_trading_day IS DISTINCT FROM b.m1_last_trading_day OR a.m1_days IS DISTINCT FROM b.m1_days
+    OR a.m1_forward IS DISTINCT FROM b.m1_forward OR a.m1_iv IS DISTINCT FROM b.m1_iv
+    OR a.m2_last_trading_day IS DISTINCT FROM b.m2_last_trading_day OR a.m2_days IS DISTINCT FROM b.m2_days
+    OR a.m2_forward IS DISTINCT FROM b.m2_forward OR a.m2_iv IS DISTINCT FROM b.m2_iv)) differ
+FROM a FULL OUTER JOIN (SELECT * FROM \`$P.optionchan_tokyo.atm_cm_iv\` WHERE created_at >= s AND created_at < e) b
+  ON a.created_at = b.created_at"
+```
+
+最初の週末（土 06:00〜月 08:45 JST）を含む期間の後: 何もしない回が ERROR にならず `SUCCEEDED` で終わっていること（ERROR のログが 0 件）と、1 日のスキャン量（JST の日ごとの親ジョブの課金バイトの合計。平日 4 GiB 以下・日曜 0.3 GiB 以下の見込み。超えたら原因を #117 に記録）:
+
+```sh
+CID=$(tc atm-cm $L | awk -F/ '{print $NF}')
+gcloud logging read "resource.type=\"bigquery_dts_config\" AND resource.labels.config_id=\"$CID\" AND severity>=ERROR" \
+  --project=$P --freshness=4d --format='value(timestamp)' | wc -l
+bq ls --transfer_run --run_attempt=LATEST --max_results=100 --format=json "$(tc atm-cm $L)" | jq -r '.[].state' | sort | uniq -c
+q --location=$L --format=pretty "
+SELECT DATE(creation_time, 'Asia/Tokyo') AS d, COUNT(*) AS runs, ROUND(SUM(total_bytes_billed) / POW(1024, 3), 2) AS gib
+FROM \`region-asia-northeast1\`.INFORMATION_SCHEMA.JOBS
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 4 DAY) AND statement_type = 'SCRIPT'
+  AND EXISTS (SELECT 1 FROM UNNEST(labels) l WHERE l.key = 'dts_config_id' AND l.value = '$CID')
+GROUP BY d ORDER BY d"
+```
+
+### 失敗を受けたとき・手動の再実行
+
+「1 時間足（#49）」の「失敗を受けたとき」のログの見方・メッセージの表と同じ（`config_id` は `atm-cm`、メッセージの先頭は `atm_cm:`）。
+
+- 増分の回の失敗: 何もしなくてよい。次の回が表の最後の行 − 2 時間から読むので、失敗した区間も埋まる（続けて失敗するなら原因を直す。M2 は 1 時間に 1 回まで鳴り続けるので、すぐ直せないときは「停止・削除」の一時停止）
+- 07:45 の回の失敗（前日分の作り直し）: 原因を直した後、`rt` の `atm-hourly` を `atm-cm`、`22:40` を `22:45` に替えて、作り直す窓 `[D-1 07:00, D 07:00) JST` の始まりの日付 `D-1`（「1 時間足（#49）」の窓の日付と同じ）で手動実行する（`--run_time=<D-1>T22:45:00Z` は JST の D 07:45 = 7 時台なので 1 日の窓）。7 時台以外の `run_time` の手動実行は増分の回になる
+- 手動実行は毎時の回（:45）と同じ表に DML を出して衝突しうる（`Transaction ...` / `Could not serialize access ...` で片方が失敗する）ので、:40〜:50 を避ける
+- 3 日を超えて止まった・前日より前の最新版が変わった: 「過去分」の `cm_backfill.sql` でその範囲を作り直す
 
 ### 過去分
 
@@ -2788,7 +2841,7 @@ Cloud Run は最小 0 インスタンス・リクエスト中だけ CPU で、�
 
 取りすぎ防止（画面）: 同時に読むのは 1 本、連続するスクロール・拡縮は 250 ms まとめる、足・限月ごとに読んだ範囲を覚えて読み直さない。足・限月ごとに覚える日数は分足 9 日・1 時間足 400 日、分足をこの画面で読む日数の合計は 24 日（約 2 GiB）まで。データの無い範囲が 3 回続いたらそれより前は無いとみなす。1 ページを開いて分足を上限まで動かすと 約 2 GiB、1 時間足・日足だけなら 数十〜数百 MiB。1 日の量は #13 の 13c で `INFORMATION_SCHEMA.JOBS` の `sa-viewer` の `total_bytes_billed` で見る（目安 8 GiB/日 以下）。画面側の上限（分足 24 日分など）は 1 ページの中だけのもので、ページを読み直すとリセットされる。
 
-1 日の上限（サーバー、#95）: ビューアーのプロセスが JST の 1 日に BigQuery で課金されたバイト数（ジョブの `total_bytes_billed`）を数え、環境変数 `DAILY_BYTES_BILLED`（既定 4 GiB）に達したら、それ以降の API（`/smile_data`・`/smile_snapshot`・`/atm_iv_data`・`/atm_iv_bars`）は BigQuery を呼ばずに 429 を返す（ログは `daily_limit`。画面は「今日の読み込みの上限に達しました」）。JST の 0 時に数え直す。上限はクエリを出す前に見るので、超えた後の 1 本（最大 `maximum_bytes_billed`）までは通る。数えるのはインスタンスごとで、ほかのインスタンスの分・止まる前の分は数えない（最大 2 インスタンスで 1 日 最大 約 8 GiB + 2 本。インスタンスが止まると 0 から数え直す）。プロジェクト全体の合計（`INFORMATION_SCHEMA`・`jobs.list`）は `sa-viewer` に `bigquery.jobs.list` が無い（`jobUser` だけ）ので使わない。読み込みが続く間はインスタンスは止まらないので、画面の不具合などによる繰り返しの読み込みは止まり、プロジェクトのクエリ量上限（32 GiB/日）を取り込み・定期クエリに残す。2026-10 の `sa-viewer` の利用は 1 日 最大 0.6 GiB。上限を変えるときは `infra/prod/viewer.tf` の env に `DAILY_BYTES_BILLED`（バイト数。100 GiB 以下）を足す。429 が出ていないかは `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND jsonPayload.event="daily_limit"' --project=$P --freshness=1d --limit=5 --format='value(timestamp,jsonPayload.endpoint)'`。
+1 日の上限（サーバー、#95）: ビューアーのプロセスが JST の 1 日に BigQuery で課金されたバイト数（ジョブの `total_bytes_billed`）を数え、環境変数 `DAILY_BYTES_BILLED`（既定 4 GiB）に達したら、それ以降の API（`/smile_data`・`/smile_snapshot`・`/atm_iv_data`・`/atm_iv_bars`）は BigQuery を呼ばずに 429 を返す（ログは `daily_limit`。画面は「今日の読み込みの上限に達しました」）。JST の 0 時に数え直す。上限はクエリを出す前に見るので、超えた後の 1 本（最大 `maximum_bytes_billed`）までは通る。数えるのはインスタンスごとで、ほかのインスタンスの分・止まる前の分は数えない（最大 2 インスタンスで 1 日 最大 約 8 GiB + 2 本。インスタンスが止まると 0 から数え直す）。プロジェクト全体の合計（`INFORMATION_SCHEMA`・`jobs.list`）は `sa-viewer` に `bigquery.jobs.list` が無い（`jobUser` だけ）ので使わない。読み込みが続く間はインスタンスは止まらないので、画面の不具合などによる繰り返しの読み込みは止まり、プロジェクトのクエリ量上限（「コスト」。2026-10-18 時点で 100 GiB/日）を取り込み・定期クエリに残す。2026-10 の `sa-viewer` の利用は 1 日 最大 0.6 GiB。上限を変えるときは `infra/prod/viewer.tf` の env に `DAILY_BYTES_BILLED`（バイト数。100 GiB 以下）を足す。429 が出ていないかは `gcloud logging read 'resource.type="cloud_run_revision" AND resource.labels.service_name="viewer" AND jsonPayload.event="daily_limit"' --project=$P --freshness=1d --limit=5 --format='value(timestamp,jsonPayload.endpoint)'`。
 
 `/smile`（#79）: 拡大縮小・スクロール・表示の切り替え・比較用の固定ではサーバーに要求しない。時点の移動は 250 ms まとめて 1 本、前の要求は中断（BigQuery のジョブは止まらないので、中断・再試行も要求の数に数える）、一度読んだ時点は画面で覚えて読み直さない（「最新」は 60 秒まで）。1 ページで出す要求は 20 本まで（20 × 約 130 MiB = 約 2.6 GiB）。「+」方向（+1分〜+1日）は「その時刻以後で最初のスナップショット」を読む（`&dir=next`、#80）ので、取引の切れ目（15:45〜17:00・06:00〜08:45・週末・休業日）の手前から「+1分」を押すと、1 本で次の取引の最初の時点に移る。それより新しいものが無ければ最新を見せ、「これより新しいデータはありません」を出す。`/atm_iv` と `/smile` を両方上限まで使うと 1 ページずつで 約 4.6 GiB になり、何度も読み直すと目安の 8 GiB/日 を超えうる（画面の上限はページを読み直すとリセット。サーバーの 1 日の上限は上の段落）。
 

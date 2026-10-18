@@ -4,6 +4,8 @@
   sql/atm_cm.sql で一字一句同じ
 - 結果の列の順は schema/cm/atm_cm_iv.json と同じ（INSERT は列の位置で入る）
 - 書くのは atm_cm_iv だけで、窓 / 範囲の中を置き換える。生データは窓 / 範囲で絞る
+- 定期クエリは毎時（#117）: 7 時台の回は前日 07:00〜当日 07:00 の作り直し、他の回は表の最後の行 − 2 時間（上限 3 日）からの増分で、
+  新しい取り込みが無ければ何もしない
 - infra/prod/sq.tf のテーブル・テーブル単位の付与・DTS（スケジュールは tests/test_infra.py、窓は tests/test_sql.py）
 BigQuery での実行の確認は tests/test_cm_bq.py（OPTIONCHAN_BQ_TEST=1）。
 """
@@ -20,6 +22,11 @@ SCHEMA = os.path.join(ROOT, 'schema', 'cm', 'atm_cm_iv.json')
 VIEWER_CM = os.path.join(ROOT, 'apps', 'viewer', 'src', 'optionchan_viewer', 'sql', 'atm_cm.sql')
 # SQL → 窓 / 範囲の変数
 PERIOD = {'atm_cm.sql': ('win_start', 'win_end'), 'cm_backfill.sql': ('start_at', 'end_at')}
+# SQL → 読む表（定期クエリは窓の始まりを決めるのに atm_cm_iv の最後の行と ingest_runs の新しい取り込みを読む。#117）
+READS = {
+    'atm_cm.sql': ['atm_cm_iv', 'ingest_runs', 'option_price_latest', 'trading_calendar_latest'],
+    'cm_backfill.sql': ['atm_cm_iv', 'option_price_latest', 'trading_calendar_latest'],
+}
 
 
 def read(path):
@@ -83,7 +90,7 @@ def test_reads_period_and_replaces_only_atm_cm_iv(name):
     start, end = PERIOD[name]
     text = body(SQL[name])
     refs = re.findall(r'`\$\{project\}\.\$\{dataset\}\.(\w+)`(\([^()]*\))?', text)
-    assert sorted(set(t for t, _ in refs)) == ['atm_cm_iv', 'option_price_latest', 'trading_calendar_latest']
+    assert sorted(set(t for t, _ in refs)) == READS[name]
     assert ('option_price_latest', f'({start}, {end})') in refs
     assert f"WHERE calendar_date >= DATE({start}, 'Asia/Tokyo') AND calendar_date < DATE_ADD(DATE({end}, " in text
     writes = re.findall(r'\b(?:INSERT INTO|MERGE|DELETE FROM|UPDATE|TRUNCATE TABLE|CREATE OR REPLACE TABLE|DROP)\s+`([^`]+)`',
@@ -95,6 +102,34 @@ def test_reads_period_and_replaces_only_atm_cm_iv(name):
         rf'DELETE FROM `\$\{{project\}}\.\$\{{dataset\}}\.atm_cm_iv` WHERE created_at >= {start} AND created_at < {end};\s+'
         r'INSERT INTO `\$\{project\}\.\$\{dataset\}\.atm_cm_iv` SELECT \* FROM result;\s+COMMIT TRANSACTION;\s+END IF;',
         text)
+
+
+def test_hourly_window():
+    """毎時の定期クエリ（#117）の窓の決め方。値の確認は tests/test_cm_bq.py"""
+    text = body(SQL['atm_cm.sql'])
+    # 7 時台（JST）の回は前日 07:00〜当日 07:00 の作り直し（窓は tests/test_sql.py の HOURLY_WINDOW_DECLARE と同じ）。
+    # 他の回は @run_time まで、始まりは最大 3 日前
+    assert "DECLARE rebuild BOOL DEFAULT EXTRACT(HOUR FROM DATETIME(@run_time, 'Asia/Tokyo')) = 7;" in text
+    assert ("DECLARE win_end TIMESTAMP DEFAULT IF(rebuild, TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), "
+            "'Asia/Tokyo'), @run_time);") in text
+    assert 'DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP_SUB(win_end, INTERVAL IF(rebuild, 1, 3) DAY);' in text
+    # 増分の回: 窓の中（3 日の範囲）の snapshot で前の回の後に終わった取り込みが無ければ何もしない（option_price を読まない）。
+    # あれば始まりを表の最後の行（win_end より前）− 2 時間まで縮める（3 日の上限より前にはしない）
+    guard = re.search(
+        r'IF NOT rebuild THEN\s+IF NOT EXISTS \(\s+SELECT 1\s+FROM `\$\{project\}\.\$\{dataset\}\.ingest_runs`\s+'
+        r'WHERE snapshot_at >= win_start AND snapshot_at < win_end '
+        r'AND finished_at >= TIMESTAMP_SUB\(@run_time, INTERVAL 65 MINUTE\)\s+\) THEN\s+RETURN;\s+END IF;\s+'
+        r'SET win_start = GREATEST\(IFNULL\(TIMESTAMP_SUB\(\(\s+SELECT MAX\(created_at\)\s+'
+        r'FROM `\$\{project\}\.\$\{dataset\}\.atm_cm_iv`\s+WHERE created_at >= win_start AND created_at < win_end\s+'
+        r'\), INTERVAL 2 HOUR\), win_start\), win_start\);\s+END IF;', text)
+    assert guard
+    # 順序: DECLARE → 未来の窓の ERROR（手動実行。何もしない回より先）→ 増分の窓 → 計算 → 置き換え。DECLARE は表を読まない
+    future = text.index('IF win_end > CURRENT_TIMESTAMP() THEN')
+    assert text.rindex('DECLARE ') < future < guard.start() < text.index('CREATE TEMP TABLE result AS') \
+        < text.index('BEGIN TRANSACTION')
+    assert '`' not in text[:future]
+    # 窓を変えるのはこの SET だけ（置き換えの DELETE は縮めた窓で行う）
+    assert re.findall(r'\bSET (\w+)', text) == ['win_start']
 
 
 def test_backfill_range_is_checked():

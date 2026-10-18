@@ -3,6 +3,7 @@
 target.md 3.5: Cloud Run は全リソースで service_account を明示する（省略すると Compute Engine の既定 SA で動く）。
 HCL のパーサーは入れず、resource ブロックを波かっこの対応で切り出して文字列で確かめる。
 """
+import datetime
 import glob
 import json
 import os
@@ -52,7 +53,7 @@ def test_cloud_run_has_service_account(name, body):
 
 DTS_RESOURCE = re.compile(r'^resource\s+"(google_bigquery_data_transfer_config)"\s+"([^"]+)"\s*\{', re.M)
 DTS_BLOCKS = dict(resource_blocks(DTS_RESOURCE))
-# 名前 → (data_source_id, スケジュール（UTC）)。stage → copy → quality → compare の順で、どれも 07 時台（JST）に終える
+# 名前 → (data_source_id, スケジュール（UTC）)。stage → copy → quality → compare の順で、1 日 1 回のものはどれも 07 時台（JST）に終える
 # （失敗の M2 は 1 時間に 1 回までなので、その抑制が 08:45 の寄り付きの前に終わるように）
 DTS_EXPECTED = {
     'prod/sq.tf:google_bigquery_data_transfer_config.quality_daily': ('scheduled_query', 'every day 22:15'),
@@ -61,8 +62,13 @@ DTS_EXPECTED = {
     'prod/sq.tf:google_bigquery_data_transfer_config.legacy_compare': ('scheduled_query', 'every day 22:30'),
     # 1 時間足（#49）。上の 4 本（07:02〜07:30 JST）の後の 07:40。失敗の M2 の抑制は 08:40 に終わる
     'prod/sq.tf:google_bigquery_data_transfer_config.atm_hourly': ('scheduled_query', 'every day 22:40'),
-    # 30 日固定の ATM IV（#100）。1 時間足の後の 07:45。失敗の M2 の抑制は 08:45 に終わる
-    'prod/sq.tf:google_bigquery_data_transfer_config.atm_cm': ('scheduled_query', 'every day 22:45'),
+    # 30 日固定の ATM IV（#100）。毎時 :45（#117。分は schedule_options の start_time でそろえる）。07:45 JST の回（1 時間足の後）が
+    # 前日分の作り直しで、他の回は増分
+    'prod/sq.tf:google_bigquery_data_transfer_config.atm_cm': ('scheduled_query', 'every 1 hours'),
+}
+# 間隔の形（every N hours）の起点。過去の :45（UTC。JST も :45）
+DTS_START_TIME = {
+    'prod/sq.tf:google_bigquery_data_transfer_config.atm_cm': re.compile(r'20\d\d-\d\d-\d\dT\d\d:45:00Z'),
 }
 
 
@@ -82,6 +88,16 @@ def test_dts_configs():
         assert re.search(rf'^\s*schedule\s*=\s*"{schedule}"$', body, re.M), name
         # 失敗の通知は M2（ログ一致）。メールは実行 SA 宛てで届かない
         assert 'email_preferences' not in body, name
+        # schedule_options は間隔の形のものだけ（固定時刻の形には要らない）
+        starts = re.findall(r'^\s*schedule_options\s*\{\s*start_time\s*=\s*"([^"]+)"\s*\}', body, re.M)
+        assert len(re.findall(r'\bschedule_options\b', body)) == len(starts), name
+        if name in DTS_START_TIME:
+            assert len(starts) == 1 and DTS_START_TIME[name].fullmatch(starts[0]), (name, starts)
+            # 未来の時刻だとその時刻まで動かない
+            start = datetime.datetime.fromisoformat(starts[0].replace('Z', '+00:00'))
+            assert start < datetime.datetime.now(datetime.UTC)
+        else:
+            assert not starts, name
     tf = dict(all_tf())['prod/sq.tf']
     assert 'sa_sq = "sa-sq-dts@${var.project_id}.iam.gserviceaccount.com"' in tf
 
