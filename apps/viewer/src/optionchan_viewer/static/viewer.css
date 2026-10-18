@@ -92,12 +92,6 @@ a {
 .chart-wrap {
     position: relative;
 }
-.chart-note-row {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.3em 0.8em;
-}
 .chart-note {
     color: var(--muted);
     min-height: 1.4em;
@@ -143,6 +137,30 @@ a {
     display: flex;
     justify-content: center;
     pointer-events: none;
+}
+.chart-empty {
+    position: absolute;
+    inset: 0;
+    z-index: 9;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 16px;
+    pointer-events: none;
+}
+.chart-empty-box {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 0.8em;
+    max-width: 32em;
+    padding: 1em 1.4em;
+    border: 1px solid var(--muted);
+    border-radius: 6px;
+    background: var(--bg);
+    color: var(--text);
+    text-align: center;
+    pointer-events: auto;
 }
 .chart-error-dim {
     top: 0;
