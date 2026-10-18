@@ -2402,7 +2402,7 @@ q --location=$L --format=pretty 'SELECT COUNT(*) AS n, COUNTIF(NOT (cause = "no_
 | DTS `optionchan atm-hourly`（asia-northeast1、`sa-sq-dts`、毎日 07:40 JST = `every day 22:40` UTC） | `sql/ohlc/atm_hourly.sql`。窓は `@run_time` の JST の日付 D に対し `[D-1 07:00, D 07:00) JST`（「日次の品質チェックと新旧の突き合わせ（#40）」と同じ 1 日分）。`option_price_latest` の ATM の put（`is_atm AND type = 2`）から限月 × 1 時間（UTC の正時 = JST の正時）の OHLC を作り、4 表へ MERGE する（窓の中を置き換える。ATM の行が 1 件も無い窓では何もしない。4 表は 1 トランザクション）。#40 の 4 本（07:02〜07:30）の後で、失敗の M2 の抑制は 08:40 に終わる |
 | `optionchan_tokyo.atm_iv` / `atm_option_price` / `atm_target_price` | 列は旧系と同じ（`schema/ohlc/atm_ohlc.json`）。パーティションは月（`started_at`）、クラスタは `last_trading_day`。キーは `(last_trading_day, time_frame, started_at)`、`time_frame = 3600` |
 | `optionchan_tokyo.atm_mid_iv`（#98） | ATM の put の mid IV（気配の中値 =（`bid_iv` + `ask_iv`）/ 2。両方 0 より大きいときだけ）の 1 時間足。列・パーティション・クラスタ・キーは `atm_iv` と同じ。足の切り方・OHLC の式も `iv` と同じ（`atm_hourly.sql` の `mid_bars`）。ビューアーの `/atm_iv_bars?iv=mid` の 1 時間足・日足が読む |
-| `sql/ohlc/mid_backfill.sql`（東京、手で流す） | `atm_mid_iv` の過去分の作り直し（下の「mid IV の過去分（#98）」） |
+| `sql/ohlc/mid_backfill.sql`（東京、手で流す） | `atm_mid_iv` の過去分の作り直し。足は範囲の中の `atm_iv` のキーに限る（#122。下の「mid IV の過去分（#98）」） |
 | `sql/ohlc/legacy_check.sql`（US、手で流す） | 旧系の同値の確認: 旧 `option_price` に同じ 1 時間足の計算を当てて旧 3 表と比べる |
 | `sql/ohlc/export.sql`（US）→ `compare.sql`（東京） | 並行稼働中の日の新旧の突き合わせ |
 | `sql/ohlc/import.sql`・`fingerprint.sql`（東京・US） | 旧系の過去分の移行と、その検証（#12 の後） |
@@ -2599,7 +2599,9 @@ done   # 日ごとに 3 表の bars が同じ、bars = keys
 
 ### mid IV の過去分（#98）
 
-`atm_mid_iv` は #98 で足した表で、定期クエリが mid を書くのは #98 のデプロイ後の窓から。それより前は `sql/ohlc/mid_backfill.sql` で最新版から作り直す（`atm_hourly.sql` の `mid_bars` と同じ計算で、範囲の中を置き換える。冪等で、何度流しても同じ）。気配の IV（`bid_iv`・`ask_iv`）は 2018 年から ATM の行の 96〜99.6% にある（2026-10-16 の確認。2018 年 96.1%・2019〜2023 年 99.2〜99.6%・2024〜2025 年 98.6〜99.0%・2026 年 93.2%）。
+`atm_mid_iv` は #98 で足した表で、定期クエリが mid を書くのは #98 のデプロイ後の窓から。それより前は `sql/ohlc/mid_backfill.sql` で最新版から作り直す（`atm_hourly.sql` の `mid_bars` と同じ計算で、範囲の中を置き換える。冪等で、何度流しても同じ）。
+
+足は**範囲の中の `atm_iv` の 1 時間足のキーに限る**（#122）。`atm_iv` の C（2026-10-12 22:00 UTC）より前は旧系から移した値（「過去分の移行（#12 の後）」）で、UTC 23 時台（08 JST、寄り前）の足と、旧系が動いていなかった日（2018〜2019 年の 35 窓）の足が無い。最新版からそのまま作ると mid の足だけが多くなり、ビューアーの約定と mid の重ね描き・日足の open がそろわない。範囲の中の `atm_iv` に無いキーの mid の足は消える。範囲の中に `atm_iv` のキーが 1 つも無ければ（ATM の行があっても）何もしない（`atm_iv` が空のときに mid を全部消さない）。気配の IV（`bid_iv`・`ask_iv`）は 2018 年から ATM の行の 96〜99.6% にある（2026-10-16 の確認。2018 年 96.1%・2019〜2023 年 99.2〜99.6%・2024〜2025 年 98.6〜99.0%・2026 年 93.2%）。
 
 - 範囲: 始まりは 2018-01-01（最新版の最初の日より前でよい。行の無い範囲は何もしない）。終わり E は、#98 のデプロイ後に定期クエリが最初に作った窓の始まり（JST 07:00 = UTC 22:00）。E 以降は定期クエリが作る。範囲は正時で、now より前（SQL が検査する）
 - 量: 1 年 約 6.5 GiB（2025 年の dry run で 6,980,294,851 バイト）、全部で 約 40 GiB。プロジェクトのクエリ量の上限（32 GiB/日）を超えるので、**1 日に流すのは 4 年分まで**にし、残りは翌日（太平洋時間の 0 時 = JST 16〜17 時に上限が戻った後）に流す。取り込み・定期クエリの分（1 日 数 GiB）を残す
@@ -2615,7 +2617,7 @@ done
 ro mid_backfill | qr "2026-01-01 00:00:00+00" "$E" --location=$L --format=json --maximum_bytes_billed=10737418240 | jq -c '.[-1][0]'
 ```
 
-- 確認: `atm_iv` と `atm_mid_iv` の 1 時間足のキーの数が年ごとに同じ（どちらも同じ ATM の行から作る）。mid の値のある足の割合は上の気配の IV の割合と同じ程度
+- 確認: `atm_iv` と `atm_mid_iv` の 1 時間足のキーの数が年ごとに同じ（mid の足は `atm_iv` のキーに限る。窓ごとに見るときは下の「キーをそろえる流し直し（#122）」の 3.）。mid の値のある足の割合は上の気配の IV の割合と同じ程度
 
 ```sh
 q --location=$L --format=pretty "SELECT EXTRACT(YEAR FROM started_at) y, COUNTIF(t = 'iv') iv_keys, COUNTIF(t = 'mid') mid_keys,
@@ -2625,7 +2627,72 @@ FROM (SELECT 'iv' t, close, started_at FROM \`$P.optionchan_tokyo.atm_iv\` WHERE
 GROUP BY y ORDER BY y"
 ```
 
-- 結果（年ごとの件数）を #98 にコメントする（全文は貼らない）。戻すとき（作り直しが不要になったとき）は `DELETE FROM optionchan_tokyo.atm_mid_iv WHERE started_at < E`（ビューアーは過去の mid が無いと表示しないだけ）
+- 結果（年ごとの件数）を #98 にコメントする（全文は貼らない）。戻すとき（作り直しが不要になったとき）は `DELETE FROM optionchan_tokyo.atm_mid_iv WHERE started_at < E`（ビューアーは過去の mid が無いと表示しないだけ）。流し直しの前の状態に戻すときは、下の「キーをそろえる流し直し（#122）」の 5.（スナップショットから入れ替える）
+
+#### キーをそろえる流し直し（#122）
+
+#122 の前の `mid_backfill.sql`（`atm_iv` のキーに限らない）で作った `[2018-01-01, C)` の mid の足を、今の `mid_backfill.sql` で流し直して `atm_iv` のキーにそろえる（2026-10-18 の読み取りで、mid にだけあるキー 3,605・キーの数が違う窓 1,671 / 2,038。`atm_iv` にだけあるキーは 0）。C 以降（定期クエリ・#98 の作り直しの窓）はキーが一致しているので触れない。1 つの端末で上から順に。
+
+- 範囲 `[2018-01-01, C)` を 1 年ずつ 9 本、**順に**流す（同じ表の MERGE が並行するとトランザクションが衝突する）。毎朝 07:40 JST の定期クエリと重ならない時間に流す
+- 量: 9 本で 約 41.6 GiB（2026-10-18 の dry run。最大は 2026 年の 約 8.6 GiB で、`--maximum_bytes_billed` の 10 GiB に収まる）。流す前に「BigQuery のクエリ量上限」で今の上限と今日のスキャン量を見て、足りなければ 2 日に分ける（1 日目 2018〜2023 年 約 20 GiB、2 日目 2024〜2026 年 約 21.7 GiB）
+- 消える足は mid の 08 JST の足と、旧系が動いていなかった日の mid の足（どちらも `atm_iv` に無い足）。残る足の値は変わらない
+- 既知の差（流した後も残る）: C より前の窓には 08 JST（UTC 23 時台）の足が無く、C 以降の窓にはある（4 表とも。旧系の欠けを移したため）。C より前の窓を定期クエリの手動実行（`rt`）で作り直すと、その窓だけ 4 表に 08 JST の足ができる（4 表のキーは一致したまま）
+
+```sh
+C='2026-10-12 22:00:00+00'; S0_MID='2018-01-01 00:00:00+00'; SNAP=atm_mid_iv_before_122
+# 1. スナップショット（30 日で自動で消える）。名前を #122 にコメントする
+q --location=$L "CREATE SNAPSHOT TABLE \`$P.optionchan_tokyo.$SNAP\` CLONE \`$P.optionchan_tokyo.atm_mid_iv\`
+OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 DAY), description = 'before re-running mid_backfill (#122)')"
+bq show --format=json $P:optionchan_tokyo.$SNAP | jq -c '{type, n: .numRows, exp: .expirationTime}'   # SNAPSHOT、n = 今の atm_mid_iv の行数
+# 2. 流し直し（1 年ずつ順に。年ごとの bars = その年（2026 年は C まで）の atm_iv の 1 時間足のキーの数）
+for y in 2018 2019 2020 2021 2022 2023 2024 2025 2026; do
+  s="$y-01-01 00:00:00+00"; e="$((y + 1))-01-01 00:00:00+00"; [ $y = 2026 ] && e=$C
+  r=$(ro mid_backfill | qr "$s" "$e" --location=$L --format=json --maximum_bytes_billed=10737418240) || { echo "$y FAILED"; break; }
+  echo "$r" | jq -c --arg y $y '{y: $y} + .[-1][0]'
+done   # 失敗した年で止まる（エラーの文は bq の出力の r に入る。メールアドレスが入るので貼らない）
+# 3. 確認: 全期間で、窓（JST 07:00 区切り）ごとのキーの数の違い・mid にだけあるキー・iv にだけあるキーが 0（約 4 MiB）
+q --location=$L --format=pretty "
+WITH k AS (
+  SELECT 'iv' AS t, last_trading_day, started_at FROM \`$P.optionchan_tokyo.atm_iv\`
+  WHERE started_at >= '2018-01-01' AND started_at < CURRENT_TIMESTAMP() AND time_frame = 3600
+  UNION ALL
+  SELECT 'mid', last_trading_day, started_at FROM \`$P.optionchan_tokyo.atm_mid_iv\`
+  WHERE started_at >= '2018-01-01' AND started_at < CURRENT_TIMESTAMP() AND time_frame = 3600),
+j AS (SELECT last_trading_day, started_at, LOGICAL_OR(t = 'iv') AS hi, LOGICAL_OR(t = 'mid') AS hm FROM k GROUP BY last_trading_day, started_at),
+w AS (SELECT DATE(TIMESTAMP_SUB(started_at, INTERVAL 7 HOUR), 'Asia/Tokyo') AS window_date, COUNTIF(hi) AS iv_n, COUNTIF(hm) AS mid_n
+  FROM j GROUP BY window_date)
+SELECT (SELECT COUNT(*) FROM w) AS windows, (SELECT COUNTIF(iv_n != mid_n) FROM w) AS diff_windows,
+  (SELECT COUNTIF(hm AND NOT hi) FROM j) AS mid_only_keys, (SELECT COUNTIF(hi AND NOT hm) FROM j) AS iv_only_keys"
+#    diff_windows 0・mid_only_keys 0・iv_only_keys 0
+# 4. スナップショットとの比べ（スナップショットの最後の足まで。その後に定期クエリが足した窓は除く。約 9 MiB）
+q --location=$L --format=pretty "
+WITH b AS (SELECT * FROM \`$P.optionchan_tokyo.$SNAP\` WHERE started_at >= '2018-01-01' AND started_at < CURRENT_TIMESTAMP()),
+a AS (SELECT * FROM \`$P.optionchan_tokyo.atm_mid_iv\` WHERE started_at >= '2018-01-01' AND started_at < CURRENT_TIMESTAMP()),
+last_bar AS (SELECT TIMESTAMP_ADD(MAX(started_at), INTERVAL 1 HOUR) AS snap_end FROM b)
+SELECT started_at < TIMESTAMP '$C' AS before_c,
+  COUNTIF(a.started_at IS NULL) AS removed, COUNTIF(b.started_at IS NULL) AS added,
+  COUNTIF(a.started_at IS NOT NULL AND b.started_at IS NOT NULL
+    AND TO_JSON_STRING(STRUCT(a.open, a.high, a.low, a.close)) != TO_JSON_STRING(STRUCT(b.open, b.high, b.low, b.close))) AS changed
+FROM b FULL JOIN a USING (last_trading_day, time_frame, started_at)
+WHERE started_at < (SELECT snap_end FROM last_bar)
+GROUP BY before_c ORDER BY before_c"
+#    before_c = true: removed = 流す前の mid にだけあるキーの数、added 0、changed 0 / before_c = false: 3 つとも 0
+```
+
+- 2. で失敗した年は、原因を見てからその年だけ流し直す（冪等。1 本は 1 トランザクションなので、失敗した年は書かれていない）
+- 4. の `changed` が 0 でないとき: #98 の作り直しの後に最新版が変わった窓（再処理など）。件数と窓を見て説明できるかを確かめ、説明できなければ 5. で戻す
+- 結果（年ごとの `bars`・`with_mid`、3. と 4. の件数、スナップショットの名前）を #122 にコメントする（全文は貼らない）
+- 5. 戻すとき（スナップショットの期限の 30 日の前に）: 表は作り直さず（表の付与・Terraform に触れない）、`[2018-01-01, C)` の行だけをスナップショットの行に入れ替える。その後 4. で before_c = true の 3 つが 0 になること。期限を延ばすときは `ALTER TABLE ... SET OPTIONS (expiration_timestamp = ...)`
+
+```sh
+qr "$S0_MID" "$C" --location=$L "
+BEGIN TRANSACTION;
+DELETE FROM \`$P.optionchan_tokyo.atm_mid_iv\` WHERE started_at >= @start_at AND started_at < @end_at;
+INSERT INTO \`$P.optionchan_tokyo.atm_mid_iv\` (open, high, low, close, last_trading_day, time_frame, started_at)
+SELECT open, high, low, close, last_trading_day, time_frame, started_at FROM \`$P.optionchan_tokyo.$SNAP\`
+WHERE started_at >= @start_at AND started_at < @end_at;
+COMMIT TRANSACTION;"
+```
 
 ### 停止・削除
 
