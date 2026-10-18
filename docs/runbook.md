@@ -1867,6 +1867,8 @@ vf "$S0" "$FIX" --maximum_bytes_billed=53687091200 | jq -c '.[-1][] | {tbl, lega
 
 #110 の欠け 2（**2023-04-25 13:42 〜 2023-05-08 16:31 JST**。旧系がオプションの価格の表示を解析できず、`option_price` の `price`・`price_time` がすべて NULL の期間）を、J-Quants DataCube の「日経225オプション 歩み値（ティック）」で埋める。歩み値は表 `optionchan_tokyo.dc_option_tick`（Terraform の `infra/prod/datacube.tf`、列の正は `schema/tokyo/dc_option_tick.json`）に、購入済みの全月（2018-12〜2024-08 の 26 か月）を入れる（欠け 1・3 は別 Issue）。SQL は `sql/tick_fill/`（試験は `tests/test_tick_fill.py`・`tests/test_tick_fill_bq.py`）。CSV のアップロード・`bq load`・UPDATE・テーブルスナップショットは Terraform 外で、所有者がこの節の手順で行う。
 
+過去データの欠けの全体と今の状態は docs/data-gaps.md にまとめてある。
+
 **規約（DataCube の自己使用）**: 私的な目的だけ。第三者への提供・公開はしない（加工した値も同じ扱い）。CSV・表は非公開のバケット・データセットだけに置き、**リポジトリ・Issue・PR にデータ・行の抜粋・値を貼らない**（件数・割合だけ）。ビューアーは IAP の内側でオーナーだけが見る。
 
 | SQL | 内容 |
@@ -2099,6 +2101,8 @@ vf111 --maximum_bytes_billed=10737418240 | jq -c '.[-1][0] | {marked_rows, targe
 
 #110 の欠け 1（**2022-09-14 15:16 〜 2023-04-25 13:35 JST**。spot・future・option の 3 表とも行が無い）と欠け 3（前日比 ±1,000 円以上で解析が失敗した区間。修正が効いた **2024-08-06 12:25 JST** より前）の、旧系の行が無い区間に、J-Quants DataCube の歩み値から option・future・ingest_runs の行を作る。オプションの歩み値は #111 の `optionchan_tokyo.dc_option_tick`、先物（日経225 ラージ）の歩み値はこの節で `optionchan_tokyo.dc_future_tick`（Terraform の `infra/prod/datacube.tf`、列の正は `schema/tokyo/dc_future_tick.json`）に入れる（購入済みの 25 か月。欠け 1 の 8 か月と欠け 3 の 17 か月。2023-05 は欠け 2 で行と IV があるので無い）。SQL は `sql/tick_build/`（試験は `tests/test_tick_build.py`・`tests/test_tick_build_bq.py`）。`bq load`・INSERT・1 時間足の作り直しは Terraform 外で、所有者がこの節の手順で行う。
 
+過去データの欠けの全体と今の状態は docs/data-gaps.md にまとめてある（欠けの区間の一覧は `sql/gaps/gaps.sql`）。
+
 **規約（DataCube の自己使用）**: 「DataCube の歩み値での穴埋め（#111）」と同じ。作った行（約定値・IV）も加工した値として同じ扱い（非公開の表・IAP の内側のビューアーだけ）。**リポジトリ・Issue・PR にはデータ・行の抜粋・値を貼らない**（件数・割合・誤差の要約だけ）。
 
 | SQL | 内容 |
@@ -2303,6 +2307,14 @@ vf114 "$RA" "$RE" | jq -c '.[-1][0] | {built_runs, built_option_rows, built_futu
 - 最後の手段: 2. のテーブルスナップショット（14 日）・タイムトラベル（7 日）。スナップショットからの復元は作成の後に新系が書いた行も消すので、#12 の「切り戻し」と同じく新系を止めて再処理で補う
 - 作り方を変えてやり直すときは、`rollback.sql` で消してから版（`build_version`。4 つの SQL で同じ値）を上げて流す
 - 先物の歩み値の表: Terraform の revert では消えない（`prevent_destroy`）。消すときは別の作業で保護を外す。CSV は `gcloud storage rm $B_FUT/*`（ソフト削除 7 日）
+
+### 追加の月（2021-07・2021-09）
+
+2026-10-18 に、オーナーが 2021-07・2021-09 の歩み値（オプション・先物）を追加で買い、この節と #111 の手順で `dc_option_tick`・`dc_future_tick` に入れた（オプション 28 か月・先物 27 か月になった。#111 の節の 26 個・この節の 25 個は最初の取り込みの数）。
+
+- 2021-07: `build.sql` で作った（範囲 `2021-06-30 15:00:00+00` 〜 `2021-07-31 15:00:00+00`、印は同じ `legacy-fill114-1`）。埋めた区間は 1 つ（2021-07-26 17:24 〜 07-28 02:53 JST の停止）。スナップショット 1,660 回・option 約 25 万行・future 1,660 行。`iv_basis` はすべて `ok`、verify の 0 の項目はすべて 0。対照の窓（2021-07-12〜15）の一致率 99.88%、IV の差は p50 0.03・p90 0.15。書き込み前のテーブルスナップショットは `optionchan_import.build121_*`
+- 2021-09: 取り込みだけで、作らない。その月に埋める区間が無い（2021-09-17 の夜間は市場の休み。docs/data-gaps.md）。対照の窓（2021-09-06〜09）の合い方も悪い（IV の差 p90 0.8、IV が出ない行 2,259）
+- 1 時間足は 5. と同じ手順で 2021-07-26・27 の窓を作り直す
 
 ### 費用
 
@@ -2647,7 +2659,7 @@ GROUP BY d ORDER BY d"
 
 表ができる前（デプロイの後に定期クエリが最初に作った窓の始まり E より前）は `sql/cm/cm_backfill.sql` で作り直す（同じ計算で範囲の中を置き換える。冪等）。
 
-- 範囲: 2018-10-01 〜 E（範囲は正時で now より前。SQL が検査する）。データの無い期間（2022-09 中旬〜2023-04 下旬）は何もしない
+- 範囲: 2018-10-01 〜 E（範囲は正時で now より前。SQL が検査する）。欠け 1・3 の区間は #114 で作った行に気配が無いので、行ができない（docs/data-gaps.md）
 - 量: 全部で 約 35 GiB（必要な列を全期間で読んだときの dry run）。1 か月 0.3〜1.2 GiB（行数の多い 2026 年が大きい）。プロジェクトのクエリ量の上限（32 GiB/日）を超えるので、**1 日に流すのは 20 GiB まで**（2018〜2023 年で約 15 GiB、2024 年〜E で約 20 GiB の 2 日に分ける）
 - 1 年ずつ流す（`ro` は「1 時間足（#49）」の変数。`sql/cm/` を読むように替える）:
 

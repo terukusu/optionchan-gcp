@@ -186,6 +186,7 @@ flowchart LR
 - #110 の欠け 2（2023-04-25〜05-08 の旧系の `price`・`price_time` が NULL の行）は、取引高（`volume`）が取引日の約定の累計と一致する約定で埋める（`sql/tick_fill/`、印は `parser_version = 'legacy-fill111-1'`、手順は runbook「DataCube の歩み値での穴埋め（#111）」）。リポジトリ・Issue にはデータ・値を書かない（件数・割合だけ）
 - 日経225先物（ラージ）の歩み値も同じ扱いで `optionchan_tokyo.dc_future_tick` に置く（#114。クラスタは限月。CSV は `<P>-raw` の `datacube/future_tick/`。2022-08 以前のファイルは最後の列が無いので `--allow_jagged_rows` で入れる）
 - #110 の欠け 1（2022-09-14〜2023-04-25 の全欠け）と欠け 3（前日比 ±1,000 円以上での欠け。2024-08-06 12:25 JST より前）の、旧系の行が無い区間（旧系のスナップショットが 15 分以上途切れ、先物の約定のある分が 10 分以上ある区間）には、歩み値から option・future・ingest_runs の行を作る（`sql/tick_build/`、印は `ingest_run_id` の接頭辞 `legacy-fill114-` と `parser_version = 'legacy-fill114-1'`、`ingest_runs.trigger = 'legacy_fill114'`。手順は runbook「DataCube の歩み値での行の作成（#114）」）。スナップショットは約定のあった分ごと。option は近い 2 限月の約定のあった系列の約定値・約定時刻・取引高と、先物を原資産にした Black-76 の IV（金利 0）・ATM の印。気配・ギリシャ指標・前日比と spot の行は作らない（元のデータが無い）。作った行は印で消して戻せる
+- 過去データの欠けの全体（欠け 1〜3・停止など）と今の状態は docs/data-gaps.md、欠けの区間の一覧は `sql/gaps/gaps.sql`（読み取りだけ。#110）
 
 ### 3.3 ビューアー（App Engine をやめる）
 
