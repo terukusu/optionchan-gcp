@@ -104,6 +104,16 @@ WINDOW_DECLARE = (
     "DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo');\n"
     'DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP_SUB(win_end, INTERVAL 1 DAY);'
 )
+# 毎時の定期クエリ（#117）の窓: @run_time が JST の 7 時台なら上と同じ 1 日の窓、それ以外は @run_time までの増分
+# （始まりは表から決める。検査は tests/test_cm.py）
+HOURLY_WINDOW_DECLARE = {
+    'sql/cm/atm_cm.sql': (
+        "DECLARE rebuild BOOL DEFAULT EXTRACT(HOUR FROM DATETIME(@run_time, 'Asia/Tokyo')) = 7;\n"
+        "DECLARE win_end TIMESTAMP DEFAULT IF(rebuild, TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), "
+        "'Asia/Tokyo'), @run_time);\n"
+        'DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP_SUB(win_end, INTERVAL IF(rebuild, 1, 3) DAY);'
+    ),
+}
 
 
 def sq(path):
@@ -149,7 +159,7 @@ def test_scheduled_sql_read_by_terraform():
 def test_scheduled_sql_window_and_names(path):
     text = sq(path)
     # 窓は @run_time（DTS の予定時刻）の JST の日付から。手動実行で未来の窓を指定したら止める
-    assert WINDOW_DECLARE in text
+    assert HOURLY_WINDOW_DECLARE.get(path, WINDOW_DECLARE) in text
     assert re.search(r'IF win_end > CURRENT_TIMESTAMP\(\) THEN\s+SELECT ERROR\(', text)
     assert 'optionchan_tokyo' not in text and 'optionchan_legacy' not in text
     assert not re.search(r'optionchan-\d', text)

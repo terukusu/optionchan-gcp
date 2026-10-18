@@ -1,19 +1,48 @@
 -- 30 日固定の ATM IV（#100）。BigQuery Data Transfer Service のスケジュールされたクエリ atm-cm（asia-northeast1、実行 SA sa-sq-dts、
--- 毎日 07:45 JST）の本文。プロジェクトとデータセットは Terraform の templatefile が入れる。
--- 窓は @run_time の JST の日付 D に対し [D-1 07:00, D 07:00) JST（sql/ohlc/atm_hourly.sql と同じ）。
+-- 毎時 :45 JST。#117）の本文。プロジェクトとデータセットは Terraform の templatefile が入れる。
+-- 窓は 2 つ（#117）:
+--   増分の回（@run_time が JST の 7 時台以外）: [表の最後の行（atm_cm_iv の MAX(created_at)）− 2 時間, @run_time)。始まりは
+--     @run_time − 3 日より前にしない（ビューアーの補いの最大と同じ）。窓を表から決めるので、失敗した回の区間は次の回で埋まる。
+--     重ねの 2 時間は取り込みの遅れ（ingest_runs.finished_at − snapshot_at。10 月の実測で最大 約 48 分）の分。終わりに余裕は付けない
+--     （option_price_latest は書き終わった実行の行だけを返す。遅れて終わった分は次の回の重ねで拾う）
+--   作り直しの回（@run_time が JST の 7 時台。1 日 1 回）: @run_time の JST の日付 D に対し [D-1 07:00, D 07:00) JST
+--     （sql/ohlc/atm_hourly.sql と同じ。重ねより遅れた取り込み・再処理の安全網。手動の再実行もこの回の run_time で）。
+-- 増分の回は、窓の中（3 日の範囲）の snapshot で前の回の後（@run_time − 65 分以降）に終わった取り込み（ingest_runs）が無ければ
+-- 何もしない（週末・休場日・早朝は option_price も atm_cm_iv も読まない。ingest_runs だけの最低課金 10 MiB）。
 -- 最新版（option_price_latest）の全行使価格の気配から、取り込み 1 回（created_at）ごとに 1 行を atm_cm_iv に書く:
 --   限月ごとのフォワード F（put-call パリティ）、F の位置で補間した ATM IV、SQ までの日数、それらから 30 日の IV（iv30）。
 --   計算（-- cm:begin 〜 -- cm:end）は sql/cm/cm_backfill.sql・apps/viewer の sql/atm_cm.sql と一字一句同じ（tests/test_cm.py が検査）。
 --   式・定数（スプレッドが中値の 30% 以下の気配、近い 5 本で F、3 本以上、近い 9 本で補間、30 日、SQ の 3 日前から 2 限月だけ）は
 --   README の「30 日固定の ATM IV」。
--- 窓の中を置き換える（再実行しても同じ結果。再処理・回収で最新版が変わった日は手動実行か cm_backfill.sql で作り直す）。
+-- 窓の中を置き換える（再実行しても同じ結果。3 日を超える停止・前日より前の最新版の変化は cm_backfill.sql で作り直す）。
 -- 窓に結果の行が 1 件も無ければ何もしない（休場日・週末と、データの無い過去の日の手動実行で既存の行を消さないため）。
+-- スキャン量（dry run）: option_price は UTC の日パーティションを丸ごと読むので、増分の回 約 112 MiB（1 パーティション）、
+-- 作り直しの回 約 226 MiB（2 パーティション）。1 日の見積もりは docs/runbook.md の「30 日固定の ATM IV（#100）」。
 -- -- source:begin 〜 -- source:end / -- result:begin 〜 -- result:end は tests/test_cm_bq.py が固定値の入力に差し替える印。
-DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo');
-DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP_SUB(win_end, INTERVAL 1 DAY);
+-- 7 時台かどうかは @run_time（DTS の予定時刻）の JST の時で決める（実行の遅れ・分に左右されない）
+DECLARE rebuild BOOL DEFAULT EXTRACT(HOUR FROM DATETIME(@run_time, 'Asia/Tokyo')) = 7;
+DECLARE win_end TIMESTAMP DEFAULT IF(rebuild, TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo'), @run_time);
+DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP_SUB(win_end, INTERVAL IF(rebuild, 1, 3) DAY);
 
 IF win_end > CURRENT_TIMESTAMP() THEN
   SELECT ERROR(FORMAT('atm_cm: win_end %t is in the future (run_time %t)', win_end, @run_time));
+END IF;
+-- 増分の回: 新しい取り込みが無ければ終わる。あれば窓の始まりを表の最後の行 − 2 時間まで縮める
+-- （窓より前の snapshot の再処理は、ここでは計算し直さない。翌朝の 7 時台の回か cm_backfill.sql で作り直す）
+-- （表の MAX は win_end より前の行だけ。過去の run_time の手動実行で、その後の行があっても窓は空にならない）
+IF NOT rebuild THEN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM `${project}.${dataset}.ingest_runs`
+    WHERE snapshot_at >= win_start AND snapshot_at < win_end AND finished_at >= TIMESTAMP_SUB(@run_time, INTERVAL 65 MINUTE)
+  ) THEN
+    RETURN;
+  END IF;
+  SET win_start = GREATEST(IFNULL(TIMESTAMP_SUB((
+    SELECT MAX(created_at)
+    FROM `${project}.${dataset}.atm_cm_iv`
+    WHERE created_at >= win_start AND created_at < win_end
+  ), INTERVAL 2 HOUR), win_start), win_start);
 END IF;
 
 CREATE TEMP TABLE result AS

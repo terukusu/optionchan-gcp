@@ -1,13 +1,14 @@
 # 日次の品質チェックと新旧の突き合わせ（#40、target.md 3.4）と 1 時間足（#49、3.2）。BigQuery Data Transfer Service（DTS）の 5 本と、
 # その作業用データセット・結果のテーブル・付与。実行 SA sa-sq-dts とプロジェクト単位・旧データセットへの付与は infra/bootstrap/sq.tf。
-# 窓はどれも @run_time の JST の日付 D に対し [D-1 07:00, D 07:00)。スケジュールは UTC（JST − 9 時間）。
+# 窓はどれも @run_time の JST の日付 D に対し [D-1 07:00, D 07:00)（atm-cm の増分の回だけ別。下）。スケジュールは UTC（JST − 9 時間）。
 #   legacy-stage   07:02 JST  US    旧系の前日分 → optionchan_legacy_stage（旧系の夜間分は 06:20 頃までに入っている）
 #   legacy-copy    07:10 JST  東京  optionchan_legacy_stage → optionchan_legacy_copy（データセットコピー）
 #   quality-daily  07:15 JST  東京  品質チェック → quality_daily。違反があれば失敗（新系の M2 で通知）。ingest の 07:00 の照合・回収の後
 #   legacy-compare 07:30 JST  東京  コピーと最新版を比べる → legacy_compare_daily。コピーの欠けは失敗、説明できない差分は下の切り替え（と日付の下限）で
 #   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price（#49。旧系の insert_ohlc の置き換え）と atm_mid_iv（#98）に MERGE
-#   atm-cm         07:45 JST  東京  最新版の全行使価格の気配から 30 日固定の ATM IV を作り atm_cm_iv の窓を置き換える（#100）
-# 時刻を 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
+#   atm-cm         毎時 :45   東京  最新版の全行使価格の気配から 30 日固定の ATM IV を作り atm_cm_iv の窓を置き換える（#100）。
+#                                   毎時の回は表の最後の行 − 2 時間からの増分（#117）、07:45 JST の回が前日分の作り直し
+# 1 日 1 回のものを 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
 # legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ。旧系の停止（#14）で legacy-* を無効にし（var.legacy_stopped）、
 # 旧系の削除（#24）で消す。品質チェックと 1 時間足は残す。
 locals {
@@ -271,14 +272,19 @@ resource "google_bigquery_table_iam_member" "sq_atm_cm_editor" {
   member     = "serviceAccount:${local.sa_sq}"
 }
 
-# atm-hourly（07:40）の後。失敗の M2 の抑制は 08:45 に終わる
+# 毎時 :45（#117）。07:45 JST の回（atm-hourly（07:40）の後）が前日分の作り直しで、他の回は増分（窓は sql/cm/atm_cm.sql）。
+# 間隔の形（every N hours）は起点から数えるので、start_time を過去の :45 にして分をそろえる（毎正時は複数回動くことがあるので避ける）。
+# schedule・schedule_options・params は作り直しでなく更新（config_id は変わらない）。失敗の M2（1 時間に 1 回まで）は毎時の回でも出る
 resource "google_bigquery_data_transfer_config" "atm_cm" {
   project              = var.project_id
   display_name         = "optionchan atm-cm"
   location             = local.bq.dataset.location
   data_source_id       = "scheduled_query"
-  schedule             = "every day 22:45"
+  schedule             = "every 1 hours"
   service_account_name = local.sa_sq
+  schedule_options {
+    start_time = "2026-10-01T22:45:00Z"
+  }
   params = {
     query = templatefile("${path.module}/../../sql/cm/atm_cm.sql", {
       project = var.project_id
