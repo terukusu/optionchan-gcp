@@ -223,33 +223,68 @@ def test_hourly_merge_does_nothing_without_atm_rows():
 
 # ---- mid IV の過去分の作り直し（mid_backfill.sql、#98。一時テーブルに書く） ----
 
-def backfill_script(atm_rows, existing):
+def backfill_script(atm_rows, existing, iv_rows):
+    """mid_backfill.sql を、source を固定値・atm_iv（読む、#122）と atm_mid_iv（書く）を一時テーブルにして流すスクリプト"""
     text = render(tables_to_temp(read(BACKFILL)), project=PROJECT, dataset='optionchan_tokyo')
     m = between(text, '-- source:begin', '-- source:end')
     text = text[:m.start()] + cte('atm', ATM, atm_rows) + text[m.end():]
     i = text.index('\nIF ') + 1
-    return text[:i] + temp_table('atm_mid_iv', BAR, existing) + text[i:] + '\nSELECT * FROM atm_mid_iv;\n'
+    setup = temp_table('atm_iv', BAR, iv_rows) + temp_table('atm_mid_iv', BAR, existing)
+    return text[:i] + setup + text[i:] + '\nSELECT * FROM atm_mid_iv;\n'
 
 
 BACKFILL_PARAMS = [f'start_at:TIMESTAMP:{ts(0)}', f'end_at:TIMESTAMP:{ts(3)}']
+# atm_iv の 1 時間足（値は使わない。キーだけを読む）
+IV_KEYS = [bar(1, 1, 1, 1, e[0], e[1] + ':00+00') for e in EXPECTED_MID]
+
+
+def mid_table(rows):
+    return sorted((r['last_trading_day'], r['started_at'][:16], rnd(r['open']), rnd(r['high']), rnd(r['low']),
+                   rnd(r['close'])) for r in rows)
 
 
 def test_backfill_same_as_hourly_and_idempotent():
     # 範囲 [00:00, 03:00): 中の既存の足は置き換え、計算に無いキーは消す。範囲の外（03:00）は触れない
     existing = [bar(9, 9, 9, 9, M1, ts(0)), bar(9, 9, 9, 9, M1, ts(2)), bar(7, 7, 7, 7, M1, ts(3))]
-    script = backfill_script(FIXTURE, existing)
+    script = backfill_script(FIXTURE, existing, IV_KEYS)
     i = script.index('\nIF ') + 1
     first, *_ = run_script(script, params=BACKFILL_PARAMS)
     assert [int(first[0]['bars']), int(first[0]['with_mid'])] == [4, 2]
     _, after = run_script(script, params=BACKFILL_PARAMS)[-2:]
-    got = sorted((r['last_trading_day'], r['started_at'][:16], rnd(r['open']), rnd(r['high']), rnd(r['low']),
-                  rnd(r['close'])) for r in after)
+    got = mid_table(after)
     assert got == sorted(EXPECTED_MID + [(M1, '2026-10-12 03:00', 7.0, 7.0, 7.0, 7.0)])
     # 流し直しても同じ（スクリプトの 2 回目: 表は作り直さず、計算と MERGE だけを繰り返す）
     rest = script[i:].replace('CREATE TEMP TABLE bars', 'DROP TABLE bars;\nCREATE TEMP TABLE bars', 1)
     *_, again = run_script(script + rest, params=BACKFILL_PARAMS)
-    assert sorted((r['last_trading_day'], r['started_at'][:16], rnd(r['open']), rnd(r['high']), rnd(r['low']),
-                   rnd(r['close'])) for r in again) == got
+    assert mid_table(again) == got
+
+
+# 読まない atm_iv の行（#122）: 範囲の外のキーと、範囲の中の日足（time_frame = 86400）
+IV_IGNORED = [bar(1, 1, 1, 1, M1, ts(3)), {**bar(1, 1, 1, 1, M1, ts(1)), 'time_frame': 86400}]
+# 範囲の外の既存の mid の足（前日 23:00・03:00）。どの試験でもそのまま残る
+MID_OUTSIDE = [bar(6, 6, 6, 6, M1, ts(23, day=11)), bar(7, 7, 7, 7, M1, ts(3))]
+MID_OUTSIDE_ROWS = [(M1, '2026-10-11 23:00', 6.0, 6.0, 6.0, 6.0), (M1, '2026-10-12 03:00', 7.0, 7.0, 7.0, 7.0)]
+
+
+def test_backfill_drops_keys_without_iv():
+    """#122: atm_iv に無いキー（M1 の 01:00）の mid の足は作らず、範囲の中の既存の足も消す。範囲の外は残る"""
+    iv = [r for r in IV_KEYS if not (r['last_trading_day'] == M1 and r['started_at'].startswith('2026-10-12 01:00'))]
+    assert len(iv) == 3
+    existing = [bar(9, 9, 9, 9, M1, ts(1)),            # atm_iv に無いキー（作り直しで消える）
+                bar(8, 8, 8, 8, M2, ts(1))] + MID_OUTSIDE  # 範囲の中の、どちらにも無いキー（消える）
+    result, after = run_script(backfill_script(FIXTURE, existing, iv + IV_IGNORED), params=BACKFILL_PARAMS)
+    assert [int(result[0]['bars']), int(result[0]['with_mid'])] == [3, 2]
+    expected = [e for e in EXPECTED_MID if e[:2] != (M1, '2026-10-12 01:00')]
+    assert mid_table(after) == sorted(expected + MID_OUTSIDE_ROWS)
+
+
+def test_backfill_does_nothing_without_iv_keys():
+    """#122: 範囲の中に atm_iv の 1 時間足のキーが 1 つも無ければ（ATM の行はあっても）何もしない"""
+    existing = [bar(9, 9, 9, 9, M1, ts(0)), bar(9, 9, 9, 9, M1, ts(1))] + MID_OUTSIDE
+    result, after = run_script(backfill_script(FIXTURE, existing, IV_IGNORED), params=BACKFILL_PARAMS)
+    assert [int(result[0]['bars']), int(result[0]['with_mid'])] == [0, 0]
+    assert mid_table(after) == sorted([(M1, '2026-10-12 00:00', 9.0, 9.0, 9.0, 9.0),
+                                       (M1, '2026-10-12 01:00', 9.0, 9.0, 9.0, 9.0)] + MID_OUTSIDE_ROWS)
 
 
 @pytest.mark.parametrize('start,end', [(ts(3), ts(0)), (ts(0, 30), ts(3)), ('2099-01-01 00:00:00+00', '2099-01-02 00:00:00+00')])

@@ -1,9 +1,13 @@
 -- mid IV の 1 時間足（#98）の過去分の作り直し。最新版（option_price_latest）の ATM の put の mid から、started_at が
 -- [@start_at, @end_at) の 1 時間足を作り、atm_mid_iv に MERGE する（定期クエリ sql/ohlc/atm_hourly.sql の atm_mid_iv と同じ計算。
 -- -- mid_bars:begin 〜 -- mid_bars:end は atm_hourly.sql と一字一句同じ。tests/test_ohlc.py が検査）。
+--   足は範囲の中の atm_iv の 1 時間足のキー（iv_keys）に限る（#122）。atm_iv の過去分（2026-10-12 22:00 UTC より前）は旧系から
+--   移した値で、UTC 23 時台（08 JST、寄り前）の足や旧系が動いていなかった日の足が無い。最新版からそのまま作ると mid の足だけが
+--   多くなり、約定の足とそろわない。範囲の中の atm_iv に無いキーの mid の足は消える
 --   範囲: start_at・end_at は正時（1 時間足が範囲をまたがない）。end_at は now 以下
---   冪等: 範囲の中を置き換える（atm_hourly.sql と同じ MERGE。同じ範囲を流し直しても同じ結果）。範囲に ATM の行が 1 件も無ければ何もしない
---   読む量: option_price のパーティションの bid_iv・ask_iv 等の列（2018-01〜2026-10 の全部で 約 40 GiB。1 年ずつ流す）
+--   冪等: 範囲の中を置き換える（atm_hourly.sql と同じ MERGE。同じ範囲を流し直しても同じ結果）。範囲に ATM の行が 1 件も無いか、
+--     範囲の中に atm_iv のキーが 1 つも無ければ何もしない
+--   読む量: option_price のパーティションの bid_iv・ask_iv 等の列（2018-01〜2026-10 の全部で 約 40 GiB。1 年ずつ流す）と atm_iv のキー（数 MB）
 -- 結果は 1 行（bars = 作った足の数、with_mid = mid の値がある足の数）。
 -- 名前は runbook の render が、期間は bq のクエリパラメータが入れる。手順は docs/runbook.md「1 時間足（#49）」の「mid IV の過去分（#98）」。
 -- -- source:begin 〜 -- source:end / -- result:begin 〜 -- result:end は tests/test_ohlc_bq.py が固定値の入力に差し替える印。
@@ -28,6 +32,11 @@ atm AS (
   WHERE is_atm AND type = 2
 ),
 -- source:end
+iv_keys AS (
+  SELECT DISTINCT last_trading_day, started_at
+  FROM `${project}.${dataset}.atm_iv`
+  WHERE started_at >= start_at AND started_at < end_at AND time_frame = 3600
+),
 -- mid_bars:begin
 mid_bars AS (
   SELECT
@@ -44,7 +53,7 @@ mid_bars AS (
   GROUP BY last_trading_day, started_at
 )
 -- mid_bars:end
-SELECT *, 3600 AS time_frame FROM mid_bars
+SELECT *, 3600 AS time_frame FROM mid_bars JOIN iv_keys USING (last_trading_day, started_at)
 -- result:end
 ;
 
