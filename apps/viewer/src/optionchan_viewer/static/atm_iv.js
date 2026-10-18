@@ -17,7 +17,7 @@
 //   CSV・束ね・つなぎ・印の純粋関数は atm_series.js
 // - 表示はローソク足か折れ線（終値を結ぶ）。切り替えは描き直すだけで読み直さない
 // - 足が 0 本の間はスクロール・拡縮を止め、選び直し・移動のたびに縦の範囲を自動に戻す
-// - 足が 0 本なら理由と、表示できる選び方のボタン（期近つなぎ / 約定。AtmSeries.emptyHint）を出す。
+// - 足が 0 本なら、チャートの真ん中に理由と、表示できる選び方のボタン（期近つなぎ / 約定。AtmSeries.emptyHint）を出す。
 //   0・1 は今日から数えた限月なので、過去の日付へ移動すると 0 本になる
 // - 日付の欄で、選んだ時点で（他の選択と同じく。ボタンは無い）選んでいる足のままその日（JST）のまわりへ移動する（AtmSeries.jumpView の範囲を select で読み直す。そこから
 //   左右へスクロールすると続きを読む。1 時間足の 400 日・分足の 31 日の上限はそのまま）
@@ -157,7 +157,6 @@ function clearError() {
 
 function note(text) {
   el('message').textContent = text || '';
-  el('empty-action').hidden = true;
 }
 
 var EMPTY_ACTIONS = {
@@ -167,15 +166,17 @@ var EMPTY_ACTIONS = {
 var emptyAction = null;
 var lastView = null;  // 最後に select で読みに行った時間の範囲（足が 0 本で表示範囲が取れないときに選び直しで使う）
 
-// 足が 0 本のときの説明と、選び直すボタン
+// 足が 0 本のときの説明と、選び直すボタン（チャートの真ん中に出す）
 function noteEmpty() {
   var hint = AtmSeries.emptyHint(AtmSeries.seriesOf(currentN), currentIv);
-  note(hint.text);
+  note('');
   emptyAction = hint.action ? EMPTY_ACTIONS[hint.action] : null;
+  el('chart-empty-text').textContent = hint.text;
+  el('empty-action').hidden = !emptyAction;
   if (emptyAction) {
     el('empty-action').textContent = emptyAction.label;
-    el('empty-action').hidden = false;
   }
+  el('chart-empty').hidden = false;
 }
 
 // ---- 描画 ----
@@ -278,6 +279,7 @@ function render(view, keep) {
     applyView(view);
   }
   showLegend(shown.length ? toChart(shown[shown.length - 1]) : undefined);
+  el('chart-empty').hidden = true;
   if (!entry) {
     note('');
   } else if (!shown.length && !entry.note) {
@@ -395,6 +397,7 @@ function select(view) {
     series.setData([]);
     renderMonths();
     showLegend(undefined);
+    el('chart-empty').hidden = true;
     note('分足の読み込みの上限（この画面で ' + MINUTE_BUDGET_DAYS + ' 日分）に達しました。ページを読み直してください');
     return;
   }
@@ -422,6 +425,7 @@ function select(view) {
     series.setData([]);
     renderMonths();
     showLegend(undefined);
+    el('chart-empty').hidden = true;
     note('');
     showError(failText(reason), function() { select(view); }, true);
   });
@@ -640,6 +644,7 @@ el('empty-action').addEventListener('click', function() {
     return;
   }
   el(emptyAction.id).value = emptyAction.value;
+  el('chart-empty').hidden = true;
   select(visibleTimeRange() || lastView);
 });
 el('chart-retry').addEventListener('click', function() {
