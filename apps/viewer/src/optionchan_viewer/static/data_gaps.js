@@ -10,7 +10,9 @@
 var DataGaps = (function() {
   var JST = 9 * 3600;
   var DAY = 86400;
-  var KINDS = { bug_format: '欠け 1', bug_comma: '欠け 3', unknown: '停止・取得の失敗', no_change: '値の変化なし' };
+  // 原因の文（画面に出す。docs/data-gaps.md の「欠け 1」「欠け 3」の番号は見る人に通じないので出さない。#127）
+  var KINDS = { bug_format: '価格の表示形式の変更による欠け', bug_comma: '大きい前日比による欠け', unknown: '停止・取得の失敗',
+    no_change: '値の変化なし' };
   var FILLED = { filled: true, partial: true };
   var NUM = /^[0-9]+$/;
 
@@ -142,9 +144,10 @@ var DataGaps = (function() {
       return '欠け';
     }
     if (mode === 'quote') {
-      return '気配なし（#114 で約定から作成した区間）';
+      return '気配なし・別に購入した約定データから作り直した区間';
     }
-    return '約定から作成（#114。IV 再計算・気配なし）' + (g.status === 'partial' ? '・一部欠け' : '');
+    // #114 で DataCube の歩み値から作った区間。Issue 番号・開発の中の言葉は出さない（#127）
+    return '別に購入した約定データから作り直した区間・気配なし' + (g.status === 'partial' ? '・一部欠け' : '');
   }
 
   function oneText(g, mode) {

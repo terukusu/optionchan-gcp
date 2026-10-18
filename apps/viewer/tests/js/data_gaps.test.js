@@ -267,13 +267,19 @@ test('legendText: 種類・状態の文・期間', () => {
   const [f1, c3, u, n, x] = gaps([jst(1, 4, 10), jst(1, 4, 11), 'bug_format', 'filled'],
     [jst(1, 4, 11), jst(1, 4, 12), 'bug_comma', 'partial'], [jst(1, 4, 12), jst(1, 4, 13), 'unknown', 'none'],
     [jst(1, 4, 13), jst(1, 4, 14), 'no_change', 'filled'], [jst(1, 4, 14), jst(1, 4, 15), 'other', 'none']);
-  assert.equal(legendText([f1], 'trade'), '欠け 1（約定から作成（#114。IV 再計算・気配なし））2001-01-04 10:00〜2001-01-04 11:00');
-  assert.equal(legendText([c3], 'trade'), '欠け 3（約定から作成（#114。IV 再計算・気配なし）・一部欠け）2001-01-04 11:00〜2001-01-04 12:00');
-  assert.equal(legendText([f1], 'quote'), '欠け 1（気配なし（#114 で約定から作成した区間））2001-01-04 10:00〜2001-01-04 11:00');
-  assert.equal(legendText([c3], 'quote'), '欠け 3（気配なし（#114 で約定から作成した区間））2001-01-04 11:00〜2001-01-04 12:00');
+  assert.equal(legendText([f1], 'trade'), '価格の表示形式の変更による欠け（別に購入した約定データから作り直した区間・気配なし）2001-01-04 10:00〜2001-01-04 11:00');
+  assert.equal(legendText([c3], 'trade'), '大きい前日比による欠け（別に購入した約定データから作り直した区間・気配なし・一部欠け）2001-01-04 11:00〜2001-01-04 12:00');
+  assert.equal(legendText([f1], 'quote'), '価格の表示形式の変更による欠け（気配なし・別に購入した約定データから作り直した区間）2001-01-04 10:00〜2001-01-04 11:00');
+  assert.equal(legendText([c3], 'quote'), '大きい前日比による欠け（気配なし・別に購入した約定データから作り直した区間）2001-01-04 11:00〜2001-01-04 12:00');
   assert.equal(legendText([u], 'trade'), '停止・取得の失敗（欠け）2001-01-04 12:00〜2001-01-04 13:00');
-  assert.equal(legendText([n], 'trade'), '値の変化なし（約定から作成（#114。IV 再計算・気配なし））2001-01-04 13:00〜2001-01-04 14:00');
+  assert.equal(legendText([n], 'trade'), '値の変化なし（別に購入した約定データから作り直した区間・気配なし）2001-01-04 13:00〜2001-01-04 14:00');
   assert.equal(legendText([x], 'quote'), '不明（欠け）2001-01-04 14:00〜2001-01-04 15:00');
   assert.equal(legendText([u, f1, c3], 'quote'), '区間 3 件: 停止・取得の失敗（欠け）2001-01-04 12:00〜2001-01-04 13:00');
   assert.equal(legendText([], 'trade'), '');
+  // 画面に出る文に Issue 番号を出さない（#127）
+  for (const g of [f1, c3, u, n, x]) {
+    for (const mode of ['trade', 'quote']) {
+      assert.ok(!/#[0-9]/.test(legendText([g], mode)), legendText([g], mode));
+    }
+  }
 });

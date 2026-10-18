@@ -14,6 +14,7 @@
     <script src="/static/smile_age.js" defer></script>
     <script src="/static/smile_touch.js" defer></script>
     <script src="/static/smile_csv.js" defer></script>
+    <script src="/static/smile_view.js" defer></script>
     <script src="/static/smile.js" defer></script>
     <link rel="stylesheet" href="/static/viewer.css">
 </head>
@@ -55,6 +56,8 @@
     </div>
 </div>
 <div id="legend" class="smile-legend"></div>
+<!-- 注記・エラー（データなし・気配なし・作り直した時点・上限等）はグラフのすぐ上（スクロールせずに見えるように。#127） -->
+<div id="message" class="chart-note"></div>
 <!-- 詳細（#cursor）はチャートが画面にある間は画面の上に残す（position: sticky。スマートフォンでなぞっている間も読めるように） -->
 <div class="smile-stage">
 <div id="cursor" class="smile-cursor"></div>
@@ -74,7 +77,6 @@
     </div>
 </div>
 </div>
-<div id="message" class="chart-note"></div>
 <p class="chart-help">
     線: 気配の仲値（mid）の IV、縦のひげ: 買い気配（bid）〜売り気配（ask）の IV、点: 約定の IV（濃いほど最近の約定。段の区切りは凡例）。
     「経過時間」をオンにすると、約定からの経過（分）を右軸に点線で描きます。
