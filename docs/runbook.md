@@ -9,7 +9,7 @@
 | 項目 | 設定 |
 |---|---|
 | 予算 | 表示名 `optionchan: 月額予算`。このプロジェクトのみ、暦月、500 円（税抜き、クレジット込みの実請求で比較）、実績の 50 / 80 / 100% で通知。通知先は既存の Monitoring メール通知チャネルのみ（請求先アカウントは他プロジェクトと共有のため、IAM ロール保持者への既定メールは無効） |
-| クエリ量上限 | `bigquery.googleapis.com/quota/query/usage`、unit `1/d/{project}`。2026-10-18 時点の effectiveLimit は 102400 MiB（100 GiB/日。2026-10-12 の設定は 32768 MiB = 32 GiB/日。下の「設定の記録」）。Service Usage の consumer override で設定。ユーザー単位は設定しない |
+| クエリ量上限 | `bigquery.googleapis.com/quota/query/usage`、unit `1/d/{project}`。effectiveLimit は 102400 MiB（100 GiB/日。2026-10-19 に設定。下の「設定の記録」）。Service Usage の consumer override で設定。ユーザー単位は設定しない |
 
 予算は通知だけで課金は止めない。課金データの反映は数時間〜1 日遅れる。クエリ量上限は太平洋時間の 0 時にリセットされる。
 
@@ -164,7 +164,7 @@ gcloud alpha services quota delete \
 
 （`gcloud alpha services quota` が使えない場合の代替: `gcloud services enable cloudquotas.googleapis.com --project=$P` のうえ `gcloud beta quotas preferences create --service=bigquery.googleapis.com --project=$P --quota-id=QueryUsagePerDay --preferred-value=32768 --preference-id=bq-query-usage-per-day --allow-high-percentage-quota-decrease`。変更は `gcloud beta quotas preferences update bq-query-usage-per-day --service=bigquery.googleapis.com --project=$P --quota-id=QueryUsagePerDay --preferred-value=<値>`（10% を超えて下げるときは `--allow-high-percentage-quota-decrease` を付ける）、戻すときは `--preferred-value=209715200`。どちらで設定したかをこの節に記録する。）
 
-設定の記録: 2026-10-12 に `gcloud alpha services quota update`（Service Usage の consumer override）で 32768 に設定した。2026-10-18 時点の effectiveLimit は 102400（上の「確認」のコマンドで見た値）。
+設定の記録: 2026-10-12 に `gcloud alpha services quota update`（Service Usage の consumer override）で 32768 に設定した。2026-10-18 は 32768 のままだった（#122 の流し直しの途中で上限を超えて止まった。この runbook の 102400 の記述は誤り）。2026-10-19 にオーナーの了承で同じコマンドの `--value=102400 --force` で引き上げた（effectiveLimit・consumerOverride とも 102400 を確認）。
 
 ### クエリ量上限を超えたとき
 
@@ -2711,7 +2711,7 @@ COMMIT TRANSACTION;"
 | `sql/cm/cm_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)` の作り直し（下の「過去分」） |
 
 - ビューアーは表の最後の行の 1 秒後から now まで（最大 3 日）を同じ計算で補う（`apps/viewer` の `sql/atm_cm.sql`）。表は 1 時間以内に新しくなるので、補う分はふつう UTC の 1 日分のパーティション（約 110 MiB）。表が止まると最大 3〜4 日分
-- 料金（課金バイト。2026-10-16 の値で実測）: 増分の回 約 150 MiB（`option_price` の UTC の日パーティション 1 つ 約 112 MiB + 検査 2 表の最低課金 10 MiB ずつ + INSERT 約 20 MiB。その日のパーティションは日中に育つので早い時刻ほど少ない。09:45〜10:45 JST の回は前日のパーティションも読む）、07:45 JST の回 約 250 MiB（2 パーティション）、何もしない回 10 MiB（`ingest_runs` だけ）。1 日で平日 4 GiB 以下（見積もり 2〜4 GiB）・日曜 0.3 GiB 以下。プロジェクトのクエリ量の上限（2026-10-18 時点の effectiveLimit 102400 MiB/日。「コスト」）の数 %
+- 料金（課金バイト。2026-10-16 の値で実測）: 増分の回 約 150 MiB（`option_price` の UTC の日パーティション 1 つ 約 112 MiB + 検査 2 表の最低課金 10 MiB ずつ + INSERT 約 20 MiB。その日のパーティションは日中に育つので早い時刻ほど少ない。09:45〜10:45 JST の回は前日のパーティションも読む）、07:45 JST の回 約 250 MiB（2 パーティション）、何もしない回 10 MiB（`ingest_runs` だけ）。1 日で平日 4 GiB 以下（見積もり 2〜4 GiB）・日曜 0.3 GiB 以下。プロジェクトのクエリ量の上限（2026-10-19 から 102400 MiB/日。「コスト」）の数 %
 - 重ね 2 時間より遅れて終わった取り込みは、翌朝 07:45 の回まで古い値のまま。3 日を超えて止まったとき・前日より前の最新版が変わったとき（再処理・回収）は「過去分」の `cm_backfill.sql` でその範囲を作り直す
 
 ### 確認（prod の apply の後）
