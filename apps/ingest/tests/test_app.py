@@ -914,59 +914,110 @@ def test_settings_bq_location_from_tables_json():
     assert settings.Settings.from_env({"RAW_BUCKET": "b", "BQ_LOCATION": "US"}).bq_location == "US"
 
 
-# --- JPX の取り直し（#88） ---
+# --- JPX の取り直し（#88・#130） ---
 
 HTTP_502 = JpxTransient("page 1: HTTP 502")
+WAITS = settings.JPX_RETRY_WAITS_SECONDS
+N = len(WAITS)
 
 
 def fetches(fake):
     return [c for c in fake.calls if c[0] == "fetch"]
 
 
-def test_retry_after_502_ingests(capsys):
-    """1 回目が 502、2 回目が 200 なら、その分を取り込む。取り直しの前に待ち、ログに取り直しと結果が出る"""
-    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2})
+def retry_logs(records):
+    return [r for r in records if r["event"] == "jpx_retry"]
+
+
+def transients(page, n):
+    """互いに区別できる一時的な失敗を n 個（detail が直前の失敗かを見分けるため）"""
+    return [JpxTransient(f"page {page}: HTTP {502 + i}") for i in range(n)]
+
+
+def test_retry_waits_fit_deadline():
+    """待ちは正の数で回ごとに伸び、分の頭の待ち + 待ちの合計 + 最小のタイムアウト + 予約が期限に収まる
+    （即時の 502 が続けば上限の回数まで取り直せる）"""
+    assert N >= 1
+    assert all(w > 0 for w in WAITS)
+    assert list(WAITS) == sorted(set(WAITS))
+    total = (
+        settings.FETCH_AT_SECOND
+        + sum(WAITS)
+        + settings.JPX_RETRY_MIN_TIMEOUT_SECONDS
+        + settings.JPX_RETRY_RESERVE_SECONDS
+    )
+    assert total <= settings.REQUEST_DEADLINE_SECONDS
+
+
+@pytest.mark.parametrize("k", range(1, N + 1))
+def test_retry_after_502_ingests(capsys, k):
+    """1 限月が k 回続けて 502 の後に 200 なら取り込む。取り直しの前ごとに待ちを伸ばし、ログに回数と結果が出る"""
+    errors = transients(1, k)
+    fake = Fake(pages={1: [*errors, PAGE1], 2: PAGE2})
     result = handle(IN_HOURS, fake.deps())
     assert (result.status, result.outcome) == (200, "ingested")
-    assert fetches(fake) == [("fetch", 1), ("fetch", 1), ("fetch", 2)]
-    assert fake.sleeps == [settings.JPX_RETRY_WAIT_SECONDS]
-    assert fake.calls.index(("sleep", settings.JPX_RETRY_WAIT_SECONDS)) == 1  # 1 回目と 2 回目の間
+    assert fetches(fake) == [("fetch", 1)] * (k + 1) + [("fetch", 2)]
+    assert fake.sleeps == list(WAITS[:k])
+    # 取得と待ちが交互（1 回目 → 待ち → 取り直し → …）
+    jpx_calls = [c[0] for c in fake.calls if c[0] in ("fetch", "sleep")]
+    assert jpx_calls[: 2 * k + 1] == ["fetch", "sleep"] * k + ["fetch"]
     assert set(fake.appended) == {"spot_price", "future_price", "option_price", "ingest_runs"}
     records = logs(capsys)
-    assert [(r["severity"], r["event"]) for r in records] == [("INFO", "jpx_retry"), ("INFO", "ingested")]
-    assert (records[0]["page"], records[0]["detail"], records[0]["retry_wait_ms"]) == (1, "page 1: HTTP 502", 3000)
-    assert records[1]["jpx_retry"] == {"page": 1, "first": "page 1: HTTP 502", "result": "ok"}
+    assert [(r["severity"], r["event"]) for r in records] == [("INFO", "jpx_retry")] * k + [("INFO", "ingested")]
+    retries = retry_logs(records)
+    assert [r["page"] for r in retries] == [1] * k
+    assert [r["attempt"] for r in retries] == list(range(1, k + 1))
+    assert [r["detail"] for r in retries] == [str(e) for e in errors]  # 直前の失敗
+    assert [r["retry_wait_ms"] for r in retries] == [int(w * 1000) for w in WAITS[:k]]
+    assert records[-1]["jpx_retry"] == {"page": 1, "first": str(errors[0]), "retries": k, "result": "ok"}
 
 
 @pytest.mark.parametrize(
-    "error", [JpxTransient(f"page 2: {d}") for d in ("HTTP 503", "ConnectionError", "ReadTimeout")]
+    "k, detail",
+    [(k, "HTTP 503") for k in range(1, N + 1)] + [(1, "ConnectionError"), (1, "ReadTimeout")],
 )
-def test_retry_page2(capsys, error):
-    fake = Fake(pages={1: PAGE1, 2: [error, PAGE2]})
+def test_retry_page2(capsys, k, detail):
+    error = JpxTransient(f"page 2: {detail}")
+    fake = Fake(pages={1: PAGE1, 2: [error] * k + [PAGE2]})
     assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
-    assert fetches(fake) == [("fetch", 1), ("fetch", 2), ("fetch", 2)]
-    assert logs(capsys)[-1]["jpx_retry"] == {"page": 2, "first": str(error), "result": "ok"}
+    assert fetches(fake) == [("fetch", 1)] + [("fetch", 2)] * (k + 1)  # 1 限月は 1 回だけ
+    assert fake.sleeps == list(WAITS[:k])
+    records = logs(capsys)
+    assert [r["attempt"] for r in retry_logs(records)] == list(range(1, k + 1))
+    assert records[-1]["jpx_retry"] == {"page": 2, "first": str(error), "retries": k, "result": "ok"}
 
 
-def test_retry_fails_twice_is_jpx_unavailable(capsys):
-    fake = Fake(pages={1: [HTTP_502, JpxTransient("page 1: HTTP 504"), PAGE1], 2: PAGE2})
+def test_retry_exhausted_is_jpx_unavailable(capsys):
+    """N + 1 回続けて一時的な失敗なら jpx_unavailable（detail は最後の失敗）"""
+    errors = transients(1, N + 1)
+    fake = Fake(pages={1: [*errors, PAGE1], 2: PAGE2})
     result = handle(IN_HOURS, fake.deps())
     assert (result.status, result.outcome) == (200, "jpx_unavailable")
-    assert fetches(fake) == [("fetch", 1), ("fetch", 1)]  # 取り直しは 1 回まで
+    assert fetches(fake) == [("fetch", 1)] * (N + 1)  # 取り直しは N 回まで
+    assert fake.sleeps == list(WAITS)
     assert fake.created == {}
     records = logs(capsys)
-    assert [(r["severity"], r["event"]) for r in records] == [("INFO", "jpx_retry"), ("WARNING", "jpx_unavailable")]
-    assert records[1]["failure"] == "jpx_unavailable"
-    assert records[1]["detail"] == "page 1: HTTP 504"
-    assert records[1]["jpx_retry"] == {"page": 1, "first": "page 1: HTTP 502", "result": "failed"}
+    assert [(r["severity"], r["event"]) for r in records] == [("INFO", "jpx_retry")] * N + [
+        ("WARNING", "jpx_unavailable")
+    ]
+    assert records[-1]["failure"] == "jpx_unavailable"
+    assert records[-1]["detail"] == str(errors[-1])
+    assert records[-1]["jpx_retry"] == {"page": 1, "first": str(errors[0]), "retries": N, "result": "failed"}
 
 
-def test_retry_once_per_request(capsys):
-    """1 限月で取り直した後の 2 限月の失敗は取り直さない（1 リクエストで 1 回まで）"""
-    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: [JpxTransient("page 2: HTTP 502"), PAGE2]})
+@pytest.mark.parametrize("j", range(1, N + 1))
+def test_retry_budget_shared_across_pages(capsys, j):
+    """1 限月で j 回取り直した後の 2 限月の取り直しは残りの N − j 回まで（1 リクエストの合計が N を超えない）"""
+    page2_error = JpxTransient("page 2: HTTP 502")
+    fake = Fake(pages={1: [HTTP_502] * j + [PAGE1], 2: [page2_error]})
     assert handle(IN_HOURS, fake.deps()).outcome == "jpx_unavailable"
-    assert fetches(fake) == [("fetch", 1), ("fetch", 1), ("fetch", 2)]
-    assert fake.sleeps == [settings.JPX_RETRY_WAIT_SECONDS]
+    assert fetches(fake) == [("fetch", 1)] * (j + 1) + [("fetch", 2)] * (1 + N - j)
+    assert fake.sleeps == list(WAITS)  # 待ちはリクエスト全体の通し番号で伸びる
+    records = logs(capsys)
+    assert [r["attempt"] for r in retry_logs(records)] == list(range(1, N + 1))
+    assert records[-1]["event"] == "jpx_unavailable"
+    assert records[-1]["detail"] == str(page2_error)
+    assert records[-1]["jpx_retry"] == {"page": 2, "first": str(page2_error), "retries": N, "result": "failed"}
 
 
 @pytest.mark.parametrize("error", [JpxUnavailable(f"page 1: HTTP {status}") for status in (400, 403, 404)])
@@ -984,6 +1035,18 @@ def test_no_retry_on_empty_page(capsys):
     fake = Fake(pages={1: [empty_page_html(), PAGE1], 2: PAGE2})
     assert handle(IN_HOURS, fake.deps()).outcome == "jpx_unavailable"
     assert fetches(fake) == [("fetch", 1)]
+    assert fake.sleeps == []
+
+
+def test_no_retry_after_retry_returns_4xx(capsys):
+    """取り直しの結果が 4xx なら、それ以降は取り直さない"""
+    fake = Fake(pages={1: [HTTP_502, JpxUnavailable("page 1: HTTP 404"), PAGE1], 2: PAGE2})
+    assert handle(IN_HOURS, fake.deps()).outcome == "jpx_unavailable"
+    assert fetches(fake) == [("fetch", 1), ("fetch", 1)]
+    assert fake.sleeps == [WAITS[0]]
+    record = logs(capsys)[-1]
+    assert record["detail"] == "page 1: HTTP 404"
+    assert record["jpx_retry"] == {"page": 1, "first": str(HTTP_502), "retries": 1, "result": "failed"}
 
 
 def test_no_retry_beyond_deadline(capsys):
@@ -995,19 +1058,25 @@ def test_no_retry_beyond_deadline(capsys):
     assert fetches(fake) == [("fetch", 1)]
     assert fake.sleeps == [8.0]  # 分の頭の待ちだけ
     record = logs(capsys)[-1]
-    assert record["jpx_retry"] == {"page": 1, "first": "page 1: ReadTimeout", "result": "skipped_deadline"}
+    assert record["jpx_retry"] == {
+        "page": 1,
+        "first": "page 1: ReadTimeout",
+        "retries": 0,
+        "result": "skipped_deadline",
+    }
     assert record["detail"] == "page 1: ReadTimeout"
 
 
 @pytest.mark.parametrize(
     "first_cost, retried",
     [
-        # 残り − 待ち 3 − 予約 15 が 5 以上なら取り直す: 期限 45 − 待ち 8 − 1 回目 = 残り
+        # 残り − 待ち 3（WAITS[0]）− 予約 15 が 5 以上なら取り直す: 期限 45 − 待ち 8 − 1 回目 = 残り
         (14.0, True),  # 残り 23 → 予算 5
         (14.5, False),  # 残り 22.5 → 予算 4.5
     ],
 )
 def test_retry_deadline_boundary(capsys, first_cost, retried):
+    assert WAITS[0] == 3  # 上のコメントの数値の前提
     fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
     fake.cost = {"fetch1": first_cost}
     handle(IN_HOURS, fake.deps())
@@ -1017,34 +1086,84 @@ def test_retry_deadline_boundary(capsys, first_cost, retried):
         assert [t for k, t in fake.timeouts if k == "fetch1"] == [settings.JPX_TIMEOUT_SECONDS, pytest.approx(5.0)]
 
 
+def with_fetch_costs(fake, kind, costs):
+    """kind の取得を呼ぶたびに costs の秒数だけ偽の時間を進める"""
+    costs = iter(costs)
+    original = fake._tick
+
+    def tick(k, timeout):
+        if k == kind:
+            fake.cost[kind] = next(costs)
+        original(k, timeout)
+
+    fake._tick = tick
+
+
 def test_retry_leaves_time_for_the_rest(capsys):
     """8 秒目の 502 → 3 秒待って取り直し、取り直しが上限の 15 秒かかっても、残りの処理に 15 秒が残る"""
     fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
-    costs = iter([0.0, 15.0])
-    original = fake._tick
-
-    def tick(kind, timeout):
-        if kind == "fetch1":
-            fake.cost["fetch1"] = next(costs)
-        original(kind, timeout)
-
-    fake._tick = tick
+    with_fetch_costs(fake, "fetch1", [0.0, 15.0])
     assert handle(IN_HOURS, fake.deps()).outcome == "ingested"
-    assert fake.clock_value == pytest.approx(8.0 + 3.0 + 15.0)
+    assert fake.clock_value == pytest.approx(8.0 + WAITS[0] + 15.0)
     kinds = dict(fake.timeouts)
     assert kinds["exists"] == settings.GCS_TIMEOUT_SECONDS
     assert kinds["append_spot_price"] == settings.BQ_APPEND_TIMEOUT_SECONDS
 
 
+def test_retry_stops_when_budget_runs_out(capsys):
+    """取り直しが 15 秒のタイムアウトで返ったら、次の待ちの分の予算が無いので待たずに止める"""
+    fake = Fake(
+        pages={1: [HTTP_502, JpxTransient("page 1: ReadTimeout"), PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0
+    )
+    with_fetch_costs(fake, "fetch1", [0.0, 15.0])
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    assert fetches(fake) == [("fetch", 1), ("fetch", 1)]
+    assert fake.sleeps == [8.0, WAITS[0]]  # 分の頭の待ちと 1 回目の取り直しの前の待ちだけ
+    records = logs(capsys)
+    assert len(retry_logs(records)) == 1
+    assert records[-1]["detail"] == "page 1: ReadTimeout"
+    assert records[-1]["jpx_retry"] == {
+        "page": 1,
+        "first": str(HTTP_502),
+        "retries": 1,
+        "result": "skipped_deadline",
+    }
+
+
+def test_retry_spans_15_seconds(capsys):
+    """1 回目が elapsed 6.5 秒の即時の 502 で、以降も即時の 502 なら、最後の取り直しは 15 秒以上後に始まり、
+    jpx_unavailable は予約を残した時点で出る"""
+    fake = Fake(pages={1: [HTTP_502], 2: PAGE2}, arrival=0.0, fetch_at_second=6.5)
+    original = fake.fetch_page
+    starts = []
+
+    def fetch(page, timeout):
+        starts.append(fake.monotonic())
+        return original(page, timeout)
+
+    fake.fetch_page = fetch
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    assert len(starts) == N + 1
+    assert starts[0] == pytest.approx(6.5)
+    assert starts[-1] >= 6.5 + 15
+    record = logs(capsys)[-1]
+    assert record["event"] == "jpx_unavailable"
+    assert record["elapsed_ms"] <= (settings.REQUEST_DEADLINE_SECONDS - settings.JPX_RETRY_RESERVE_SECONDS) * 1000
+    assert record["jpx_retry"]["retries"] == N
+
+
 def test_deadline_exceeded_during_retry_is_error(capsys):
-    """取り直しが返らなければ従来どおり deadline_exceeded（stage は取り直し）"""
-    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2})
+    """2 回目の取り直しが返らなければ従来どおり deadline_exceeded（stage は取り直し、回数は加算済み）"""
+    errors = transients(1, 2)
+    fake = Fake(pages={1: [*errors, PAGE1], 2: PAGE2})
     original = fake.fetch_page
     calls = []
 
     def fetch(page, timeout):
         calls.append(page)
-        if len(calls) == 2:
+        if len(calls) == 3:
             raise app_module.DeadlineExceeded("jpx_page1_retry")
         return original(page, timeout)
 
@@ -1052,7 +1171,8 @@ def test_deadline_exceeded_during_retry_is_error(capsys):
     result = handle(IN_HOURS, fake.deps())
     assert (result.status, result.outcome) == (500, "deadline_exceeded")
     last = logs(capsys)[-1]
-    assert (last["stage"], last["jpx_retry"]["result"]) == ("jpx_page1_retry", "failed")
+    assert (last["severity"], last["event"], last["stage"]) == ("ERROR", "deadline_exceeded", "jpx_page1_retry")
+    assert (last["jpx_retry"]["result"], last["jpx_retry"]["retries"]) == ("failed", 2)
 
 
 # --- 本文の凍結（#88） ---

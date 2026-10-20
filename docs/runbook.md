@@ -913,15 +913,15 @@ curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" -G \
 #11 の並行稼働の調査（2026-10-16）で見つかった 2 つの問題への対策。設定は `apps/ingest` の `settings.py`（`JPX_RETRY_*`・`BODY_FROZEN_REPEATS`）。
 
 - **接続を使い回さない**: JPX への要求ごとに接続を張り直す（`io_jpx.fetch_page`。旧系の `requests.get` と同じ取り方）。2026-10-14 18:52〜19:27 JST の 36 分間、新系はヘッダの更新時刻だけ進み本文が 18:50〜18:51 の版のまま止まったページを受け続けた（旧系は同じ時間に止まった版と新しい版を交互に受けた）。インスタンスの中で使い回していた keep-alive の接続が、止まった返す元に張り付いた疑い（証明はできていない）
-- **取り直し**: HTTP 5xx・接続エラー・タイムアウトのときだけ、1 リクエストで 1 回まで（1 限月・2 限月の合計）、3 秒待ってから取り直す。4xx・空ページは取り直さない（次の分に任せる）。期限 45 秒の残りから待ちと 15 秒（取り直しの後の GCS・BigQuery の分）を引いて 5 秒以上あるときだけ取り直し、取り直しのタイムアウトはその秒数で頭打ち（8 秒目の即時の 502 は取り直し、15 秒の読み取りタイムアウトの後は取り直さない）。JPX は毎日 04:00 JST 前後に 502 を返す傾向があり（2026-10-13〜10-15 に 1 回ずつ）、取り直しが無いとその分が欠けた
+- **取り直し（#130 で回数を増やした）**: HTTP 5xx・接続エラー・タイムアウトのときだけ、1 リクエストで最大 3 回（1 限月・2 限月の合計。`JPX_RETRY_WAITS_SECONDS` の個数）、回ごとに伸ばした待ち（3 → 5 → 8 秒。リクエスト全体の通し番号で選ぶので、1 限月で 1 回取り直した後の 2 限月の取り直しは 5 秒から）の後に取り直す。4xx・空ページは取り直さない（次の分に任せる。取り直しの結果が 4xx でもそこで止める）。取り直しの前ごとに、期限 45 秒の残りから今回の待ちと 15 秒（取り直しの後の GCS・BigQuery の分）を引いて 5 秒以上あるときだけ取り直し、取り直しのタイムアウトはその秒数で頭打ち。足りなければ待たずに止める（8 秒目の即時の 502 は 11・16・24 秒目頃に取り直し、最後の取り直しは 1 回目の失敗から 15 秒以上後。15 秒の読み取りタイムアウトの後は 1 回目でも取り直しでも取り直さない）。JPX は毎晩 04:00・04:20 JST の分に 502 を返す傾向があり（2026-10-13〜10-15 に 1 回ずつ）、取り直しが無いとその分が欠けた。#88 の 1 回・3 秒の取り直しは、10-17・10-20 の 3 件とも 1 回目（分の 8 秒頃）も取り直し（11 秒頃）も即時の 502 で越えられず、次の分は取れていた（#130）
 - **本文の凍結の検知**: 取引時間中（ページの更新時刻が立会の [開始, 終了)。寄り前・引け後・余裕の時間帯は数えない）に、option の本文（約定・気配・建玉の列。iv・ギリシャ指標は凍結中も変わるので入れない）が直前のスナップショットと同じことが 3 回続いたら、毎分 WARNING `body_frozen`。データはそのまま書く。判定はインスタンスのメモリなので、インスタンスが変わると数え直す。翌朝の品質チェックの `body_frozen` が必ず数える（「日次の品質チェックと新旧の突き合わせ（#40）」）。2026-10-13〜10-15 の取引時間中に本文が直前と同じだったのは、凍結を除くと静かな時間の 1 回（1 分）だけ
 
 ログ（`jsonPayload.event`）:
 
 | event | severity | 意味 |
 |---|---|---|
-| `jpx_retry` | INFO | 取り直す前（`page`・`detail` は 1 回目の失敗・`retry_wait_ms`） |
-| （各ログの項目）`jpx_retry` | — | 取り直した（か期限で取り直さなかった）リクエストの以降のログに `{page, first, result}`。`result` は `ok`（取り直しで取れた）・`failed`（2 回目も失敗。`jpx_unavailable` の `detail` は 2 回目の失敗）・`skipped_deadline`（期限に余裕が無く取り直さなかった） |
+| `jpx_retry` | INFO | 取り直す前ごと（`page`・`attempt` = そのリクエストで何回目の取り直しか 1〜3・`detail` は直前の失敗・`retry_wait_ms` = 今回の待ち 3000 / 5000 / 8000） |
+| （各ログの項目）`jpx_retry` | — | 取り直した（か取り直しを諦めた）リクエストの以降のログに `{page, first, retries, result}`。`page` は最後に取り直した（か諦めた）ページ、`first` はそのページの最初の失敗、`retries` はリクエスト全体の取り直しの回数（0〜3）。`result` は `ok`（取り直しで取れた）・`failed`（上限の回数まで失敗した、上限に達していて取り直さなかった、または取り直しの結果が 4xx。`jpx_unavailable` の `detail` は最後の失敗）・`skipped_deadline`（期限に余裕が無く、その回は待たずに止めた） |
 | `body_frozen` | WARNING | 取引時間中に本文が直前と同じことが 3 回以上続いている（`body_repeats`・`body_since` = 本文が最後に変わったスナップショット・`snapshot_at`）。M2 では通知しない |
 
 `body_frozen` を受けたら（ログか品質チェックの違反）: その時間の生 HTML（`source_object`）を 2〜3 分おきに開き、ヘッダの更新時刻・先物・option の約定時刻を見る。本文が止まっていれば JPX 側（返す元の一部が止まっている）で、取り込みの誤りではない。データは止まった版のまま入っていて直せない（JPX のページは今の値だけ）。時刻と件数を #11 に記録する。接続を張り直しているのに再発したら、凍結のときに取り直す（接続を変えて取り直す）対策を Issue にする。
@@ -930,7 +930,10 @@ curl -sf -H "Authorization: Bearer $(gcloud auth print-access-token)" -G \
 
 ```sh
 gcloud logging read "$LF AND jsonPayload.jpx_retry.result:*" --project $P --format=json \
-  | jq -c '.[].jsonPayload | {event, schedule_time, snapshot_at, r: .jpx_retry}'   # 04:00 JST 前後の 502 は result "ok" と ingested
+  | jq -c '.[].jsonPayload | {event, schedule_time, snapshot_at, r: .jpx_retry}'   # 04:00・04:20 JST の 502 は result "ok" と ingested（r.retries が何回目で取れたか）
+# 取り直しの回数の分布（#130。attempt 1〜3 の件数。3 が多ければ 502 が長く続いている。#11 に件数で記録する）
+gcloud logging read "$LF AND jsonPayload.event=\"jpx_retry\"" --project $P --format=json \
+  | jq '[.[].jsonPayload.attempt] | group_by(.) | map({attempt: .[0], n: length})'
 gcloud logging read "$LF AND jsonPayload.event=\"body_frozen\"" --project $P --format='value(jsonPayload.snapshot_at,jsonPayload.body_repeats)' | wc -l   # 0
 # JPX の取得時間（1 限月 + 存在確認 + 2 限月）の中央値。#88 の前後の取引時間中の同じ時間帯で比べ、#11 に記録する
 gcloud logging read "$LF AND jsonPayload.event=\"ingested\"" --project $P --format=json \
@@ -1068,7 +1071,7 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 - M2 から `recovery_failed`（毎時の回収の一覧・クエリの失敗）を除くのは、一時的な失敗で毎時単発に出て次の 0 分で回復するため。回収だけが続けて失敗しても、取り込み自体が成功していれば取りこぼしが残らないので通知は来ない。取りこぼしが実際に残っているか、照合のクエリも失敗したときに、07:00 の照合が `raw_unrecovered` か `reconcile_failed`（どちらも ERROR）を出して通知される
 - gunicorn の起動・終了の行は stderr のテキストで severity が付かない（DEFAULT）ので M2 に当たらない（2026-10-13 のデプロイ 3 回で確認）。デプロイ直後の IAM 伝播待ちの 403 はリクエストログが WARNING、Scheduler 側のログ（`cloud_scheduler_job`）が ERROR だが、M2 の対象外（続けば M1 が鳴る）
 - 定期クエリ（BigQuery Data Transfer Service、#40）の失敗は `resource.type="bigquery_dts_config"` で入れている（プロジェクトの DTS は「日次の品質チェックと新旧の突き合わせ（#40）」の 4 本だけ。DTS を足すと同じく通知される）
-- `jpx_unavailable`（WARNING。空ページ・接続断）は単発では通知しない（HTTP 5xx・接続エラー・タイムアウトは同じ分の中で 1 回取り直した後。#88、「JPX の接続・取り直し・本文の凍結（#88）」。旧系の 2026-09-15〜10-12 のログで、空ページは 04:00 / 04:20 台を中心に 1 日 1〜2 回、すべて 1 分だけ）。取引時間中に続いたときは ERROR `jpx_unavailable_stale`（#42）で M2 に乗る。判定は `stale` と同じしきい値（日中 30 分 / 夜間 40 分）で、`jpx_unavailable` の分に生 HTML のバケットを直近のしきい値分だけ一覧し、最後に保存できたスナップショットがそれより古ければ出す。JPX の改版で更新時刻・行の要素が無くなった場合（空ページと区別できない）や、JPX からの拒否・障害の継続を、最大 30〜40 分遅れで拾う。このとき生 HTML は保存されないので、ページは通知を受けてから直接見る
+- `jpx_unavailable`（WARNING。空ページ・接続断）は単発では通知しない（HTTP 5xx・接続エラー・タイムアウトは同じ分の中で最大 3 回取り直した後。#88・#130、「JPX の接続・取り直し・本文の凍結（#88）」。旧系の 2026-09-15〜10-12 のログで、空ページは 04:00 / 04:20 台を中心に 1 日 1〜2 回、すべて 1 分だけ）。取引時間中に続いたときは ERROR `jpx_unavailable_stale`（#42）で M2 に乗る。判定は `stale` と同じしきい値（日中 30 分 / 夜間 40 分）で、`jpx_unavailable` の分に生 HTML のバケットを直近のしきい値分だけ一覧し、最後に保存できたスナップショットがそれより古ければ出す。JPX の改版で更新時刻・行の要素が無くなった場合（空ページと区別できない）や、JPX からの拒否・障害の継続を、最大 30〜40 分遅れで拾う。このとき生 HTML は保存されないので、ページは通知を受けてから直接見る
 
 料金（2027-09-01 以降。公式の価格ページで 2026-10-13 に確認）: メトリクス参照 1 件 $0.35 / 月。ログ一致の条件も 1 件と数え、点の料金は無い。M1 の点の料金は系列 1 本分（月 $0.1 未満の見込み）。並行稼働中は旧系 3 件 + 新系 2 件の 5 件で月 約 $1.9（約 290 円、税抜き。旧系の点の料金を含む）、#14 で旧系を消すと 2 件で月 約 $0.75。アラートの本数は一時的に 4 本（target.md 3.4 の「1〜2 本」は #14 の後）。
 

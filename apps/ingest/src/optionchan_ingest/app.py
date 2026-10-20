@@ -6,7 +6,8 @@
    鮮度切れなら ERROR stale。生 HTML が既にあれば skipped_no_update。
    ページが取れない・空なら WARNING jpx_unavailable（次の分に任せる）。最後に保存できた生 HTML が
    鮮度のしきい値より古ければ（jpx_unavailable が続いている）ERROR jpx_unavailable_stale も出す（#42）。
-   HTTP 5xx・接続エラー・タイムアウトは、期限に余裕があれば 1 リクエストで 1 回だけ取り直す（#88、_fetch_jpx）。
+   HTTP 5xx・接続エラー・タイムアウトは、期限に余裕があれば 1 リクエストで最大 3 回、待ちを伸ばして取り直す
+   （#88・#130、_fetch_jpx）。
    JPX への接続は要求ごとに張り直す（#88、io_jpx.fetch_page）
 3. 2 限月ページを取得し、2 ページを封筒にして ifGenerationMatch=0 で作成（412 なら skipped_locked）
 4. 行を組み立てて構造を検査（違反は parse_failed。生 HTML は残し ingest_runs は書かない）。
@@ -165,46 +166,58 @@ def _unavailable_stale(now: datetime, session: Session, deps: Deps, deadline: De
 
 
 class _RetryBudget:
-    """1 リクエストの JPX の取り直し（#88）。1 回まで（1 限月・2 限月の合計）"""
+    """1 リクエストの JPX の取り直し（#88・#130）。len(JPX_RETRY_WAITS_SECONDS) 回まで（1 限月・2 限月の合計）"""
 
     def __init__(self):
-        self.used = False
+        self.count = 0  # このリクエストで行った取り直しの回数
 
 
 def _fetch_jpx(deadline: Deadline, deps: Deps, page: int, budget: _RetryBudget, common: dict) -> FetchedPage:
-    """JPX のページを取る。一時的な失敗（JpxTransient）は、まだ取り直していなくて期限に余裕があれば、
-    JPX_RETRY_WAIT_SECONDS 待ってから 1 回だけ取り直す（settings の JPX_RETRY_* の説明）。
+    """JPX のページを取る。一時的な失敗（JpxTransient）は、取り直しの回数が残っていて期限に余裕があるあいだ、
+    回ごとに伸ばした待ち（JPX_RETRY_WAITS_SECONDS[回数]）の後に取り直す（settings の JPX_RETRY_* の説明）。
 
-    取り直したら common["jpx_retry"] = {page, first, result} を入れ、以降のログに載せる（result は ok / failed。
-    期限で取り直さなかったら skipped_deadline）。失敗は JpxUnavailable（2 回目の失敗）、期限は DeadlineExceeded
+    取り直そうとしたら common["jpx_retry"] = {page, first, retries, result} を入れ、以降のログに載せる
+    （retries はリクエスト全体の取り直しの回数。result は ok / failed。期限で止めたら skipped_deadline）。
+    失敗は JpxUnavailable（最後の失敗。4xx はそのまま上げる）、期限は DeadlineExceeded
     """
+    waits = settings.JPX_RETRY_WAITS_SECONDS
     stage = f"jpx_page{page}"
     try:
         return bounded(deadline, stage, settings.JPX_TIMEOUT_SECONDS, deps.fetch_page, page)
     except JpxTransient as e:
-        if budget.used:
-            raise
-        first = str(e)
-    allowed = deadline.remaining() - settings.JPX_RETRY_WAIT_SECONDS - settings.JPX_RETRY_RESERVE_SECONDS
-    if allowed < settings.JPX_RETRY_MIN_TIMEOUT_SECONDS:
-        common["jpx_retry"] = {"page": page, "first": first, "result": "skipped_deadline"}
-        raise JpxUnavailable(first)
-    budget.used = True
-    log(
-        "INFO",
-        "jpx_retry",
-        page=page,
-        detail=first,
-        retry_wait_ms=int(settings.JPX_RETRY_WAIT_SECONDS * 1000),
-        elapsed_ms=deadline.elapsed_ms(),
-        **common,
-    )
-    deps.sleep(settings.JPX_RETRY_WAIT_SECONDS)
-    retry = {"page": page, "first": first, "result": "failed"}
-    common["jpx_retry"] = retry
-    fetched = bounded(deadline, f"{stage}_retry", min(settings.JPX_TIMEOUT_SECONDS, allowed), deps.fetch_page, page)
-    retry["result"] = "ok"
-    return fetched
+        first = last = str(e)
+    while True:
+        if budget.count >= len(waits):
+            common["jpx_retry"] = {"page": page, "first": first, "retries": budget.count, "result": "failed"}
+            raise JpxUnavailable(last)
+        wait = waits[budget.count]
+        allowed = deadline.remaining() - wait - settings.JPX_RETRY_RESERVE_SECONDS
+        if allowed < settings.JPX_RETRY_MIN_TIMEOUT_SECONDS:
+            common["jpx_retry"] = {"page": page, "first": first, "retries": budget.count, "result": "skipped_deadline"}
+            raise JpxUnavailable(last)
+        budget.count += 1
+        log(
+            "INFO",
+            "jpx_retry",
+            page=page,
+            attempt=budget.count,
+            detail=last,
+            retry_wait_ms=int(wait * 1000),
+            elapsed_ms=deadline.elapsed_ms(),
+            **common,
+        )
+        deps.sleep(wait)
+        retry = {"page": page, "first": first, "retries": budget.count, "result": "failed"}
+        common["jpx_retry"] = retry
+        try:
+            fetched = bounded(
+                deadline, f"{stage}_retry", min(settings.JPX_TIMEOUT_SECONDS, allowed), deps.fetch_page, page
+            )
+        except JpxTransient as e:
+            last = str(e)
+            continue
+        retry["result"] = "ok"
+        return fetched
 
 
 def _watch_body(snapshot_at: datetime, options: list[dict], deps: Deps, common: dict) -> None:
@@ -276,7 +289,7 @@ def _handle(now: datetime, deps: Deps, deadline: Deadline, common: dict) -> Resu
         deps.sleep(wait)
     common["wait_ms"] = int(wait * 1000)
 
-    # 1 限月ページ（一時的な失敗は 1 リクエストで 1 回だけ取り直す。#88）
+    # 1 限月ページ（一時的な失敗は 1 限月・2 限月の合計で JPX_RETRY_WAITS_SECONDS の回数まで取り直す。#88・#130）
     retry_budget = _RetryBudget()
     t_jpx = deps.monotonic()
     try:
