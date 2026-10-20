@@ -34,7 +34,7 @@ class JpxUnavailable(Exception):
 
 
 class JpxTransient(JpxUnavailable):
-    """一時的な取得の失敗（HTTP 5xx・接続エラー・タイムアウト）。同じ分の中で 1 回だけ取り直す（#88、app._fetch_jpx）"""
+    """一時的な取得の失敗（HTTP 5xx・接続エラー・タイムアウト）。同じ分の中で上限まで取り直す（#130、app._fetch_jpx）"""
 
 
 class ParseError(Exception):

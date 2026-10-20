@@ -1,7 +1,7 @@
 """JPX のページの取得（requests）。
 
 接続は要求ごとに張り直す（#88。インスタンスの中で keep-alive の接続を使い回さない。旧系の requests.get と同じ取り方）。
-取り直しは呼び出し側（app._fetch_jpx）が 1 回だけ行う。ここは 1 回の要求の結果を返すだけ
+取り直しは呼び出し側（app._fetch_jpx）が回数の上限まで行う（#130）。ここは 1 回の要求の結果を返すだけ
 """
 
 from datetime import UTC, datetime

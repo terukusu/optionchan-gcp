@@ -52,13 +52,19 @@ CALL_GRACE_SECONDS = 1
 # 接続は要求ごとに張り直す（#88。io_jpx.fetch_page）
 JPX_TIMEOUT_SECONDS = 15
 JPX_CONNECT_TIMEOUT_SECONDS = 5
-# JPX の取り直し（#88）: HTTP 5xx・接続エラー・タイムアウト（io_jpx の JpxTransient）のときだけ、1 リクエストで 1 回まで
-# （1 限月・2 限月の合計）、JPX_RETRY_WAIT_SECONDS 秒待ってから取り直す。4xx・空ページは取り直さない（次の分に任せる）。
-# 期限: 予算 = 残り − 待ち − JPX_RETRY_RESERVE_SECONDS（取り直しの後の GCS・BigQuery の分。実測 p50 3.8 秒）が
-# JPX_RETRY_MIN_TIMEOUT_SECONDS 以上のときだけ取り直し、取り直しのタイムアウトは min(JPX_TIMEOUT_SECONDS, 予算)。
-# 8 秒目の即時の 502 は取り直し、15 秒の読み取りタイムアウトの後（23 秒目）は取り直さない。
-# 待ち 3 秒: 毎日 04:00 JST 前後の 502 は 8 秒目に返り、旧系は同じ分の 2〜9 秒目に取れていた（#88 の調査）
-JPX_RETRY_WAIT_SECONDS = 3
+# JPX の取り直し（#88・#130）: HTTP 5xx・接続エラー・タイムアウト（io_jpx の JpxTransient）のときだけ、1 リクエストで
+# 最大 len(JPX_RETRY_WAITS_SECONDS) 回（1 限月・2 限月の合計）、回ごとに伸ばした待ち（3 → 5 → 8 秒。リクエスト全体の
+# 通し番号で選ぶ）の後に取り直す。4xx・空ページは取り直さない（次の分に任せる）。
+# 期限: 取り直しの前ごとに、予算 = 残り − 今回の待ち − JPX_RETRY_RESERVE_SECONDS（取り直しの後の GCS・BigQuery の分。
+# JPX の後の処理は実測 p50 2.0 / p99 2.7 / 最大 3.7 秒。10-17 以降の ingested。#130）が JPX_RETRY_MIN_TIMEOUT_SECONDS
+# 以上のときだけ取り直し、取り直しのタイムアウトは min(JPX_TIMEOUT_SECONDS, 予算)。足りなければ待たずに止める。
+# 8 秒目の即時の 502 は 11・16・24 秒目頃に取り直し（最後の取り直しは 1 回目の失敗から 15 秒以上後）、
+# 15 秒の読み取りタイムアウトの後（1 回目でも取り直しでも）は予算が無いので取り直さない。
+# 待ち: 毎晩 04:00・04:20 JST の 502 は分の 8 秒目に即時に返り、3 秒後の取り直しも 502、次の分は取れていた。
+# 旧系の失敗は同じ分の 2〜11 秒目に散らばる（#88・#130 の調査）。
+# FETCH_AT_SECOND + 待ちの合計 + JPX_RETRY_MIN_TIMEOUT_SECONDS + JPX_RETRY_RESERVE_SECONDS ≤ REQUEST_DEADLINE_SECONDS
+# に保つ（8 + 16 + 5 + 15 = 44。即時の 502 が続けば上限の回数まで取り直せる。test_app で検査）
+JPX_RETRY_WAITS_SECONDS = (3, 5, 8)
 JPX_RETRY_RESERVE_SECONDS = 15
 JPX_RETRY_MIN_TIMEOUT_SECONDS = 5
 # GCS: timeout（10 秒、残り時間で頭打ち）を (接続, 読み取り) の組で渡す。
