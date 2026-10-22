@@ -11,6 +11,7 @@
  "sUrlPrice": "ENC:price",
  "sUrlEvent": "ENC:event",
  "sUrlEventWebSocket": "ENC:event_ws",
+ "sKinsyouhouMidokuFlg": "0",
  "sUpdateInformWebDocument": "20310101",
  "sUpdateInformAPISpecFunction": "20310101"
 }

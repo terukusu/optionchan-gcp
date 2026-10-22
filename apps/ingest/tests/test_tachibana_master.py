@@ -21,14 +21,18 @@ def by_code(items):
     return {i["sIssueCode"]: i for i in items}
 
 
+def by_name(items):
+    return {i["sIssueName"]: i for i in items}
+
+
 def test_select_options_nearest_two_months_of_target_product():
     options = tm.select_options(option_master(), TODAY)
     source = by_code(option_master())
     assert {o.last_trading_day for o in options} == {date(2031, 3, 13), date(2031, 4, 10)}
     for o in options:
         item = source[o.code]
-        assert item["sSakOpSyouhin"] in tm.OPTION_PRODUCTS
-        assert item["sGensisanCode"] == "101"
+        assert item["sSakOpSyouhin"] == "18"
+        assert item["sGensisanCode"].strip() == ""  # オプションの原資産コードは空白（資料の例）でも取る
         assert isinstance(o.target_price, int)
         assert o.type in (CALL, PUT)
         assert o.type == (CALL if item["sPutCall"] == "7" else PUT)
@@ -45,15 +49,21 @@ def test_select_options_nearest_two_months_of_target_product():
     assert all(o.last_trading_day == date(2031, 3, 13) for o in first)
 
 
-def test_select_options_excludes_other_products_underlyings_and_past_months():
+def test_select_options_excludes_other_products_underlyings_weeklies_minis_and_past_months():
     codes = {o.code for o in tm.select_options(option_master(), TODAY)}
+    excluded = {
+        "架空オプション別商品",  # 商品区分 05
+        "架空オプション別原資産",  # 原資産コード 999
+        "架空オプション週次",  # 最終売買日が第 2 金曜日の前の週に無い
+        "架空オプションミニC1200",  # 名前に「ミニ」
+        "架空オプション過去",  # 最終売買日が today より前
+    }
+    names = {i["sIssueName"] for i in option_master()}
+    assert excluded <= names
     for item in option_master():
-        if (
-            item["sSakOpSyouhin"] not in tm.OPTION_PRODUCTS
-            or item["sGensisanCode"] != "101"
-            or item["sLastBaibaiDay"] in ("20310213", "20310508")
-        ):
+        if item["sIssueName"] in excluded:
             assert item["sIssueCode"] not in codes
+    assert tm.OPTION_PRODUCTS == frozenset({"18"})
 
 
 def test_last_trading_day_today_is_kept():
@@ -78,12 +88,87 @@ def test_months_argument():
         tm.select_options(option_master(), TODAY, strike_range=(1300, 1100))
 
 
-def test_select_future_skips_suspended_nearest():
-    future = tm.select_future(future_master(), TODAY)
-    item = by_code(future_master())[future.code]
-    assert item["sIssueName"] == "架空先物2"
-    assert future.last_trading_day == date(2031, 4, 10)
-    assert future.contract_month == date(2031, 4, 1)
+@pytest.mark.parametrize(
+    ("underlying", "selected"),
+    [(" ", True), ("", True), ("101", True), ("999", False)],
+)
+def test_option_underlying_blank_or_nikkei225_is_kept(underlying, selected):
+    # fixture の原資産が空白の行（別原資産の 999 の行は除く）の原資産コードを置き換える
+    items = [{**i, "sGensisanCode": underlying} for i in option_master() if i["sGensisanCode"].strip() == ""]
+    if selected:
+        options = tm.select_options(items, TODAY)
+        assert len(options) == 2 * 2 * 5
+    else:
+        with pytest.raises(tm.MasterError, match="option months"):
+            tm.select_options(items, TODAY)
+
+
+@pytest.mark.parametrize(
+    ("name", "name_en", "selected"),
+    [
+        ("架空オプションC1200", "TEST OPTION", True),
+        ("架空オプションミニC1200", "TEST OPTION", False),
+        ("架空オプションC1200", "TEST OPTION MINI", False),
+        ("架空オプションC1200", "test option mini", False),
+    ],
+)
+def test_option_name_with_mini_is_excluded(name, name_en, selected):
+    items = option_master()
+    target = next(i for i in items if i["sIssueName"] == "架空オプションC1200" and i["sLastBaibaiDay"] == "20310313")
+    target["sIssueName"], target["sIssueNameEizi"] = name, name_en
+    codes = {o.code for o in tm.select_options(items, TODAY)}
+    assert (target["sIssueCode"] in codes) is selected
+    assert tm.EXCLUDED_NAME_WORDS == ("ミニ", "MINI")
+
+
+@pytest.mark.parametrize(
+    ("day", "monthly"),
+    [
+        # 2031-03 の第 2 金曜日は 14 日。月次の最終売買日（前の営業日）は範囲 [7, 14) に入る
+        (date(2031, 3, 13), True),
+        (date(2031, 3, 7), True),
+        (date(2031, 3, 14), False),  # SQ 日そのもの
+        (date(2031, 3, 6), False),  # 第 1 金曜日の前（週次）
+        (date(2031, 4, 10), True),  # 第 2 金曜日 11 日の前日
+        (date(2031, 5, 8), True),  # 第 2 金曜日 9 日の前日
+        (date(2031, 5, 7), True),  # 第 2 金曜日が休日のときの水曜日
+        (date(2031, 5, 15), False),  # 第 3 金曜日の前（週次）
+        (date(2031, 5, 1), False),  # 第 1 金曜日の前（週次）
+    ],
+)
+def test_is_monthly_last_trading_day(day, monthly):
+    assert tm.is_monthly_last_trading_day(day) is monthly
+
+
+@pytest.mark.parametrize(
+    ("nearest_state", "expected_name", "expected_day"),
+    [
+        ("9", "架空先物2", date(2031, 4, 10)),  # 停止中 → 次の限月
+        (" ", "架空先物1", date(2031, 3, 13)),  # 通常
+        ("0", "架空先物1", date(2031, 3, 13)),  # 解除
+        ("", "架空先物2", date(2031, 4, 10)),  # 未知の値は取らない側に倒す
+        ("1", "架空先物2", date(2031, 4, 10)),
+    ],
+)
+def test_select_future_skips_suspended_nearest(nearest_state, expected_name, expected_day):
+    items = future_master()
+    nearest = by_name(items)["架空先物1"]
+    assert nearest["sBaibaiTeisiC"] == "9"  # fixture の一番近い限月は停止中
+    nearest["sBaibaiTeisiC"] = nearest_state
+    future = tm.select_future(items, TODAY)
+    assert by_code(items)[future.code]["sIssueName"] == expected_name
+    assert future.last_trading_day == expected_day
+    assert future.contract_month == date(expected_day.year, expected_day.month, 1)
+    assert tm.NOT_SUSPENDED == frozenset({" ", "0"})
+
+
+def test_select_future_excludes_mini_and_other_underlying():
+    codes = {i["sIssueName"]: i["sIssueCode"] for i in future_master()}
+    future = tm.select_future(future_master(), date(2031, 3, 4))  # 週次の日付でも 19・999 の行は取らない
+    assert future.code not in (codes["架空先物ミニ"], codes["架空先物（別原資産）"])
+    # 先物の原資産が 101 でなく空白でも通す（別原資産の 999 の行はそのまま）
+    items = [{**i, "sGensisanCode": " "} if i["sGensisanCode"] == "101" else i for i in future_master()]
+    assert tm.select_future(items, TODAY).code == future.code
 
 
 @pytest.mark.parametrize(

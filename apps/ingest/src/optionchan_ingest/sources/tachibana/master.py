@@ -2,34 +2,42 @@
 
 - オプション（CLMStkGetIssueMstOp）: 日経225オプション（月次）のうち、取引最終日が基準日以降の近い 2 限月の
   全行使価格のコール・プット（行使価格の範囲で絞れる）
-- 先物（CLMStkGetIssueMstSak）: 日経225先物の売買停止でない最も近い限月
+- 先物（CLMStkGetIssueMstSak）: 日経225先物（ラージ）の売買停止でない最も近い限月
 - 指数: 日経平均（101）
 
 限月は取引最終日（sLastBaibaiDay）ごとにまとめる（snapshot.validate_rows と同じく取引最終日を限月のキーにする）。
 基準日 today は取引日（夜間は次の取引日。calendar.Session.trade_date と同じ考え）で、呼ぶ側が渡す。
+
+資料で確かめたこと: 商品区分（sSakOpSyouhin）は 18 = 日経225、19 = 日経225ミニ（先物マスタとオプションマスタで同じ
+一覧）。売買停止（sBaibaiTeisiC）は " " 通常・"0" 解除・"9" 停止中。先物の例の原資産コード（sGensisanCode）は 101。
+推定（口座で確かめる）: 日経225オプションの商品区分は 18（資料の例では TOPIX のオプションが TOPIX 先物と同じ 05
+なので）。オプションの原資産コードは資料の例では空白なので、空白か 101 なら通し、日経225 かどうかは商品区分で判断する
+（18 の推定が違えば該当なしの MasterError になり、止まる側に倒れる）。週次のオプションは最終売買日が第 2 金曜日の前の
+1 週間に無いことで、ミニのオプションは銘柄名で外す。
 """
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 from ...parser import CALL, PUT
 
-# 原資産コード（sGensisanCode）の日経平均（資料の例）
+# 原資産コード（sGensisanCode）の日経平均（資料の先物の例）
 UNDERLYING_NIKKEI225 = "101"
 # CLMStkGetIssueMstIndex の日経平均の銘柄コード（資料の例）
 SPOT_CODE = "101"
-# 日経225オプション（月次）の商品区分（sSakOpSyouhin）。未確認。
-# 実在の値と取り違えないよう、口座で確かめるまでは実際のマスタに一致しない仮の値にしてある（実のマスタでは
-# 該当なしの MasterError になり、黙って別の商品を選ばない）。週次・ミニはここに入れないことで除く（見分け方も未確認）
-OPTION_PRODUCTS = frozenset({"UNCONFIRMED-NK225-OP"})
-# 日経225先物の商品区分（資料の例 18 = 日経225）。ラージかミニかは未確認（JPX の future_price はラージと推定）
+# 日経225オプションの商品区分（sSakOpSyouhin）。18 と推定（口座で確かめる）。ミニ（19）はここに入れないことで除く
+OPTION_PRODUCTS = frozenset({"18"})
+# 日経225先物（ラージ）の商品区分（資料: 18 = 日経225、19 = 日経225ミニ）
 FUTURE_PRODUCTS = frozenset({"18"})
-# sBaibaiTeisiC の「売買停止でない」値。未確認
-NOT_SUSPENDED = frozenset({"0"})
+# sBaibaiTeisiC の「売買停止でない」値（資料: " " 通常、"0" 解除、"9" 停止中）。生の値で比べる（strip しない。
+# "" や未知の値は取らない側に倒す）
+NOT_SUSPENDED = frozenset({" ", "0"})
 # sPutCall（資料の記載: 5 = プット、7 = コール）
 PUT_CALL = {"7": CALL, "5": PUT}
+# ミニのオプションを銘柄名（sIssueName・sIssueNameEizi）で外す語（推定。英字は大文字に揃えて比べる）
+EXCLUDED_NAME_WORDS = ("ミニ", "MINI")
 # 日付の未設定（sKenrikousiLastDay などの 00000000）
 _UNSET_DATES = frozenset({"", "00000000"})
 
@@ -99,6 +107,17 @@ def parse_strike(text: str) -> int:
     return int(value)
 
 
+def is_monthly_last_trading_day(d: date) -> bool:
+    """d が月次（SQ が第 2 金曜日）の最終売買日になりうる日か。
+
+    第 2 金曜日を F として F - 7 日 <= d < F。月次の最終売買日は SQ の前の営業日（休日が続いても F - 7 より前には
+    ならない）。週次は第 1 金曜日の前（F - 8 以前）か第 3 金曜日以降の前（F + 6 前後）なので外れる。休日の表は要らない
+    """
+    first = date(d.year, d.month, 1)
+    second_friday = first + timedelta(days=(4 - first.weekday()) % 7 + 7)
+    return second_friday - timedelta(days=7) <= d < second_friday
+
+
 def _require(item: Mapping[str, str], name: str) -> str:
     value = item.get(name)
     if not isinstance(value, str) or not value:
@@ -113,6 +132,20 @@ def _last_trading_day(item: Mapping[str, str]) -> date:
     return value
 
 
+def _is_nikkei225_underlying(item: Mapping[str, str]) -> bool:
+    """原資産コードが空白（オプションの例）か 101（先物の例）なら通す。それ以外（別の原資産）は外す"""
+    code = item.get("sGensisanCode")
+    if not isinstance(code, str):
+        return False
+    code = code.strip()
+    return code == "" or code == UNDERLYING_NIKKEI225
+
+
+def _has_excluded_name(item: Mapping[str, str]) -> bool:
+    names = (item.get("sIssueName"), item.get("sIssueNameEizi"))
+    return any(isinstance(n, str) and any(w in n.upper() for w in EXCLUDED_NAME_WORDS) for n in names)
+
+
 def select_options(
     master: Iterable[Mapping[str, str]],
     today: date,
@@ -120,10 +153,11 @@ def select_options(
     months: int = 2,
     strike_range: tuple[int, int] | None = None,
 ) -> tuple[OptionIssue, ...]:
-    """日経225オプション（OPTION_PRODUCTS・原資産 101・sPutCall が 5/7）の、取引最終日が today 以降の近い months 限月。
+    """日経225オプション（OPTION_PRODUCTS・原資産が空白か 101・sPutCall が 5/7・月次の最終売買日・名前がミニでない）の、
+    取引最終日が today 以降の近い months 限月。
 
     strike_range=(lo, hi) は両端を含む。限月が months 個に満たない・範囲で限月の銘柄が無くなる・
-    同じ (type, target_price, last_trading_day) が 2 つあるときは MasterError
+    同じ (type, target_price, last_trading_day) が 2 つあるとき（ミニがすり抜けたときなど）は MasterError
     """
     if months < 1:
         raise ValueError("months must be positive")
@@ -131,13 +165,13 @@ def select_options(
         raise ValueError("strike_range must be (low, high)")
     issues = []
     for item in master:
-        if item.get("sSakOpSyouhin") not in OPTION_PRODUCTS or item.get("sGensisanCode") != UNDERLYING_NIKKEI225:
+        if item.get("sSakOpSyouhin") not in OPTION_PRODUCTS or not _is_nikkei225_underlying(item):
             continue
         option_type = PUT_CALL.get(item.get("sPutCall"))
         if option_type is None:
             continue
         last = _last_trading_day(item)
-        if last < today:
+        if last < today or not is_monthly_last_trading_day(last) or _has_excluded_name(item):
             continue
         issues.append(
             OptionIssue(
@@ -166,13 +200,13 @@ def select_options(
 
 
 def select_future(master: Iterable[Mapping[str, str]], today: date) -> FutureIssue:
-    """日経225先物（FUTURE_PRODUCTS・原資産 101・売買停止でない）の、取引最終日が today 以降で最も近い限月。
+    """日経225先物（FUTURE_PRODUCTS・原資産が空白か 101・売買停止でない）の、取引最終日が today 以降で最も近い限月。
 
     無い・最も近い取引最終日の銘柄が 2 つあるときは MasterError
     """
     candidates = []
     for item in master:
-        if item.get("sSakOpSyouhin") not in FUTURE_PRODUCTS or item.get("sGensisanCode") != UNDERLYING_NIKKEI225:
+        if item.get("sSakOpSyouhin") not in FUTURE_PRODUCTS or not _is_nikkei225_underlying(item):
             continue
         if item.get("sBaibaiTeisiC") not in NOT_SUSPENDED:
             continue

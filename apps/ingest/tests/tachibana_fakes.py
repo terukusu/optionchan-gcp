@@ -1,12 +1,11 @@
 """立花の部品のテスト用の偽の依存（HTTP・時計）と合成の値。
 
-値はすべて架空（公開資料の項目名の形だけ）。接続先は example.invalid で、実際の通信はしない。
+値はすべて架空（公開資料の項目名の形だけ。資料の例の値は写さない）。接続先は example.invalid で、実際の通信はしない。
 秘密に見立てた文字列には SECRET- を入れ、外に出ていないことを文字列の検索で確かめる。
 """
 
 import json
 from datetime import UTC, datetime, timedelta
-from urllib.parse import unquote
 
 from conftest import FIXTURES
 
@@ -15,7 +14,6 @@ from optionchan_ingest.sources.tachibana.credentials import TachibanaCredentials
 
 BASE_URL = "https://example.invalid/e_api_v4r10/"
 AUTH_ID = "test-auth-id-SECRET-1a2b"
-PASSWORD = "test-password-SECRET-7a8b"
 PRIVATE_KEY = "-----BEGIN TEST KEY----- SECRET-3c4d"
 URL_KINDS = {
     "sUrlRequest": "request",
@@ -28,7 +26,7 @@ VIRTUAL_URLS = {
     kind: f"{'wss' if kind == 'event_ws' else 'https'}://example.invalid/vurl/SECRET-{kind}-5e6f/"
     for kind in URL_KINDS.values()
 }
-SECRETS = (AUTH_ID, PASSWORD, PRIVATE_KEY, *VIRTUAL_URLS.values(), "SECRET-")
+SECRETS = (AUTH_ID, PRIVATE_KEY, *VIRTUAL_URLS.values(), "SECRET-")
 
 # 偽の時計の始まり（2031-03-03 08:00 JST）
 START = datetime(2031, 3, 2, 23, 0, tzinfo=UTC)
@@ -48,8 +46,8 @@ def fake_decrypt(encrypted: str) -> str:
     return VIRTUAL_URLS[kind]
 
 
-def credentials(password: str | None = None) -> TachibanaCredentials:
-    return TachibanaCredentials(auth_id=AUTH_ID, private_key=PRIVATE_KEY, password=password)
+def credentials() -> TachibanaCredentials:
+    return TachibanaCredentials(auth_id=AUTH_ID, private_key=PRIVATE_KEY)
 
 
 def json_body(obj, encoding: str = "cp932") -> bytes:
@@ -57,7 +55,8 @@ def json_body(obj, encoding: str = "cp932") -> bytes:
 
 
 def ok(obj: dict | None = None, encoding: str = "cp932") -> tc.HttpResponse:
-    return tc.HttpResponse(200, json_body({"p_errno": "0", "sResultCode": "0", **(obj or {})}, encoding))
+    """ログイン・ログアウトの応答（共通項目と sResultCode を持つ）"""
+    return tc.HttpResponse(200, json_body({"p_errno": "0", "p_err": "", "sResultCode": "0", **(obj or {})}, encoding))
 
 
 DEFAULT_MARKET_VALUES = {
@@ -78,15 +77,24 @@ def market_item(code: str, values: dict[str, str] | None = None) -> dict[str, st
     return {"sIssueCode": code, **(DEFAULT_MARKET_VALUES if values is None else values)}
 
 
-def payload_of(url: str) -> dict:
-    """要求の URL の ? の後ろ → 要求の dict"""
-    return json.loads(unquote(url.partition("?")[2]))
+def payload_of(body: bytes, encoding: str = "cp932") -> dict:
+    """要求の本文（JSON）→ 要求の dict"""
+    return json.loads(body.decode(encoding))
 
 
 def market_price_handler(payload: dict) -> tc.HttpResponse:
-    """要求した銘柄を全部返す時価の偽の応答"""
+    """要求した銘柄を全部返す時価の偽の応答（共通項目を返し、sResultCode は無い。資料の例の形）"""
     codes = payload["sTargetIssueCode"].split(",")
-    return ok({"sCLMID": tc.CLMID_MARKET_PRICE, "aCLMMfdsMarketPrice": [market_item(c) for c in codes]})
+    doc = {
+        "p_no": payload["p_no"],
+        "p_sd_date": payload["p_sd_date"],
+        "p_rv_date": payload["p_sd_date"],
+        "p_errno": "0",
+        "p_err": "",
+        "sCLMID": tc.CLMID_MARKET_PRICE,
+        "aCLMMfdsMarketPrice": [market_item(c) for c in codes],
+    }
+    return tc.HttpResponse(200, json_body(doc))
 
 
 class FakeClock:
@@ -109,10 +117,10 @@ class FakeClock:
 
 
 class FakeHttp:
-    """要求の sCLMID ごとに用意した応答を返す偽の HttpGet。
+    """要求の sCLMID ごとに用意した応答を返す偽の HttpPost。
 
-    routes の値は HttpResponse、例外（投げる）、payload → HttpResponse の関数のどれか。呼ばれた (url, timeout) と
-    送った偽の時刻を記録する。cost は 1 要求で進める偽の時刻（秒）
+    routes の値は HttpResponse、例外（投げる）、payload → HttpResponse の関数のどれか。呼ばれた (url, timeout)・
+    本文と送った偽の時刻を記録する。cost は 1 要求で進める偽の時刻（秒）
     """
 
     def __init__(self, clock: FakeClock, routes: dict | None = None, cost: float = 0.0):
@@ -128,14 +136,16 @@ class FakeHttp:
             **(routes or {}),
         }
         self.calls: list[tuple[str, float]] = []
+        self.bodies: list[bytes] = []
         self.sent_at: list[float] = []
         self.returned: list[bytes] = []
 
-    def __call__(self, url: str, timeout: float) -> tc.HttpResponse:
+    def __call__(self, url: str, body: bytes, timeout: float) -> tc.HttpResponse:
         self.calls.append((url, timeout))
+        self.bodies.append(body)
         self.sent_at.append(self.clock.t)
         self.clock.t += self.cost
-        payload = payload_of(url)
+        payload = payload_of(body)
         route = self.routes[payload["sCLMID"]]
         if isinstance(route, BaseException):
             raise route
@@ -144,22 +154,22 @@ class FakeHttp:
         return response
 
     def targets(self) -> list[str]:
-        return [url.partition("?")[0] for url, _ in self.calls]
+        return [url for url, _ in self.calls]
 
     def calls_to(self, target: str) -> list[tuple[str, float]]:
-        return [c for c in self.calls if c[0].partition("?")[0] == target]
+        return [c for c in self.calls if c[0] == target]
 
     def payloads(self) -> list[dict]:
-        return [payload_of(url) for url, _ in self.calls]
+        return [payload_of(body) for body in self.bodies]
 
 
-def make_client(routes: dict | None = None, *, password: str | None = None, cost: float = 0.0, **kwargs):
+def make_client(routes: dict | None = None, *, cost: float = 0.0, **kwargs):
     """偽の HTTP・時計のクライアント → (client, http, clock)"""
     clock = FakeClock()
     http = FakeHttp(clock, routes, cost)
     client = tc.TachibanaClient(
         BASE_URL,
-        credentials(password),
+        credentials(),
         fake_decrypt,
         **{"http": http, "now": clock.now, "monotonic": clock.monotonic, "sleep": clock.sleep, **kwargs},
     )

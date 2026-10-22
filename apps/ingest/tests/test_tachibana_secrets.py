@@ -1,4 +1,4 @@
-"""秘密（認証 ID・パスワード・秘密鍵・復号した仮想 URL）が repr・str・例外・ログ・標準出力に出ないこと（AC 6）。"""
+"""秘密（認証 ID・秘密鍵・復号した仮想 URL）が repr・str・例外・ログ・標準出力に出ないこと（AC 6）。"""
 
 import logging
 import traceback
@@ -12,6 +12,7 @@ from tachibana_fakes import (
     all_text,
     credentials,
     fixture_json,
+    json_body,
     make_client,
     market_price_handler,
     ok,
@@ -53,10 +54,11 @@ def run_scenario(monkeypatch) -> list[BaseException]:
         except tc.TachibanaError as e:
             errors.append(e)
 
-    client, http, _ = make_client(password="test-password-SECRET-7a8b")
+    client, http, _ = make_client()
     session = client.login(timeout=10)
-    # 検索が効くことの確かめ: 要求の URL には秘密が入る（URL は外に出さないもの）
-    assert any(SECRETS[0] in url for url, _ in http.calls)
+    # 検索が効くことの確かめ: 要求の本文には秘密（認証 ID）が入る（本文は外に出さないもの）。URL には入らない
+    assert any(SECRETS[0] in body.decode("cp932") for body in http.bodies)
+    assert all(SECRETS[0] not in url for url, _ in http.calls)
     prices = client.get_market_price(CODES_241, ["pDPP"], timeout=30)
     master = client.get_option_master(timeout=10)
     assert_no_secret(all_text(client, session, prices, master, *prices.raw, master.raw, credentials()))
@@ -66,6 +68,10 @@ def run_scenario(monkeypatch) -> list[BaseException]:
     for _, route, _, _ in ERROR_CASES:
         http.routes[tc.CLMID_MARKET_PRICE] = route
         catch(lambda: client.get_market_price(["900000001"], ["pDPP"], timeout=10))
+    # 停止中・混雑・時間外・ログインエラー（p_errno の表）
+    for code in ("9", "-2", "-62", "-50"):
+        http.routes[tc.CLMID_MARKET_PRICE] = tc.HttpResponse(200, json_body({"p_errno": code, "p_err": "reason"}))
+        catch(lambda: client.get_market_price(["900000001"], ["pDPP"], timeout=10))
     http.routes[tc.CLMID_MARKET_PRICE] = market_price_handler
 
     # 予算切れ
@@ -73,29 +79,32 @@ def run_scenario(monkeypatch) -> list[BaseException]:
     client2.login(timeout=10)
     catch(lambda: client2.get_market_price(CODES_241, ["pDPP"], timeout=0.3))
 
-    # セッション切れ → 未ログイン
-    monkeypatch.setattr(tc, "SESSION_EXPIRED_CODES", frozenset({"99"}))
-    http.routes[tc.CLMID_OPTION_MASTER] = tc.HttpResponse(200, b'{"p_errno": "99"}')
+    # セッション切れ（p_errno 2）→ 未ログイン
+    http.routes[tc.CLMID_OPTION_MASTER] = tc.HttpResponse(200, b'{"p_errno": "2", "p_err": "expired"}')
     catch(lambda: client.get_option_master(timeout=10))
     catch(lambda: client.get_option_master(timeout=10))
 
-    # ログインの失敗（復号の例外の文に秘密鍵を含む・平文の URL・仮想 URL の欠け）
+    # ログインの失敗（拒否・復号の例外の文に秘密鍵を含む・平文の URL・/ で終わらない URL・仮想 URL の欠け・書面の未読）
+    rejected, _, _ = make_client({tc.CLMID_LOGIN: ok({"sResultCode": "10031", "sResultText": "rejected"})})
+    catch(lambda: rejected.login(timeout=10))
     ack = fixture_json("login_ack.json")
-    for bad in ({**ack, "sUrlPrice": "BAD:price"}, {k: v for k, v in ack.items() if k != "sUrlMaster"}):
+    unread = {**ack, "sKinsyouhouMidokuFlg": "1", **dict.fromkeys(tc.VIRTUAL_URL_FIELDS, "")}
+    for bad in ({**ack, "sUrlPrice": "BAD:price"}, {k: v for k, v in ack.items() if k != "sUrlMaster"}, unread):
         failing, _, _ = make_client({tc.CLMID_LOGIN: ok(bad)})
         catch(lambda failing=failing: failing.login(timeout=10))
-    plain, _, _ = make_client()
-    plain._decrypt = lambda enc: VIRTUAL_URLS["price"].replace("https", "http")
-    catch(lambda: plain.login(timeout=10))
+    for url in (VIRTUAL_URLS["price"].replace("https", "http"), VIRTUAL_URLS["price"].rstrip("/")):
+        plain, _, _ = make_client()
+        plain._decrypt = lambda enc, url=url: url
+        catch(lambda plain=plain: plain.login(timeout=10))
 
     # 既定の HTTP（requests の例外の文は URL を含む）
-    def fake_get(self, url, timeout, allow_redirects=True):
+    def fake_post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
         raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
+    monkeypatch.setattr(requests.Session, "post", fake_post)
     real = tc.TachibanaClient(BASE_URL, credentials(), str)
     catch(lambda: real.login(timeout=10))
-    catch(lambda: tc.requests_get(VIRTUAL_URLS["price"] + "?x", 5))
+    catch(lambda: tc.requests_post(VIRTUAL_URLS["price"], b"{}", 5))
 
     client2.logout(timeout=10)
     return errors
@@ -111,7 +120,12 @@ def test_secrets_do_not_leak(monkeypatch, caplog, capsys):
         tc.TachibanaTimeout,
         tc.TachibanaResponseError,
         tc.TachibanaSessionExpired,
+        tc.TachibanaServiceOffline,
+        tc.TachibanaBusy,
+        tc.TachibanaOutsideHours,
+        tc.TachibanaLoginRejected,
         tc.TachibanaAuthError,
+        tc.TachibanaDocumentsUnread,
         tc.TachibanaNotLoggedIn,
     } <= kinds
     for e in errors:
@@ -123,12 +137,12 @@ def test_secrets_do_not_leak(monkeypatch, caplog, capsys):
 
 
 def test_requests_error_message_with_url_is_suppressed(monkeypatch):
-    def fake_get(self, url, timeout, allow_redirects=True):
+    def fake_post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
         raise requests.ConnectionError(f"Max retries exceeded with url: {url}")
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
+    monkeypatch.setattr(requests.Session, "post", fake_post)
     with pytest.raises(tc.TachibanaHttpError) as e:
-        tc.requests_get(VIRTUAL_URLS["price"] + "?x", 5)
+        tc.requests_post(VIRTUAL_URLS["price"], b"{}", 5)
     assert "Max retries" not in exception_text(e.value)
     assert e.value.__context__ is None and e.value.__cause__ is None
 
