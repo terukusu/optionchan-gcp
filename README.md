@@ -91,6 +91,8 @@ flowchart LR
 - **(c) 開発する人**
   - [docs/development.md](docs/development.md): テストの種類と流し方・ローカルでの起動・CI・デプロイと承認・Terraform が読むファイル
   - 公開リポジトリの決まり（置くもの / 置かないもの）は [CLAUDE.md](CLAUDE.md)
+- **取り込み元の差し替え（#133）**
+  - [docs/tachibana-inquiry.md](docs/tachibana-inquiry.md): 立花証券 e 支店 API の利用が規約の範囲内かを確かめる問い合わせの下書き
 - **(d) 運用する人**
   - [docs/runbook.md](docs/runbook.md): 確認・障害の対応・一度きりの作業の手順（先頭の目次から節へ）。取り込みは [`docs/runbook.md` の「新しい取り込み（ingest）」](docs/runbook.md#新しい取り込みingest)、Terraform は [`docs/runbook.md` の「Terraform」](docs/runbook.md#terraform)
 - **設計の経緯**
