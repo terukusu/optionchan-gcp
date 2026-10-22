@@ -1,4 +1,5 @@
 import dataclasses
+import json
 import re
 from datetime import UTC, datetime, timedelta
 
@@ -7,7 +8,6 @@ import requests
 from tachibana_fakes import (
     AUTH_ID,
     BASE_URL,
-    PASSWORD,
     VIRTUAL_URLS,
     FakeClock,
     credentials,
@@ -57,7 +57,19 @@ def test_p_no_p_sd_date_and_targets():
     assert payloads[1]["p_sd_date"] == "2031.03.03-08:00:01.234"
     assert http.targets() == [AUTH_URL, VIRTUAL_URLS["master"], VIRTUAL_URLS["price"]]
     assert payloads[0]["sAuthId"] == AUTH_ID
-    assert tc.LOGIN_PASSWORD_FIELD not in payloads[0]
+    # ログインの項目は共通項目と sAuthId だけ（パスワードは無い）
+    assert set(payloads[0]) == {"p_no", "p_sd_date", "sCLMID", "sJsonOfmt", "sAuthId"}
+
+
+def test_all_requests_carry_json_ofmt():
+    client, http, _ = logged_in()
+    client.get_option_master(timeout=10)
+    client.get_market_price(["900000001"], ["pDPP"], timeout=10)
+    client.logout(timeout=10)
+    assert tc.JSON_OFMT == "4"
+    for p in http.payloads():
+        assert p["sJsonOfmt"] == "4"
+        assert list(p)[:4] == ["p_no", "p_sd_date", "sCLMID", "sJsonOfmt"]
 
 
 def test_master_targets_and_logout_target():
@@ -83,16 +95,17 @@ def test_login_again_resets_p_no():
     assert [p["p_no"] for p in http.payloads()] == ["1", "2", "3", "1", "2"]
 
 
-def test_url_is_encoded():
-    client, http, _ = make_client(password=PASSWORD)
+def test_request_is_json_body():
+    client, http, _ = make_client()
     client.login(timeout=10)
     client.get_market_price(["900000001", "900000002"], ["pDPP", "tDPP:T"], timeout=10)
+    # 要求の URL は宛先そのもの（クエリを付けない）。認証 ID は本文にあって URL に無い
+    assert http.targets() == [AUTH_URL, VIRTUAL_URLS["price"]]
     for url, _ in http.calls:
-        query = url.partition("?")[2]
-        for ch in '#+/:={}", ':
-            assert ch not in query
+        assert "?" not in url
+        assert AUTH_ID not in url
+    assert AUTH_ID in http.bodies[0].decode("cp932")
     payloads = http.payloads()
-    assert payloads[0][tc.LOGIN_PASSWORD_FIELD] == PASSWORD
     assert payloads[1]["sTargetIssueCode"] == "900000001,900000002"
     assert payloads[1]["sTargetColumn"] == "pDPP,tDPP:T"
 
@@ -143,7 +156,7 @@ def body(obj) -> tc.HttpResponse:
 
 
 ERROR_CASES = [
-    ("p_errno", body({"p_errno": "2", "sResultCode": "0"}), tc.TachibanaApiError, "2"),
+    ("p_errno", body({"p_errno": "-1", "p_err": "argument"}), tc.TachibanaApiError, "-1"),
     ("sResultCode", body({"p_errno": "0", "sResultCode": "10031", "sResultText": "x"}), tc.TachibanaApiError, "10031"),
     ("http_503", tc.HttpResponse(503, b"busy"), tc.TachibanaHttpError, "503"),
     ("http_404", tc.HttpResponse(404, b"none"), tc.TachibanaHttpError, "404"),
@@ -151,6 +164,7 @@ ERROR_CASES = [
     ("not_json", tc.HttpResponse(200, b"<html>"), tc.TachibanaResponseError, None),
     ("json_array", tc.HttpResponse(200, b"[1, 2]"), tc.TachibanaResponseError, None),
     ("no_array", body({"p_errno": "0", "sResultCode": "0"}), tc.TachibanaResponseError, None),
+    ("no_p_errno", body({"sResultCode": "0", "aCLMMfdsMarketPrice": []}), tc.TachibanaResponseError, None),
     ("bad_items", body({"aCLMMfdsMarketPrice": ["x"]}), tc.TachibanaResponseError, None),
     ("undecodable", tc.HttpResponse(200, b'{"a": "\x81"}'), tc.TachibanaResponseError, None),
     ("http_error", tc.TachibanaHttpError(f"down {VIRTUAL_URLS['price']}"), tc.TachibanaHttpError, None),
@@ -176,14 +190,79 @@ def test_errors_have_types_and_do_not_relogin(name, route, expected, code):
     assert http.payloads()[-1]["p_no"] == "3"  # 失敗した要求の番号も使ったものとして進める
 
 
-def test_api_error_keeps_kind_and_text():
-    client, _, _ = logged_in({tc.CLMID_OPTION_MASTER: body({"sResultCode": "10031", "sResultText": "server text"})})
+def test_missing_p_errno_is_response_error():
+    client, _, _ = logged_in({tc.CLMID_OPTION_MASTER: body({"aCLMStkIssueMstOp": []})})
+    with pytest.raises(tc.TachibanaResponseError, match="missing p_errno"):
+        client.get_option_master(timeout=10)
+
+
+# (kind, code) → 例外の型・セッションが残るか（資料の p_errno の一覧）
+P_ERRNO_TYPES = [
+    ("p_errno", "2", tc.TachibanaSessionExpired, False),
+    ("p_errno", "9", tc.TachibanaServiceOffline, True),
+    ("p_errno", "-12", tc.TachibanaServiceOffline, True),
+    ("p_errno", "-2", tc.TachibanaBusy, True),
+    ("p_errno", "-3", tc.TachibanaBusy, True),
+    ("p_errno", "-62", tc.TachibanaOutsideHours, True),
+    ("p_errno", "-50", tc.TachibanaLoginRejected, True),
+    ("p_errno", "6", tc.TachibanaApiError, True),
+    ("p_errno", "8", tc.TachibanaApiError, True),
+    ("p_errno", "-1", tc.TachibanaApiError, True),
+    ("sResultCode", "2", tc.TachibanaApiError, True),  # セッション切れは p_errno だけに当てる
+    ("sResultCode", "10031", tc.TachibanaApiError, True),  # ログイン以外の要求では普通のエラー
+]
+
+
+@pytest.mark.parametrize(
+    ("kind", "code", "expected", "stays"), P_ERRNO_TYPES, ids=[f"{k}={c}" for k, c, _, _ in P_ERRNO_TYPES]
+)
+def test_error_codes_map_to_types(kind, code, expected, stays):
+    doc = {"p_errno": "0", "p_err": ""} | {kind: code}
+    client, _, _ = logged_in({tc.CLMID_OPTION_MASTER: body(doc)})
     with pytest.raises(tc.TachibanaApiError) as e:
         client.get_option_master(timeout=10)
-    assert e.value.kind == "sResultCode"
-    assert e.value.text == "server text"
-    assert "server text" not in str(e.value)
-    assert "server text" not in repr(e.value.args)
+    assert type(e.value) is expected
+    assert e.value.code == code
+    assert e.value.kind == kind
+    assert client.logged_in is stays
+
+
+def test_error_type_hierarchy():
+    for t in (tc.TachibanaServiceOffline, tc.TachibanaBusy, tc.TachibanaOutsideHours):
+        assert issubclass(t, tc.TachibanaUnavailable)
+    for t in (tc.TachibanaUnavailable, tc.TachibanaSessionExpired, tc.TachibanaLoginRejected):
+        assert issubclass(t, tc.TachibanaApiError)
+    assert not issubclass(tc.TachibanaSessionExpired, tc.TachibanaUnavailable)
+    assert not issubclass(tc.TachibanaLoginRejected, tc.TachibanaUnavailable)
+    assert not issubclass(tc.TachibanaAuthError, tc.TachibanaApiError)
+    assert tc.SESSION_EXPIRED_CODES == frozenset({"2"})
+    assert tc.SERVICE_OFFLINE_CODES == frozenset({"9", "-12"})
+    assert tc.BUSY_CODES == frozenset({"-2", "-3"})
+    assert tc.OUTSIDE_HOURS_CODES == frozenset({"-62"})
+    assert tc.LOGIN_ERROR_CODES == frozenset({"-50"})
+
+
+@pytest.mark.parametrize(
+    ("doc", "kind", "text"),
+    [
+        ({"p_errno": "-1", "p_err": "server reason"}, "p_errno", "server reason"),
+        (
+            {"p_errno": "0", "p_err": "", "sResultCode": "10031", "sResultText": "server text"},
+            "sResultCode",
+            "server text",
+        ),
+        ({"p_errno": "-1"}, "p_errno", None),
+    ],
+)
+def test_api_error_keeps_kind_and_text(doc, kind, text):
+    client, _, _ = logged_in({tc.CLMID_OPTION_MASTER: body(doc)})
+    with pytest.raises(tc.TachibanaApiError) as e:
+        client.get_option_master(timeout=10)
+    assert e.value.kind == kind
+    assert e.value.text == text
+    if text is not None:
+        assert text not in str(e.value)
+        assert text not in repr(e.value.args)
 
 
 @pytest.mark.parametrize(
@@ -214,20 +293,22 @@ def test_lock_wait_is_bounded_by_budget():
     assert http.payloads()[-1]["p_no"] == "2"
 
 
-def test_login_error_is_api_error():
-    client, http, _ = make_client({tc.CLMID_LOGIN: body({"p_errno": "0", "sResultCode": "10001"})})
-    with pytest.raises(tc.TachibanaApiError):
+def test_login_error_is_login_rejected():
+    client, http, _ = make_client({tc.CLMID_LOGIN: body({"p_errno": "0", "sResultCode": "10031", "sResultText": "x"})})
+    with pytest.raises(tc.TachibanaApiError) as e:
         client.login(timeout=10)
+    assert type(e.value) is tc.TachibanaLoginRejected
+    assert e.value.kind == "sResultCode" and e.value.code == "10031"
     assert not client.logged_in
-    assert len(http.calls) == 1
+    assert len(http.calls) == 1  # 自動で再試行しない（間違いが続くとロックされる）
 
 
-def test_session_expired_drops_session(monkeypatch):
-    monkeypatch.setattr(tc, "SESSION_EXPIRED_CODES", frozenset({"99"}))
-    client, http, _ = logged_in({tc.CLMID_MARKET_PRICE: body({"p_errno": "99"})})
+def test_session_expired_drops_session():
+    client, http, _ = logged_in({tc.CLMID_MARKET_PRICE: body({"p_errno": "2", "p_err": "session"})})
     with pytest.raises(tc.TachibanaSessionExpired) as e:
         client.get_market_price(CODES_241, ["pDPP"], timeout=10)
-    assert e.value.code == "99"
+    assert e.value.code == "2"
+    assert e.value.text == "session"
     assert not client.logged_in
     assert len(http.calls_to(VIRTUAL_URLS["price"])) == 1  # 残りの分割は送らない
     with pytest.raises(tc.TachibanaNotLoggedIn):
@@ -315,6 +396,38 @@ def test_login_without_virtual_url_is_auth_error():
     assert not client.logged_in
 
 
+def unread_ack(flag: str = "1", urls: str = ""):
+    ack = fixture_json("login_ack.json")
+    return {**ack, "sKinsyouhouMidokuFlg": flag, **dict.fromkeys(tc.VIRTUAL_URL_FIELDS, urls)}
+
+
+def test_unread_documents_without_virtual_urls_is_documents_unread():
+    # 交付書面が未読（sKinsyouhouMidokuFlg "1"）だと仮想 URL は "" になる。原因の分かる型にする
+    client, http, _ = make_client({tc.CLMID_LOGIN: ok(unread_ack())})
+    with pytest.raises(tc.TachibanaAuthError) as e:
+        client.login(timeout=10)
+    assert type(e.value) is tc.TachibanaDocumentsUnread
+    assert str(e.value) == f"{tc.CLMID_LOGIN}: unread documents"
+    assert e.value.clmid == tc.CLMID_LOGIN
+    assert not client.logged_in
+    assert len(http.calls) == 1
+
+
+def test_unread_documents_with_virtual_urls_still_logs_in():
+    ack = {**fixture_json("login_ack.json"), "sKinsyouhouMidokuFlg": "1"}
+    client, _, _ = make_client({tc.CLMID_LOGIN: ok(ack)})
+    session = client.login(timeout=10)
+    assert client.logged_in and session.price_url == VIRTUAL_URLS["price"]
+
+
+def test_missing_virtual_url_without_unread_flag_is_plain_auth_error():
+    client, _, _ = make_client({tc.CLMID_LOGIN: ok(unread_ack(flag="0"))})
+    with pytest.raises(tc.TachibanaAuthError) as e:
+        client.login(timeout=10)
+    assert type(e.value) is tc.TachibanaAuthError
+    assert "missing sUrlRequest" in str(e.value)
+
+
 def test_decrypt_failure_is_auth_error():
     client, _, _ = make_client({tc.CLMID_LOGIN: ok({**fixture_json("login_ack.json"), "sUrlMaster": "BAD:master"})})
     with pytest.raises(tc.TachibanaAuthError) as e:
@@ -324,18 +437,49 @@ def test_decrypt_failure_is_auth_error():
     assert not client.logged_in
 
 
+def decrypting_to(name: str, url: str):
+    """ログインの応答の name の仮想 URL だけを url に復号するクライアント"""
+    client, _, _ = make_client()
+    original = client._decrypt
+    kind = fixture_json("login_ack.json")[name]
+    client._decrypt = lambda enc: url if enc == kind else original(enc)
+    return client
+
+
 @pytest.mark.parametrize(
     ("name", "url"),
     [("sUrlPrice", "http://example.invalid/plain/"), ("sUrlRequest", "wss://example.invalid/ws/"), ("sUrlMaster", "")],
 )
 def test_decrypted_url_must_be_https(name, url):
-    client, _, _ = make_client()
-    original = client._decrypt
-    kind = fixture_json("login_ack.json")[name]
-    client._decrypt = lambda enc: url if enc == kind else original(enc)
-    with pytest.raises(tc.TachibanaAuthError):
+    client = decrypting_to(name, url)
+    with pytest.raises(tc.TachibanaAuthError) as e:
         client.login(timeout=10)
+    assert "scheme" in str(e.value)
     assert not client.logged_in
+
+
+@pytest.mark.parametrize(
+    ("name", "url"),
+    [
+        ("sUrlPrice", "https://example.invalid/vurl/SECRET-price-5e6f"),
+        ("sUrlMaster", "https://example.invalid/vurl/SECRET-master-5e6f/?x"),
+        ("sUrlEventWebSocket", "wss://example.invalid/vurl/SECRET-event_ws-5e6f\r\n"),
+    ],
+)
+def test_decrypted_url_must_end_with_slash(name, url):
+    client = decrypting_to(name, url)
+    with pytest.raises(tc.TachibanaAuthError) as e:
+        client.login(timeout=10)
+    assert str(e.value) == f"{name}: unexpected form"
+    assert "SECRET-" not in str(e.value)
+    assert not client.logged_in
+
+
+def test_decrypted_url_trailing_newline_is_dropped():
+    client = decrypting_to("sUrlPrice", VIRTUAL_URLS["price"] + "\r\n")
+    session = client.login(timeout=10)
+    assert session.price_url == VIRTUAL_URLS["price"]
+    assert all("\r" not in u and "\n" not in u for u in (session.price_url, session.master_url, session.request_url))
 
 
 @pytest.mark.parametrize(
@@ -389,6 +533,15 @@ def test_reads_utf8_when_given():
     assert master.items[0]["sIssueName"].startswith("架空先物")
 
 
+def test_market_price_response_without_result_code_is_accepted():
+    # 時価の応答には sResultCode が無い（資料の例）。共通項目（p_errno）だけで検査する
+    client, http, _ = logged_in()
+    prices = client.get_market_price(["900000001"], ["pDPP"], timeout=10)
+    doc = json.loads(http.returned[-1].decode("cp932"))
+    assert "sResultCode" not in doc and doc["p_errno"] == "0"
+    assert len(prices.items) == 1
+
+
 def test_date_info_items():
     client, _, _ = logged_in()
     info = client.get_date_info(timeout=10)
@@ -404,11 +557,20 @@ def test_format_sd_date():
         tc.format_sd_date(datetime(2031, 3, 3))
 
 
-def test_build_url_and_chunks():
-    url = tc.build_url("https://example.invalid/x/", {"a": "1,2", "b": "日経"})
-    assert url.startswith("https://example.invalid/x/?%7B%22a%22%3A%221%2C2%22")
+def test_build_body_and_chunks():
+    body = tc.build_body({"a": "1,2", "b": "日経"})
+    assert isinstance(body, bytes)
+    assert body == '{"a":"1,2","b":"日経"}'.encode("cp932")
+    assert tc.build_body({"b": "日経"}, "utf-8") == '{"b":"日経"}'.encode()
     assert tc.chunks([str(i) for i in range(5)], 2) == [["0", "1"], ["2", "3"], ["4"]]
     assert tc.chunks([]) == []
+
+
+def test_build_body_rejects_unencodable_without_value_in_message():
+    with pytest.raises(ValueError) as e:
+        tc.build_body({"a": "SECRET-\U0001f600"}, "cp932")
+    assert "SECRET-" not in str(e.value)
+    assert e.value.__context__ is None and e.value.__cause__ is None
 
 
 def test_split_timeout():
@@ -424,17 +586,19 @@ class FakeRequestsResponse:
     content = b'{"p_errno":"0"}'
 
 
-def test_requests_get_returns_response(monkeypatch):
+def test_requests_post_returns_response(monkeypatch):
     seen = {}
 
-    def fake_get(self, url, timeout, allow_redirects=True):
-        seen["url"], seen["timeout"], seen["allow_redirects"] = url, timeout, allow_redirects
+    def fake_post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
+        seen.update(url=url, data=data, headers=headers, timeout=timeout, allow_redirects=allow_redirects)
         return FakeRequestsResponse()
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
-    response = tc.requests_get("https://example.invalid/x/?q", 5)
+    monkeypatch.setattr(requests.Session, "post", fake_post)
+    response = tc.requests_post("https://example.invalid/x/", b'{"p_no":"1"}', 5)
     assert response == tc.HttpResponse(200, b'{"p_errno":"0"}')
-    assert seen["url"] == "https://example.invalid/x/?q"
+    assert seen["url"] == "https://example.invalid/x/"
+    assert seen["data"] == b'{"p_no":"1"}'
+    assert seen["headers"] == {"Content-Type": "application/json"}
     connect, read = seen["timeout"]
     assert connect + read <= 5
     assert seen["allow_redirects"] is False  # 検査していない宛先に送らない
@@ -449,13 +613,13 @@ def test_requests_get_returns_response(monkeypatch):
         (requests.exceptions.ChunkedEncodingError, tc.TachibanaHttpError),
     ],
 )
-def test_requests_get_wraps_errors(monkeypatch, error, expected):
-    def fake_get(self, url, timeout, allow_redirects=True):
+def test_requests_post_wraps_errors(monkeypatch, error, expected):
+    def fake_post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
         raise error(f"failed for {url}")
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
+    monkeypatch.setattr(requests.Session, "post", fake_post)
     with pytest.raises(expected) as e:
-        tc.requests_get(VIRTUAL_URLS["price"] + "?q", 5)
+        tc.requests_post(VIRTUAL_URLS["price"], b"{}", 5)
     assert type(e.value) is expected
     assert e.value.reason == error.__name__
     assert "SECRET-" not in str(e.value)
@@ -463,10 +627,10 @@ def test_requests_get_wraps_errors(monkeypatch, error, expected):
 
 
 def test_requests_error_reason_reaches_client(monkeypatch):
-    def fake_get(self, url, timeout, allow_redirects=True):
+    def fake_post(self, url, data=None, headers=None, timeout=None, allow_redirects=True):
         raise requests.ConnectionError(f"failed for {url}")
 
-    monkeypatch.setattr(requests.Session, "get", fake_get)
+    monkeypatch.setattr(requests.Session, "post", fake_post)
     clock = FakeClock()
     client = tc.TachibanaClient(
         BASE_URL, credentials(), fake_decrypt, now=clock.now, monotonic=clock.monotonic, sleep=clock.sleep

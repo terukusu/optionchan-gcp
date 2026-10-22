@@ -5,8 +5,8 @@
 列をすべてキーに持つ（NULL の列も None で持つ）。
 
 NULL にする列: option の is_atm・iv・bid_iv・ask_iv・ギリシャ指標（段 1b で気配から計算）、quotation・quotation_date
-（清算値に当たる項目が未確認）、price_time_raw（列の意味が JPX のページの表示 MM/DD HH:MM なので入れない。元の値は
-生の応答に残る）、page_updated_at（ページの更新時刻に当たるものが無い）、future・spot の hv。
+（清算値の FD コードが資料の一覧に無い）、price_time_raw（列の意味が JPX のページの表示 MM/DD HH:MM なので入れない。
+元の値は生の応答に残る）、page_updated_at（ページの更新時刻に当たるものが無い）、future・spot の hv。
 is_atm が NULL なので snapshot.validate_rows（ATM が 1 行あることを求める）には通さない（段 1a/1b）。
 """
 
@@ -21,18 +21,18 @@ from .master import Selection
 # 解析コードの版（段 1a で RunMeta.parser_version に入れる値。この Issue の build_rows は RunMeta の値をそのまま使う）
 PARSER_VERSION = "tachibana-1"
 
-# 時価の FD 項目コード。資料の例にあるのは pDPP（現在値）・tDPP:T（現在値の時刻）だけ。
-# ほかは一般に知られている名前で、未確認（口座で確かめる）。None は「項目なし → 列は NULL」
-FIELD_PRICE = "pDPP"
-FIELD_PRICE_TIME = "tDPP:T"
-FIELD_DIFF = "pDYWP"  # 前日比。未確認
-FIELD_DIFF_RATE = "pDYRP"  # 騰落率。未確認
-FIELD_BID = "pQBP"  # 買気配。未確認
-FIELD_BID_VOLUME = "pBV"  # 買気配の数量。未確認
-FIELD_ASK = "pQAP"  # 売気配。未確認
-FIELD_ASK_VOLUME = "pAV"  # 売気配の数量。未確認
-FIELD_VOLUME = "pDV"  # 出来高。未確認
-FIELD_POSITIONS: str | None = None  # 建玉。コードが未確認なので取らない（列は NULL）
+# 時価の FD 項目コード（資料の一覧で確かめた。応答のキーは先頭に型の 1 文字が付く: p = 価格、t = 時刻）。
+# None は「項目なし → 列は NULL」
+FIELD_PRICE = "pDPP"  # 現在値
+FIELD_PRICE_TIME = "tDPP:T"  # 現在値の時刻（HH:MM。日付は無い）
+FIELD_DIFF = "pDYWP"  # 前日比
+FIELD_DIFF_RATE = "pDYRP"  # 騰落率
+FIELD_BID = "pQBP"  # 買気配
+FIELD_BID_VOLUME = "pBV"  # 買気配の数量
+FIELD_ASK = "pQAP"  # 売気配
+FIELD_ASK_VOLUME = "pAV"  # 売気配の数量
+FIELD_VOLUME = "pDV"  # 出来高
+FIELD_POSITIONS: str | None = None  # 建玉。資料の一覧に無いので取らない（列は NULL。清算値も同じ）
 
 # get_market_price の columns に渡す項目
 MARKET_COLUMNS: tuple[str, ...] = tuple(
@@ -52,10 +52,11 @@ MARKET_COLUMNS: tuple[str, ...] = tuple(
     if c is not None
 )
 
-# 値が無いことの表し方。未確認（空文字と "-" を NULL にする）。項目そのものが応答に無いときも NULL
-EMPTY_VALUES = frozenset({"", "-"})
-# 現在値の時刻（tDPP:T）の書式。未確認（時刻だけの値と推定。日付は complete_price_time で補う）
-PRICE_TIME_FORMATS = ("%H:%M:%S", "%H:%M")
+# 値が無いことの表し方（資料: 空は "" だけ。空白を strip した後に比べる）。項目そのものが応答に無いときも NULL。
+# "-" は入れない（来れば数値でないので TachibanaParseError になり、気づける）
+EMPTY_VALUES = frozenset({""})
+# 現在値の時刻（tDPP:T）の書式（資料: HH:MM。日付は無いので complete_price_time で補う）
+PRICE_TIME_FORMATS = ("%H:%M",)
 # 約定時刻が取得時刻より後に見えるのを許す幅（時計のずれ）。これを超えたら前日の時刻とみなす
 PRICE_TIME_FUTURE_TOLERANCE = timedelta(minutes=5)
 
@@ -141,8 +142,8 @@ def complete_price_time(text: str | None, created_at: datetime) -> datetime | No
     0 時前の時刻は前日になる。金曜の夜 → 土曜の朝の夜間にもそのまま使える
 
     制限: 約定がその日か前日のときだけ正しい。月曜の日中の始まり前後に土曜の朝（夜間の終わり）の約定（例 05:30）を
-    取ると月曜 05:30 になり、薄い行使価格で何日も約定が無いときも日付がずれる。時価の応答に日付の項目があるかは
-    未確認なので、段 2 で口座の応答を確かめる（日付が無ければ段 1a/1b で古い price_time の扱いを決める）
+    取ると月曜 05:30 になり、薄い行使価格で何日も約定が無いときも日付がずれる。応答に日付は無い（資料で確かめた）ので、
+    古い約定の日付の扱いは段 1a/1b で決める
     """
     _require_aware(created_at, "created_at")
     if text is None or text.strip() in EMPTY_VALUES:

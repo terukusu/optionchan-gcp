@@ -101,7 +101,7 @@ def test_null_columns():
     assert {"is_atm", "iv", "price_time_raw", "page_updated_at", "quotation"} <= set(tp.OPTION_NULL_COLUMNS)
 
 
-@pytest.mark.parametrize("empty", ["", "-", " - "])
+@pytest.mark.parametrize("empty", ["", " "])
 def test_empty_values_are_none(empty):
     sel = selection()
     target = sel.options[0].code
@@ -111,6 +111,15 @@ def test_empty_values_are_none(empty):
     for col in ("price", "price_time", "diff", "diff_rate", "bid", "bid_volume", "ask", "ask_volume", "volume"):
         assert row[col] is None
     assert rows["option_price"][1]["price"] == 12
+    assert tp.EMPTY_VALUES == frozenset({""})
+
+
+@pytest.mark.parametrize("value", ["-", " - "])
+def test_dash_is_not_empty_but_parse_error(value):
+    # 資料では空の値は "" だけ。"-" は数値でないので TachibanaParseError にして気づけるようにする
+    sel = selection()
+    with pytest.raises(tp.TachibanaParseError, match="number"):
+        tp.build_rows(prices(sel, {sel.options[0].code: {"pDPP": value}}), sel, CREATED_AT, RUN)
 
 
 def test_missing_field_is_none():
@@ -145,7 +154,6 @@ def test_created_at_and_meta_are_same_for_all_rows():
         # 取得時刻より少し後（許容 5 分以内）は当日
         ("15:52", datetime(2031, 3, 3, 15, 50, tzinfo=JST), datetime(2031, 3, 3, 15, 52, tzinfo=JST)),
         ("15:56", datetime(2031, 3, 3, 15, 50, tzinfo=JST), datetime(2031, 3, 2, 15, 56, tzinfo=JST)),
-        ("09:00:05", datetime(2031, 3, 3, 9, 1, tzinfo=JST), datetime(2031, 3, 3, 9, 0, 5, tzinfo=JST)),
         # created_at が UTC でも JST の日付で補う（UTC 15:10 = JST 翌日 00:10）
         ("00:05", datetime(2031, 3, 3, 15, 10, tzinfo=UTC), datetime(2031, 3, 4, 0, 5, tzinfo=JST)),
         # 金曜の夜 → 土曜の朝
@@ -161,10 +169,12 @@ def test_complete_price_time(text, created_at, expected):
         assert value.tzinfo is JST
 
 
-@pytest.mark.parametrize("text", ["9:5:x", "2031/03/03 09:00", "25:00", "abc"])
+@pytest.mark.parametrize("text", ["9:5:x", "2031/03/03 09:00", "25:00", "abc", "09:00:05"])
 def test_complete_price_time_rejects_unknown_format(text):
+    # 時刻は HH:MM だけ（資料で確かめた）。秒付き・日付付きは通さない
     with pytest.raises(tp.TachibanaParseError):
         tp.complete_price_time(text, CREATED_AT)
+    assert tp.PRICE_TIME_FORMATS == ("%H:%M",)
 
 
 def test_naive_created_at_is_rejected():
