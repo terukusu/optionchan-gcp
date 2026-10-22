@@ -258,5 +258,11 @@
     "type": "INTEGER",
     "mode": "NULLABLE",
     "description": "option で legacy_older の裏付けだけが無いキーの数: 旧系の行が新系の T より前の版（option_legacy_older の (a)・(b)）で、旧系の次のスナップショットの同じ行の出来高が新系の T より多い（旧系 < 新系 < 旧系の次）。1 日に 3 行を超えたら全部 option_unexplained（説明済み。#89。列を足す前の日は NULL）"
+  },
+  {
+    "name": "option_new_behind",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "option で新系の 1 分遅れのキーの数: 新系の T が直前と同じ版で、直後が T と違う版に進み、出来高・約定時刻が 新系の T < 旧系 ≤ 直後、旧系の約定時刻が T の 1 分前以後、建玉・清算値が新系の T と同じ（清算日は ±1 年を許す）、基準価格が新系の直後と同じ。1 日に 10 行を超えたら全部 option_unexplained（説明済み。#131。列を足す前の日は NULL）"
   }
 ]

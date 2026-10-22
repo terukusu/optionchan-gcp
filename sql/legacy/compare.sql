@@ -30,7 +30,14 @@
 --                基準価格・hv が新系の T と同じ（future は限月も）。new_stale の判定より前に見る。長い凍結の最後の行（直後で
 --                現在まで飛ぶ）と古い版に戻る形は遅れが 1 分を超えるので当たらない。新系が止まり続ける形（直後も T と同じ版。2026-10-14 18:52〜19:27 JST の凍結）は
 --                当たらず、new_stale の上限で unexplained になる。1 日に表ごと 10 行までなら説明済み、超えたら全部 unexplained
---                （2026-10-15 は future 5 行・spot 3 行。上限 10 はそれに余裕を持たせた値。毎分遅れる不具合は 1 日数百行になる）
+--                （2026-10-15 は future 5 行・spot 3 行。上限 10 はそれに余裕を持たせた値。毎分遅れる不具合は 1 日数百行になる）。
+--                option で新系の 1 分遅れ（#131）: 新系の T が直前と同じ（約定の列と清算日）で、新系の直後が T と違う版に進み、
+--                出来高が 新系の T < 旧系 ≤ 直後、約定時刻が 新系の T < 旧系 ≤ 直後（新系の T に約定が無ければ最小とみなす）。
+--                遅れは 1 分（旧系の約定時刻が T の 1 分前以後）。建玉・清算値が新系の T と同じ、清算日は新系の T と同じか ±1 年、
+--                基準価格（price − diff）が新系の直後と同じ。旧系・新系の T・直前・直後のどれにも行があるときだけ（2026-10-19 の
+--                4 行・10-20 の 2 行の形）。1 日に 10 行までなら説明済み、超えたら option の new_behind を全部 unexplained。
+--                option は約定が疎で新系の T の約定時刻から遅れを測れないので、2 分以上の凍結の最後の分（直後で追いつく）は
+--                当たりうる（凍結の途中の分は直後も T と同じで当たらず unexplained に残るので、凍結そのものは検出される）
 --   page2        option で新系の 2 限月ページの更新時刻が 1 限月と違うスナップショットの 2 限月の行（#11 AC 5。新系の T にも行があるときだけ）
 --   legacy_older 旧系が新系の T より古い版・途中の版を読んだ（#61）。上のどれにも当たらない行のうち、新系の T が旧系の行から
 --                進んでいて（spot・future は約定時刻が後、option は出来高が多く約定時刻が同じか後）、次のどちらか:
@@ -446,7 +453,7 @@ opt_join AS (
     l.tv AS ltv, l.qv AS lqv, l.qd AS lqd,
     l.pt AS lpt, l.vol AS lvol, l.base AS lbase, l.pos AS lpos, l.quo AS lquo,
     n.tv AS ntv, n.qv AS nqv, n.qd AS nqd,
-    n.pt AS npt, n.vol AS nvol
+    n.pt AS npt, n.vol AS nvol, n.pos AS npos, n.quo AS nquo
   FROM (SELECT o.* FROM legacy_opt AS o JOIN pairs AS p ON p.t = o.created_at) AS l
   FULL JOIN (SELECT o.* FROM new_opt AS o JOIN pairs AS p ON p.t = o.created_at) AS n
     ON n.created_at = l.created_at AND n.last_trading_day = l.last_trading_day AND n.type = l.type
@@ -461,6 +468,7 @@ opt_cand AS (
     p.option_next_at IS NOT NULL AS has_next,
     pv.created_at IS NOT NULL AS in_prev, pv.tv AS ptv, pv.qv AS pqv, pv.qd AS pqd,
     nx.created_at IS NOT NULL AS in_next, nx.tv AS xtv, nx.qv AS xqv, nx.qd AS xqd,
+    nx.vol AS xvol, nx.pt AS xpt, nx.base AS xbase,
     -- legacy_older の条件: 新系の T の約定の列が新系の直後（ok_nx）か旧系の次のスナップショット（ok_ln）の同じ行と一致。
     -- 旧系の次に同じ行があれば新系の T と矛盾しない（出来高・約定時刻が新系の T 以上）こと（ln_ok）
     IFNULL(j.ntv = nx.tv, FALSE) AS ok_nx,
@@ -503,6 +511,17 @@ opt_cls0 AS (
           OR (in_next AND ltv = xtv AND (lqd IS NOT DISTINCT FROM xqd OR lqd IN (DATE_ADD(xqd, INTERVAL 1 YEAR), DATE_SUB(xqd, INTERVAL 1 YEAR))))
         ) THEN 'quote_only'
       WHEN in_new AND page2_differs AND last_trading_day > page1_month THEN 'page2'
+      -- 新系の 1 分遅れ（#131）: 新系の T が直前と同じ版のままで、直後が T と違う版に進み旧系に追いついた（出来高・約定時刻が
+      -- 新系の T < 旧系 ≤ 直後）。遅れは 1 分に限る。新系が止まり続ける形（直後も T と同じ）は当たらず unexplained に残る。
+      -- 基準価格は直後と比べる（新系の T は約定が無いことがある。2026-10-20 10:46 JST）。1 日の上限は opt_cls で見る
+      WHEN in_legacy AND in_new AND in_prev AND in_next
+        AND ntv = ptv AND nqd IS NOT DISTINCT FROM pqd AND xtv != ntv
+        AND IFNULL(nvol, 0) < IFNULL(lvol, 0) AND IFNULL(lvol, 0) <= IFNULL(xvol, 0)
+        AND IFNULL(npt, DATETIME '1970-01-01') < lpt AND lpt <= xpt
+        AND lpt >= DATETIME_SUB(DATETIME(t, 'Asia/Tokyo'), INTERVAL 1 MINUTE)
+        AND lpos IS NOT DISTINCT FROM npos AND lquo IS NOT DISTINCT FROM nquo
+        AND (lqd IS NOT DISTINCT FROM nqd OR lqd IN (DATE_ADD(nqd, INTERVAL 1 YEAR), DATE_SUB(nqd, INTERVAL 1 YEAR)))
+        AND lbase = xbase THEN 'new_behind'
       ELSE 'unexplained'
     END AS cls
   FROM opt_cand
@@ -551,6 +570,9 @@ opt_cls AS (
     CASE
       WHEN c.cls = 'unexplained' AND o.confirmed THEN 'legacy_older'
       WHEN c.cls = 'unexplained' AND o.t IS NOT NULL THEN IF(o.n_unconfirmed > 3, 'unexplained', 'legacy_older_unconfirmed')
+      -- 新系の 1 分遅れ（#131）は 1 日に 10 行まで（spot・future と同じ）。opt_cls0 を CROSS JOIN でもう一度読むと展開が増えて
+      -- 「too complex」の恐れがあるので、分析関数で数える
+      WHEN c.cls = 'new_behind' THEN IF(COUNTIF(c.cls = 'new_behind') OVER () > 10, 'unexplained', 'new_behind')
       ELSE c.cls
     END AS cls
   FROM opt_cls0 AS c
@@ -595,6 +617,7 @@ cls_counts AS (
     COUNTIF(kind = 'option' AND cls = 'legacy_older') AS option_legacy_older,
     COUNTIF(kind = 'spot' AND cls = 'new_behind') AS spot_new_behind,
     COUNTIF(kind = 'future' AND cls = 'new_behind') AS future_new_behind,
+    COUNTIF(kind = 'option' AND cls = 'new_behind') AS option_new_behind,
     COUNTIF(kind = 'spot' AND cls = 'legacy_older_unconfirmed') AS spot_legacy_older_unconfirmed,
     COUNTIF(kind = 'future' AND cls = 'legacy_older_unconfirmed') AS future_legacy_older_unconfirmed,
     COUNTIF(kind = 'option' AND cls = 'legacy_older_unconfirmed') AS option_legacy_older_unconfirmed,
@@ -674,7 +697,9 @@ SELECT
   future_new_behind,
   spot_legacy_older_unconfirmed,
   future_legacy_older_unconfirmed,
-  option_legacy_older_unconfirmed
+  option_legacy_older_unconfirmed,
+  -- #131 で足した列
+  option_new_behind
 FROM counts
 -- result:end
 ;
