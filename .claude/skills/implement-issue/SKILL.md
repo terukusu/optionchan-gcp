@@ -9,7 +9,7 @@ allowed-tools: [Read, Edit, Write, Bash, Glob, Grep, Agent, TaskCreate, TaskUpda
 
 あなたは optionchan-gcp プロジェクトの実装エージェント (**main orchestrator**) です。GitHub Issue `$ARGUMENTS` について、**リファインメント → 調査・計画 → 実装 → コードレビュー → PR → デプロイ** を一貫して実行します。
 
-**事前準備**: `CLAUDE.md`（特に「リポジトリに置くもの / 置かないもの」）、`README.md`、`memo.txt`（GCP リソース作成・デプロイコマンド集）を読み、構成を把握すること。コーディング規約・ADR はこのリポジトリに存在しない。コードの書き方は「既存コードに合わせる」が唯一の基準。
+**事前準備**: `CLAUDE.md`（特に「リポジトリに置くもの / 置かないもの」）、`README.md`（全体像と文書の一覧）を読み、そこから辿る `docs/`（`setup.md`・`data.md`・`viewer.md`・`development.md`・`glossary.md`・`runbook.md`）のうち作業に関わるものを読んで構成を把握すること（`memo.txt` は旧系のコマンド集で、新系は Terraform と deploy workflow）。コーディング規約・ADR はこのリポジトリに存在しない。コードの書き方は「既存コードに合わせる」が唯一の基準。
 
 **絶対遵守**:
 
@@ -164,7 +164,7 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
    - 検証計画: ローカル検証（Phase 3 の検証ブロック）、追加するテスト（下記「テスト方針」）、デプロイ後の確認クエリ・ログ確認
    - python37 の関数を触る場合: ランタイム移行を同 Issue で行うか別 Issue に切るか
    - ロールバック手順（Phase 6 で退避する旧ソースからの再デプロイ等。BigQuery のデータ変更を伴うなら事前バックアップ方法）
-   - ドキュメント影響: `README.md`（構成説明）/ `memo.txt`（リソース作成・デプロイコマンド）の更新要否
+   - ドキュメント影響: `README.md`（全体像・文書の一覧）/ `docs/`（`setup.md`・`data.md`・`viewer.md`・`development.md`・`glossary.md`・`runbook.md`）/ `memo.txt`（旧系のコマンドだけ）の更新要否
 6. **契約（任意だが推奨）**: パーサー・集計など副作用の無い関数を新規追加・挙動変更する場合は `.claude/skills/implement-issue/contract-templates/pure-function.md`、Cloud Functions のエントリポイントを新規追加・挙動変更する場合は `contract-templates/cloud-function.md` に沿って契約を handoff の `## 契約` に書く。Phase 3 はこの契約からテストを先に書く
 7. **計画の 3 視点セルフレビュー**（block 基準は上記）:
    - **本番影響視点**: 毎分の取り込みを止めないか、データ欠損・重複、BigQuery スキャン量、ランタイム廃止、デプロイ順序とロールバック可能性
@@ -201,7 +201,7 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
    - ローカルの python3 はランタイムより新しい。**python37 の関数を触る場合は 3.8 以降の構文・標準ライブラリ（walrus 演算子、`f"{x=}"`、`dict | dict`、`list[int]` 型注釈、`zoneinfo` 等）を使っていないことを目視で確認する**（`vermin` 等が使えるなら `vermin -t=3.7- <files>`）
    - BigQuery のクエリを変更した場合は、`bq query --use_legacy_sql=false --dry_run '<SQL>'` で構文とスキャン量を確認する（SELECT のみ。DML / DDL は dry_run でも計画外なら実行しない）
 6. **AC 検証**: Issue の AC を 1 件ずつ実行可能な確認に対応づけ、`pass` / `fail` / `not-observable`（本番デプロイ後でないと判定できないものは `after-deploy` と明記し、確認手順を書く）を記録する
-7. ドキュメント更新: Phase 2 で要更新とされた `README.md` / `memo.txt` を、コードの実態に合わせて更新する
+7. ドキュメント更新: Phase 2 で要更新とされた `README.md` / `docs/` の文書 / `memo.txt`（旧系だけ）を、コードの実態に合わせて更新する
 8. handoff `$HANDOFF_DIR/phase-3.md`: 変更ファイル一覧、ローカル検証の実出力の要約、AC 検証結果、計画からの逸脱
 9. reply: `✓ Phase 3 実装 完了` + handoff パス + 変更ファイル数 + 検証結果 + 逸脱の有無
 
@@ -218,7 +218,7 @@ block とするのは次の 4 類型のみ。改善提案・好みは block に�
 3. **3 視点の順次セルフレビュー**（block 基準は上記）:
    - **正しさ・セキュリティ視点**: ロジック誤り、境界条件（取引時間外・欠損値・限月切替・タイムゾーン JST/UTC）、例外時の挙動、クエリへの値埋め込み、`auth.txt` / 秘匿情報の扱い
    - **本番運用視点**: 毎分の取り込みへの影響、BigQuery のスキャン量・重複挿入、ログ（`my_logging`）でエラーが追えるか、ランタイム互換（python37 の関数なら 3.7 構文）、`requirements.txt` の変更がデプロイで解決できるか
-   - **計画整合視点**: 変更対象ファイル一覧と diff の突合（計画外の変更・計画された変更の欠落）、AC 検証結果の妥当性、README / memo.txt との整合
+   - **計画整合視点**: 変更対象ファイル一覧と diff の突合（計画外の変更・計画された変更の欠落）、AC 検証結果の妥当性、README / `docs/` の文書 / memo.txt（旧系）との整合
 4. **実装コードを修正しない**（read-only の検証者）
 5. handoff `$HANDOFF_DIR/phase-4.md`: 指摘一覧（視点 / 該当箇所 / 根拠 / block か否か）と verdict
 6. reply: `✓ Phase 4 コードレビュー 完了` + verdict（approve / block）+ 指摘件数（うち block 件数）

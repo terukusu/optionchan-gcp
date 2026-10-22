@@ -23,7 +23,7 @@ CLOUDSDK_ACTIVE_CONFIG_NAME 等で渡す。
   クエリの足と同じ（限月の列が足されただけ）。期近つなぎの API が乗り換えの無い期間で n=0 と同じ足。
   dry run が 512 MiB 以下
 - /atm_iv_bars?n=cm（#100）: 表（atm_cm_iv）の値と、まだ表に無い分を生の気配から計算した 30 日の IV を
-  つなぎ、範囲で絞って足に束ねる。計算の値は README の式（ルートの tests/test_cm_bq.py と同じ）。
+  つなぎ、範囲で絞って足に束ねる。計算の値は docs/data.md の式（ルートの tests/test_cm_bq.py と同じ）。
   dry run が 512 MiB 以下（表ができた後）
 - 過去データの欠け（#123）: /smile_snapshot の 1 行目の 6 列目 source が、#114 で作った実行（実行 ID の接頭辞）の
   スナップショットだけ fill114。/data_gaps の SQL が表全体を UNIX 秒・prev_at 昇順で返す。dry run が 1 MiB 以下
@@ -1052,7 +1052,7 @@ def cm_month(at, month, fwd, base):
 
 
 def cm_expected(at):
-    """README の式: F = 60200 / 60300、60000 と 60500 の間を log(K / F) で補間、1 限月の SQ まで 30 日以上なら
+    """docs/data.md の式: F = 60200 / 60300、60000 と 60500 の間を log(K / F) で補間、1 限月の SQ まで 30 日以上なら
     1 限月の値、それより短ければ総分散を 30 日に補間"""
     import math
 

@@ -1,6 +1,6 @@
 # optionchan-gcp
 
-日経225オプションの価格を JPX のページから毎分取得し、GCS 経由で BigQuery に蓄積するツール。GCP プロジェクト・GitHub リポジトリは clone した人それぞれのもの（コマンドではプロジェクトを `gcloud config get-value project` か環境変数 `GCP_PROJECT_ID`、リポジトリを `gh repo view --json nameWithOwner -q .nameWithOwner` で取る。fork を clone して upstream がある場合は `gh repo set-default` で自分のリポジトリを選び、取った値を表示して確かめる）。構成は `README.md`、リソース作成・デプロイコマンドは `memo.txt` を参照。
+日経225オプションの価格を JPX のページから毎分取得し、GCS 経由で BigQuery に蓄積するツール。GCP プロジェクト・GitHub リポジトリは clone した人それぞれのもの（コマンドではプロジェクトを `gcloud config get-value project` か環境変数 `GCP_PROJECT_ID`、リポジトリを `gh repo view --json nameWithOwner -q .nameWithOwner` で取る。fork を clone して upstream がある場合は `gh repo set-default` で自分のリポジトリを選び、取った値を表示して確かめる）。構成は `README.md`、構築は `docs/setup.md`、開発・テスト・デプロイは `docs/development.md`、運用は `docs/runbook.md` を参照（`memo.txt` は旧系のコマンド）。
 
 ## リポジトリに置くもの / 置かないもの
 
