@@ -245,7 +245,7 @@
     "name": "spot_legacy_older_unconfirmed",
     "type": "INTEGER",
     "mode": "NULLABLE",
-    "description": "spot で legacy_older の裏付けだけが無い行数: 旧系の行が新系の T より前の版（古い版か S1 ≤ 旧 ≤ S2 の途中の版。新系の T と同じ約定時刻の別の価格を含む）で、旧系の次のスナップショットの約定時刻が新系の T より後（旧系 ≤ 新系 < 旧系の次）。1 日に 3 行を超えたら全部 spot_unexplained（説明済み。#89。列を足す前の日は NULL）"
+    "description": "spot で legacy_older の裏付けだけが無い行数: 旧系の行が新系の T より前の版（古い版か S1 ≤ 旧 ≤ S2 の途中の版。新系の T と同じ約定時刻の別の価格を含む）で、旧系の次のスナップショットの約定時刻が新系の T より後（旧系 ≤ 新系 < 旧系の次）、または新系の T と同じ約定時刻の別の価格で基準価格・hv が同じ（旧系 < 新系。#135）。1 日に 3 行を超えたら全部 spot_unexplained（説明済み。#89。列を足す前の日は NULL）"
   },
   {
     "name": "future_legacy_older_unconfirmed",
