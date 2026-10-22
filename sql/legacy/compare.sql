@@ -8,13 +8,13 @@
 -- 旧系の T の行は新系の T・その直前・直後のどれかの版になる（2026-10-13 の実データで確認。#38、#40 のレビュー）。
 -- 旧系の各行を、新系の T の同じキーの行 → 直前・直後のスナップショットの同じ行の順に比べる:
 --   match        全列が新系の T と一致
---   version      全列が新系の直前か直後と一致（版の差。option は旧系の行が新系の T にもあるときだけ。行の有無も含む:
+--   version      全列が新系の直前か直後と一致（版の差。option は旧系の行が新系の T にもあるときだけ（新系の T に行が無い形は下の new_strike）。行の有無も含む:
 --                新系の T にだけある行で、直前か直後に無いもの）
 --   *_year       年の補完の修正（先物の限月が 旧 = 新 + 1 年、option の清算日が ±1 年）で、他の列が一致
 --   quote_only   option で約定の列（price・price_time・diff・diff_rate・volume・positions・quotation・quotation_date と、
 --                約定価格から求める iv・delta・gamma・theta・vega）が T・直前・直後のどれかと一致し、気配と表示の列
 --                （bid・bid_volume・bid_iv・ask・ask_volume・ask_iv・is_atm）だけが違う（1 分の中の版の差。どちらの系も取っていない版。
---                新系の T にも行があるときだけ）
+--                新系の T にも行があるときだけ。新系の T に行が無い形は下の new_strike）
 --   new_stale    spot・future で、新系の T が直前と同じ中身（新系がその分の更新を取れなかった）で、旧系だけ新しい版
 --                （1 日に表ごと 3 行までなら説明済み、超えたらこの形の行を全部 unexplained。新系が系統的に古い版を返す不具合を
 --                捕まえる。上限 3 は #61 で 2026-10-13 の spot 2 行・future 2 行に余裕を持たせて決めた値。その 4 行は #89 で
@@ -39,6 +39,12 @@
 --                option は約定が疎で新系の T の約定時刻から遅れを測れないので、2 分以上の凍結の最後の分（直後で追いつく）は
 --                当たりうる（凍結の途中の分は直後も T と同じで当たらず unexplained に残るので、凍結そのものは検出される）
 --   page2        option で新系の 2 限月ページの更新時刻が 1 限月と違うスナップショットの 2 限月の行（#11 AC 5。新系の T にも行があるときだけ）
+--   new_strike   option で新しく載った行使価格の新系の 1 分遅れ（#134）: 旧系の T にあり新系の T に無い行で、新系の直前（読んだ範囲の中）
+--                にも無く、直後から載った。約定の列が新系の直後と一致（清算日は ±1 年を許す。気配と表示の列は問わない）。新系の T の
+--                その限月に直前から約定の列か気配と表示の列が変わった行が 1 行以上あること（凍結の最後の分を除く。変わった行が 1 行も無い
+--                分は凍結と区別できないので当たらず unexplained に残る）。2026-10-21 19:48 JST の 4 行（新系はページの書き換えの途中の版を
+--                読み、生 HTML にもその行使価格が無かった）の形。1 日に 10 行までなら説明済み、超えたら option の new_strike を全部 unexplained。
+--                新系のパーサーが新しく載った行だけを最初の 1 分取りこぼす不具合とは区別できない（上限と日次の確認で補う。runbook）
 --   legacy_older 旧系が新系の T より古い版・途中の版を読んだ（#61）。上のどれにも当たらない行のうち、新系の T が旧系の行から
 --                進んでいて（spot・future は約定時刻が後、option は出来高が多く約定時刻が同じか後）、次のどちらか:
 --                (a) 旧系の行が新系の T の 10 分前〜T の前のスナップショットの同じ行と全列一致（option は約定の列の一致。
@@ -476,7 +482,11 @@ opt_cand AS (
     ln.created_at IS NULL OR (IFNULL(ln.vol, 0) >= IFNULL(j.nvol, 0)
       AND IFNULL(ln.pt, DATETIME '1970-01-01') >= IFNULL(j.npt, DATETIME '1970-01-01')) AS ln_ok,
     -- legacy_older_unconfirmed の条件: 旧系の次の同じ行の出来高が新系の T より多い（#89）
-    ln.created_at IS NOT NULL AND IFNULL(ln.vol, 0) > IFNULL(j.nvol, 0) AS ln_ahead
+    ln.created_at IS NOT NULL AND IFNULL(ln.vol, 0) > IFNULL(j.nvol, 0) AS ln_ahead,
+    -- new_strike の凍結の除外（#134）: 新系の T のその限月に、直前から約定の列か気配と表示の列が変わった行があるか
+    -- （1 スナップショットは限月とページが 1 対 1 なので、ページごとの凍結の判定。直前に無い行は数えない）
+    IFNULL(LOGICAL_OR(j.in_new AND pv.created_at IS NOT NULL AND (j.ntv != pv.tv OR j.nqv != pv.qv))
+      OVER (PARTITION BY j.t, j.last_trading_day), FALSE) AS new_month_moved
   FROM opt_join AS j
   JOIN pairs AS p ON p.t = j.t
   LEFT JOIN page1_month AS m ON m.created_at = j.t
@@ -522,6 +532,13 @@ opt_cls0 AS (
         AND lpos IS NOT DISTINCT FROM npos AND lquo IS NOT DISTINCT FROM nquo
         AND (lqd IS NOT DISTINCT FROM nqd OR lqd IN (DATE_ADD(nqd, INTERVAL 1 YEAR), DATE_SUB(nqd, INTERVAL 1 YEAR)))
         AND lbase = xbase THEN 'new_behind'
+      -- 新しく載った行使価格の 1 分遅れ（#134）: 旧系の T にあり新系の T に無い行で、新系の直前にも無く直後から載った
+      -- （新系はページの書き換えの途中の版を読んだ。2026-10-21 19:48 JST の 4 行）。約定の列が新系の直後と一致（清算日は ±1 年を
+      -- 許す。気配と表示の列は問わない = quote_only と同じ）。新系の T のその限月が凍結していない（直前から変わった行がある）こと
+      -- （凍結の最後の分で直後に行が載る形を除く）。直前にあって T だけ欠けた行（本物の取りこぼし）は当たらない。1 日の上限は opt_cls で見る
+      WHEN in_legacy AND NOT in_new AND has_prev AND NOT in_prev AND in_next
+        AND ltv = xtv AND (lqd IS NOT DISTINCT FROM xqd OR lqd IN (DATE_ADD(xqd, INTERVAL 1 YEAR), DATE_SUB(xqd, INTERVAL 1 YEAR)))
+        AND new_month_moved THEN 'new_strike'
       ELSE 'unexplained'
     END AS cls
   FROM opt_cand
@@ -573,6 +590,8 @@ opt_cls AS (
       -- 新系の 1 分遅れ（#131）は 1 日に 10 行まで（spot・future と同じ）。opt_cls0 を CROSS JOIN でもう一度読むと展開が増えて
       -- 「too complex」の恐れがあるので、分析関数で数える
       WHEN c.cls = 'new_behind' THEN IF(COUNTIF(c.cls = 'new_behind') OVER () > 10, 'unexplained', 'new_behind')
+      -- 新しく載った行使価格の 1 分遅れ（#134）も 1 日に 10 行まで（new_behind と同じ書き方）
+      WHEN c.cls = 'new_strike' THEN IF(COUNTIF(c.cls = 'new_strike') OVER () > 10, 'unexplained', 'new_strike')
       ELSE c.cls
     END AS cls
   FROM opt_cls0 AS c
@@ -621,6 +640,7 @@ cls_counts AS (
     COUNTIF(kind = 'spot' AND cls = 'legacy_older_unconfirmed') AS spot_legacy_older_unconfirmed,
     COUNTIF(kind = 'future' AND cls = 'legacy_older_unconfirmed') AS future_legacy_older_unconfirmed,
     COUNTIF(kind = 'option' AND cls = 'legacy_older_unconfirmed') AS option_legacy_older_unconfirmed,
+    COUNTIF(kind = 'option' AND cls = 'new_strike') AS option_new_strike,
     ARRAY_AGG(IF(cls = 'unexplained', STRUCT(kind, t AS created_at, detail), NULL) IGNORE NULLS
       ORDER BY t, kind, detail LIMIT 20) AS row_samples
   FROM cls_all
@@ -699,7 +719,9 @@ SELECT
   future_legacy_older_unconfirmed,
   option_legacy_older_unconfirmed,
   -- #131 で足した列
-  option_new_behind
+  option_new_behind,
+  -- #134 で足した列
+  option_new_strike
 FROM counts
 -- result:end
 ;
