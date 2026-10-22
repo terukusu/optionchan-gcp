@@ -1,0 +1,16 @@
+{
+ "p_errno": "0",
+ "sCLMID": "CLMDateZyouhou",
+ "sResultCode": "0",
+ "aCLMDateZyouhou": [
+  {
+   "sDayKey": "001",
+   "sMaeEigyouDay_1": "20310228",
+   "sMaeEigyouDay_2": "20310227",
+   "sMaeEigyouDay_3": "20310226",
+   "sTheDay": "20310303",
+   "sYokuEigyouDay_1": "20310304",
+   "sYokuEigyouDay_2": "20310305"
+  }
+ ]
+}
