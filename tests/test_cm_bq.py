@@ -2,7 +2,7 @@
 
 CI では動かさない（BigQuery の認証が要る）。手元で `OPTIONCHAN_BQ_TEST=1 OPTIONCHAN_BQ_PROJECT=<PROJECT_ID> python -m pytest -q tests/test_cm_bq.py`。
 - 固定値の検査: sql/cm/atm_cm.sql の `-- result:begin`〜`-- result:end` の source（quote・holiday）を固定値の CTE に差し替えて
-  実行する（テーブルを読まない）。期待値は README の式を Python で計算したもの
+  実行する（テーブルを読まない）。期待値は docs/data.md の式を Python で計算したもの
 - 毎時の定期クエリ（#117）の試験: atm_cm.sql 全体を、source を固定値・atm_cm_iv と ingest_runs をスクリプトの一時テーブルにして
   @run_time ごとに 1 ジョブで流す（本番の表には書かない）。窓の決め方・何もしない回・冪等・増分の積み重ねと 1 日の窓の一致
 - 実テーブルの dry run: 見積もりバイト数（PR に記録する）

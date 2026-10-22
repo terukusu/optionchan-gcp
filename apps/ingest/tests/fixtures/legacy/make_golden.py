@@ -1,6 +1,6 @@
 """旧パーサー（functions/jpx_loader.parse_jpx_html）の出力を golden として保存する。
 
-ルートの Python 3.11 の venv（README の「テストの実行」）で、リポジトリ直下から実行する:
+ルートの Python 3.11 の venv（docs/development.md の「テスト」）で、リポジトリ直下から実行する:
 
     .venv/bin/python apps/ingest/tests/fixtures/legacy/make_golden.py
 

@@ -9,7 +9,7 @@ allowed-tools: [Read, Edit, Write, Bash, Glob, Grep]
 
 あなたは optionchan-gcp プロジェクトの実装エージェントです。GitHub Issue `$ARGUMENTS` を **簡易フロー** で実装します。
 
-**事前準備**: `CLAUDE.md`（特に「リポジトリに置くもの / 置かないもの」）、`README.md`、`memo.txt` を読み、構成を把握すること。プロジェクト前提（関数・ディレクトリ・ランタイムの対応表、`auth.txt`、ドリフト、python37 の注意、GCP プロジェクト `$P` と gcloud 構成、gh の扱い）は `.claude/skills/implement-issue/SKILL.md` の「プロジェクト前提」節を Read して従う。
+**事前準備**: `CLAUDE.md`（特に「リポジトリに置くもの / 置かないもの」）、`README.md`（全体像と文書の一覧）と、そこから辿る `docs/`（`setup.md`・`data.md`・`viewer.md`・`development.md`・`glossary.md`・`runbook.md`）のうち作業に関わるものを読み、構成を把握すること（`memo.txt` は旧系のコマンド集）。プロジェクト前提（関数・ディレクトリ・ランタイムの対応表、`auth.txt`、ドリフト、python37 の注意、GCP プロジェクト `$P` と gcloud 構成、gh の扱い）は `.claude/skills/implement-issue/SKILL.md` の「プロジェクト前提」節を Read して従う。
 
 簡易フローはフルフロー（`/implement-issue`）の **縮退版** であり上位互換ではない。**レビューをゼロにするのではなく、独立 context の subagent レビューを main インラインのセルフレビューへ縮退させる** もの。適用条件を 1 つでも満たさないなら、この skill を使わずフルフローへ回す。
 
@@ -117,7 +117,7 @@ Issue の AC を 1 件ずつ実行可能な確認に対応づけ、`pass` / `fai
 
 - **正しさ・セキュリティ視点**: ロジック誤り、境界条件（欠損値・タイムゾーン・限月切替）、クエリへの値埋め込み、`auth.txt` / 秘匿情報の扱い。1 件でも block
 - **影響波及視点**: 変更関数の呼び出し元（`grep -rn`）、レスポンス形式の消費側（JS）、python37 互換、BigQuery のスキャン量、ログ欠落。1 件でも block
-- **ドキュメント影響視点**: `README.md`（構成説明）と `memo.txt`（リソース作成・デプロイコマンド）の更新要否を両方確認する（該当なしでも確認した旨を報告）。要更新なら本フロー内で更新する
+- **ドキュメント影響視点**: `README.md`（全体像・文書の一覧）、`docs/`（`setup.md`・`data.md`・`viewer.md`・`development.md`・`glossary.md`・`runbook.md`）、`memo.txt`（旧系のコマンドだけ）の更新要否を確認する（該当なしでも確認した旨を報告）。要更新なら本フロー内で更新する
 
 ### 8. commit / PR
 

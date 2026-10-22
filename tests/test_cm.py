@@ -61,7 +61,7 @@ def test_cm_identical():
     assert '`' not in cm
     assert set(re.findall(r'\b(?:FROM|JOIN)\s+(\w{2,})', cm)) - {n for n in re.findall(r'^(\w+) AS \(', cm, re.M)} == \
         {'quote', 'holiday'}
-    # 定数（README の「30 日固定の ATM IV」）
+    # 定数（docs/data.md の「30 日固定の ATM IV の計算」）
     for expr in ('(ask - bid) * 2 <= 0.3 * (ask + bid)', 'rn <= 5', 'HAVING COUNT(*) >= 3', 'rn <= 9',
                  'LN(fwd / lo.k) / LN(hi.k / lo.k)', '(m2_days - 30)', '(30 - m1_days)', 'SQRT(var30 / 30)',
                  'm1_days >= 30', 'm1_days >= 3', 'm1_days < 3', "TIME(9, 0, 0)", 'EXTRACT(DAYOFWEEK FROM d) NOT IN (1, 7)'):
