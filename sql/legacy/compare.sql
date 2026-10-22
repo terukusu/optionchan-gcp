@@ -66,7 +66,10 @@
 --   legacy_older_unconfirmed  legacy_older の裏付けだけが無いもの（#89）。旧系の次のスナップショットの同じ行が新系の T より
 --                先へ進んでいる（spot・future は約定時刻が後、option は出来高が多い）= 新系の T が旧系の T と旧系の次の間にある。
 --                spot・future は約定時刻が旧系と同じ分の別の価格も含める（新系の T が旧系 ≤ 新系、(b) は S1 ≤ 旧 ≤ S2。分の精度では
---                どちらが先か決まらない）。新系がたまたま 1 回だけ値を読み誤った形と区別できないので、1 日に表ごと 3 行までなら
+--                どちらが先か決まらない）。spot・future は旧系の次が新系の T と同じ約定時刻の別の価格で、基準価格・hv（future は限月も
+--                同じか +1 年）が新系の T と同じ、新系の T の約定時刻が旧系の T より後のものも含める（#135。旧系の次と新系の T の
+--                どちらがその分の途中の版か分の精度では決まらない。新系の T の価格だけの読み誤りは基準価格が合わず当たらない。
+--                2026-10-21 は future 1 行）。新系がたまたま 1 回だけ値を読み誤った形と区別できないので、1 日に表ごと 3 行までなら
 --                説明済み、超えたら全部 unexplained（2026-10-14 は future 2 行・option 1 行、10-15 は future 1 行）
 --   unexplained  それ以外（約定の列がどの候補とも合わない行など）
 -- スナップショット: 旧系にあって新系に無い T は legacy_only（新系の取りこぼし、説明できない差分）、新系だけの T は保存条件の差
@@ -256,8 +259,10 @@ spot_cls0 AS (
     IFNULL(n.v = nx.v, FALSE) AS ok_nx,
     IFNULL(n.v = ln.v, FALSE) AS ok_ln,
     ln.created_at IS NULL OR IFNULL(ln.pt >= n.pt, FALSE) AS ln_ok,
-    -- legacy_older_unconfirmed の条件: 旧系の次の約定時刻が新系の T より後（#89）
-    IFNULL(ln.pt > n.pt, FALSE) AS ln_ahead,
+    -- legacy_older_unconfirmed の条件: 旧系の次の約定時刻が新系の T より後（#89）、または旧系の次が新系の T と同じ約定時刻の
+    -- 別の価格で基準価格・hv が同じ、新系の T が旧系の T より進んでいる（#135。どちらがその分の途中の版か分の精度では決まらない）
+    IFNULL(ln.pt > n.pt
+      OR (ln.pt = n.pt AND ln.v != n.v AND ln.base = n.base AND ln.hv = n.hv AND n.pt > l.pt), FALSE) AS ln_ahead,
     CASE
       WHEN l.v = n.v THEN 'match'
       WHEN l.v = pv.v OR l.v = nx.v THEN 'version'
@@ -286,8 +291,9 @@ spot_cls0 AS (
 ),
 -- (a) 10 分の中の前のスナップショットと全列一致、(b) 連続する 2 スナップショットの約定時刻の間。
 -- confirmed（legacy_older）: 新系の T の約定時刻が旧系より後、(b) は S1 ≤ 旧 < S2、新系の T の値の裏付けがある。
--- それ以外で、旧系の次の約定時刻が新系の T より後（旧系 ≤ 新系 < 旧系の次）、(b) は S1 ≤ 旧 ≤ S2 のものは
--- legacy_older_unconfirmed（#89。同じ分の別の価格を含む）。1 日の上限（n_unconfirmed）は spot_cls で見る。
+-- それ以外で、旧系の次の約定時刻が新系の T より後（旧系 ≤ 新系 < 旧系の次）、または旧系の次が新系の T と同じ約定時刻の別の
+-- 価格（基準価格・hv が同じ、旧系 < 新系。#135）、(b) は S1 ≤ 旧 ≤ S2 のものは legacy_older_unconfirmed（#89。同じ分の別の価格を
+-- 含む）。1 日の上限（n_unconfirmed）は spot_cls で見る。
 -- 1 回の走査で両方の旗を出す（分類の CTE の参照を増やさない）
 spot_older AS (
   SELECT t, LOGICAL_OR(confirmed) AS confirmed, COUNTIF(NOT LOGICAL_OR(confirmed)) OVER () AS n_unconfirmed
@@ -358,7 +364,9 @@ future_cls0 AS (
     IFNULL(n.v = nx.v AND n.cm = nx.cm, FALSE) AS ok_nx,
     IFNULL(n.v = ln.v AND ln.cm IN (n.cm, DATE_ADD(n.cm, INTERVAL 1 YEAR)), FALSE) AS ok_ln,
     ln.created_at IS NULL OR IFNULL(ln.pt >= n.pt, FALSE) AS ln_ok,
-    IFNULL(ln.pt > n.pt, FALSE) AS ln_ahead,
+    IFNULL(ln.pt > n.pt
+      OR (ln.pt = n.pt AND ln.v != n.v AND ln.base = n.base AND ln.hv = n.hv AND n.pt > l.pt
+        AND ln.cm IN (n.cm, DATE_ADD(n.cm, INTERVAL 1 YEAR))), FALSE) AS ln_ahead,
     CASE
       WHEN l.v = n.v AND l.cm = n.cm THEN 'match'
       WHEN l.v = n.v AND l.cm = DATE_ADD(n.cm, INTERVAL 1 YEAR) THEN 'contract_year'

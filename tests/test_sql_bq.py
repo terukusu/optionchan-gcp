@@ -1173,7 +1173,7 @@ def s1_minute_fixture(table, next_kind):
 @pytest.mark.parametrize('table', ['spot', 'future'])
 @pytest.mark.parametrize('next_kind, older, unconfirmed', [
     ('same_as_t', 1, 0),       # 旧系の次が新系の T を裏付ける → legacy_older（(b) の下の境界 S1 ≤ 旧、#89）
-    ('other_price', 0, 0),     # 旧系の次が新系の T と違う（同じ分の別の価格）→ unexplained
+    ('other_price', 0, 1),     # 旧系の次が新系の T と同じ分の別の価格（基準価格・hv 同じ）→ legacy_older_unconfirmed（#135）
     ('ahead', 0, 1),           # 裏付けは無いが旧系の次が新系の T より先 → legacy_older_unconfirmed
 ])
 def test_compare_older_same_minute_as_s1(table, next_kind, older, unconfirmed):
@@ -1181,6 +1181,73 @@ def test_compare_older_same_minute_as_s1(table, next_kind, older, unconfirmed):
     assert counts(row, (f'{table}_legacy_older', f'{table}_legacy_older_unconfirmed', f'{table}_unexplained', 'unexplained')) == {
         f'{table}_legacy_older': older, f'{table}_legacy_older_unconfirmed': unconfirmed,
         f'{table}_unexplained': 1 - older - unconfirmed, 'unexplained': 1 - older - unconfirmed}
+
+
+def next_same_minute_fixture(table, shape='hit', n=1):
+    """2026-10-21 00:05 JST（15:05 UTC）の先物の形（#135）を n 回。ブロック k（b = 5k）ごとに新系は b・b + 2（T）・b + 3、
+    b + 1 は新旧ともスナップショットが無い（欠け）。新系の T は約定時刻 b + 2 の価格 A、新系の b + 3 は同じ約定時刻の価格 B
+    （基準価格は同じ 100）。旧系の T は新系に無い b + 1 の版（途中の版）、旧系の次（b + 3）は新系の b + 3 と同じ
+    = 旧系の次が新系の T と同じ約定時刻の別の価格。shape で当たらない形にする: base = 新系の T の価格だけ違う（基準価格が違う）、
+    hv = 新系の T の hv が違う、same_minute = 旧系の T が新系の T と同じ約定時刻の別の価格、cm = 新系・旧系の b + 3 の限月が
+    新系の T と違う（+1 年でもない。future だけ）"""
+    at, other = (spot_at, future_at) if table == 'spot' else (future_at, spot_at)
+
+    def moved(v, step=0.5):
+        return {**v, 'price': v['price'] + step, 'diff': v['diff'] + step}
+
+    d = empty()
+    for k in range(n):
+        b = 5 * k
+        new_t, after, legacy_t = at(b + 2), moved(at(b + 2)), at(b + 1)
+        if shape == 'base':
+            new_t = {**new_t, 'price': new_t['price'] + 0.25}
+        elif shape == 'hv':
+            new_t = {**new_t, 'hv': 21.0}
+        elif shape == 'same_minute':
+            legacy_t = moved(at(b + 2), 0.25)
+        elif shape == 'cm':
+            after = {**after, 'contract_month': '2027-06-01'}
+        for m, v in ((b, at(b)), (b + 2, new_t), (b + 3, after)):
+            put(d, 'new', ts(m, 5), v if table == 'spot' else other(m), v if table == 'future' else other(m), [opt_c(m)])
+            d['new_runs'].append({'snapshot_at': ts(m, 5), 'page2_updated_at': ts(m, 5)})
+        for m, v in ((b + 2, legacy_t), (b + 3, after)):
+            put(d, 'legacy', ts(m, 5), v if table == 'spot' else other(m), v if table == 'future' else other(m), [opt_c(m)])
+    return d
+
+
+def _same_minute_counts(row, table):
+    return counts(row, (f'{table}_legacy_older', f'{table}_legacy_older_unconfirmed', f'{table}_unexplained', 'unexplained'))
+
+
+@pytest.mark.parametrize('table', ['spot', 'future'])
+def test_compare_legacy_next_same_minute_as_new_t(table):
+    """旧系の次が新系の T と同じ約定時刻の別の価格で、基準価格・hv（future は限月も）が同じ → legacy_older_unconfirmed（#135。
+    分の精度ではどちらがその分の途中の版か決まらない。裏付けは無いので legacy_older にはしない）"""
+    row = run_compare(next_same_minute_fixture(table))
+    assert _same_minute_counts(row, table) == {
+        f'{table}_legacy_older': 0, f'{table}_legacy_older_unconfirmed': 1, f'{table}_unexplained': 0, 'unexplained': 0}
+
+
+@pytest.mark.parametrize('table, shape', [
+    ('spot', 'base'), ('future', 'base'),            # 新系の T の価格だけの読み誤り（基準価格が旧系の次と合わない）
+    ('spot', 'hv'), ('future', 'hv'),                # 新系の T の hv が旧系の次と違う
+    ('spot', 'same_minute'), ('future', 'same_minute'),  # 新系の T が旧系の T より進んでいない（同じ約定時刻）
+    ('future', 'cm'),                                # 旧系の次の限月が新系の T と違う（+1 年でもない）
+])
+def test_compare_legacy_next_same_minute_keeps_new_errors_unexplained(table, shape):
+    row = run_compare(next_same_minute_fixture(table, shape))
+    assert _same_minute_counts(row, table) == {
+        f'{table}_legacy_older': 0, f'{table}_legacy_older_unconfirmed': 0, f'{table}_unexplained': 1, 'unexplained': 1}
+
+
+@pytest.mark.parametrize('table', ['spot', 'future'])
+@pytest.mark.parametrize('n, explained', [(3, True), (4, False)])
+def test_compare_legacy_next_same_minute_limit(table, n, explained):
+    """#135 の形も今の legacy_older_unconfirmed と同じ上限（1 日に表ごと 3 行）で数える"""
+    row = run_compare(next_same_minute_fixture(table, n=n))
+    assert _same_minute_counts(row, table) == {
+        f'{table}_legacy_older': 0, f'{table}_legacy_older_unconfirmed': n if explained else 0,
+        f'{table}_unexplained': 0 if explained else n, 'unexplained': 0 if explained else n}
 
 
 def unconfirmed_fixture(n):
