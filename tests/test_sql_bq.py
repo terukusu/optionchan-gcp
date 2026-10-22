@@ -437,7 +437,7 @@ def test_compare_classifies():
         'future_unexplained': 0,
         'option_compared': 17, 'option_version': 2, 'option_quote_only': 2, 'option_quotation_year': 1,
         'option_page2': 1, 'option_unexplained': 1,
-        'spot_legacy_older': 0, 'future_legacy_older': 0, 'option_legacy_older': 0,
+        'spot_legacy_older': 0, 'future_legacy_older': 0, 'option_legacy_older': 0, 'option_new_behind': 0,
         'unexplained': 3,
         # 先物の約定時刻が直前から変わった新系のスナップショット（T4 は T3 と同じ）10 件、そのうち旧系に無いのは T9
         'legacy_condition_candidates': 10, 'legacy_condition_missed': 1,
@@ -937,6 +937,122 @@ def test_compare_long_freeze_last_row_is_not_new_behind(table):
     row = run_compare(long_freeze_fixture(table))
     assert counts(row, (f'{table}_new_behind', f'{table}_new_stale', f'{table}_unexplained', 'unexplained')) == {
         f'{table}_new_behind': 0, f'{table}_new_stale': 0, f'{table}_unexplained': 4, 'unexplained': 4}
+
+
+# ---- option の新系の 1 分遅れ（new_behind、#131） ----
+# 2026-10-19・10-20 の形。新系 14:00〜14:04（05:00〜05:04 UTC）、旧系は 14:02 だけ。spot・先物は新旧一致、option は 1 キー
+
+OPT_T = ts(2, 5)       # 比べる T（14:02 JST）
+
+
+def opt_old(strike=68000):
+    """新系の直前・T の版: 13:30 の約定のまま"""
+    return opt(1, strike, 1960, jst(30, 13), 79, 26.34, 1500)
+
+
+def opt_legacy(strike=68000, pt=None):
+    """旧系の T の版: 14:01（T の 1 分前）の約定で出来高が増えた"""
+    return opt(1, strike, 1995, pt or jst(1, 14), 80, 26.9, 1500)
+
+
+def opt_caught_up(strike=68000):
+    """新系の直後の版: 旧系より後（14:02）の約定"""
+    return opt(1, strike, 2000, jst(2, 14), 83, 26.95, 1500)
+
+
+def no_trade(strike=68000):
+    """約定の無い行（その日まだ約定が無い。建玉・清算値・清算日だけある）"""
+    return {**opt(1, strike, 0, None, 0, 0.0, 1500), 'price': None, 'diff': None, 'diff_rate': None, 'iv': None,
+            'volume': None, 'delta': None, 'gamma': None, 'theta': None, 'vega': None}
+
+
+def opt_behind_fixture(shape, n=1):
+    """shape で新系・旧系の option の版を変える。n は同じ T に並べる行使価格の数（上限の検査）"""
+    strikes = [68000 + 125 * k for k in range(n)]
+    new = {m: [opt_old(k) if m <= 2 else opt_caught_up(k) for k in strikes] for m in range(5)}
+    legacy = [opt_legacy(k) for k in strikes]
+    if shape == 'no_trade':
+        # 2026-10-20 10:46 JST の形: 新系の直前・T は約定の列が空、旧系は T と同じ分のその日最初の約定、直後は旧系より先
+        new[1] = new[2] = [no_trade(k) for k in strikes]
+        legacy = [opt(1, k, 120, jst(2, 14), 5, 30.0, 100) for k in strikes]
+        new[3] = new[4] = [opt(1, k, 125, jst(2, 14), 7, 30.1, 100) for k in strikes]
+    elif shape == 'frozen':
+        new[3] = new[2]                                        # 直後も T と同じ（止まり続ける）
+    elif shape == 'delay_2min':
+        legacy = [opt_legacy(k, pt=jst(0, 14)) for k in strikes]
+    elif shape == 'next_behind':
+        new[3] = [{**opt_caught_up(k), 'volume': 79} for k in strikes]  # 直後は進むが出来高が旧系より少ない
+    elif shape == 'positions':
+        legacy = [{**r, 'positions': 1001} for r in legacy]
+    elif shape == 'quotation':
+        legacy = [{**r, 'quotation': 901} for r in legacy]
+    elif shape == 'new_missing':
+        # 2026-10-21 19:48 JST の形: 新系の直前・T にその行が無く、直後から載る
+        new[1] = new[2] = []
+    elif shape == 'quotation_year':
+        legacy = [{**r, 'quotation_date': '2027-10-09'} for r in legacy]
+    elif shape == 'base':
+        legacy = [{**r, 'diff': r['price'] - 1490} for r in legacy]
+    d = empty()
+    for m in range(5):
+        at = ts(m, 5)
+        put(d, 'new', at, spot_at(m), future_at(m), new[m])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+    put(d, 'legacy', OPT_T, spot_at(2), future_at(2), legacy)
+    return d
+
+
+OPT_BEHIND_KEYS = ('option_compared', 'option_new_behind', 'option_unexplained', 'unexplained')
+
+
+@pytest.mark.parametrize('shape, behind', [
+    ('same', 1),               # 2026-10-19 の形: 新系の T = 直前（古い約定）、旧系は T の 1 分前の約定、直後で追いつく
+    ('no_trade', 1),           # 2026-10-20 10:46 JST の形
+    ('quotation_year', 1),     # 清算日だけ旧系が +1 年（旧系の年の補完の誤り）
+    ('frozen', 0),             # 直後も T と同じ（凍結は説明しない）
+    ('delay_2min', 0),         # 旧系の約定時刻が T の 2 分前（遅れが 1 分を超える）
+    ('next_behind', 0),        # 直後の出来高が旧系より少ない（追いついていない）
+    ('positions', 0),          # 建玉が新系の T と違う
+    ('quotation', 0),          # 清算値が新系の T と違う
+    ('new_missing', 0),        # 新系の T・直前に行が無い（新系の T の行の欠けは説明しない）
+    ('base', 0),               # 基準価格（price − diff）が新系の直後と違う
+])
+def test_compare_option_new_behind_shapes(shape, behind):
+    row = run_compare(opt_behind_fixture(shape))
+    assert counts(row, OPT_BEHIND_KEYS) == {
+        'option_compared': 1, 'option_new_behind': behind, 'option_unexplained': 1 - behind, 'unexplained': 1 - behind}
+    assert counts(row, ('spot_unexplained', 'future_unexplained', 'option_legacy_older',
+                        'option_legacy_older_unconfirmed')) == dict.fromkeys(
+        ('spot_unexplained', 'future_unexplained', 'option_legacy_older', 'option_legacy_older_unconfirmed'), 0)
+
+
+@pytest.mark.parametrize('n, explained', [(10, True), (11, False)])
+def test_compare_option_new_behind_limit(n, explained):
+    """option の新系の 1 分遅れも 1 日に 10 行まで。超えたら全部 unexplained（系統的に遅れる不具合）"""
+    row = run_compare(opt_behind_fixture('same', n))
+    assert counts(row, OPT_BEHIND_KEYS) == {
+        'option_compared': n, 'option_new_behind': n if explained else 0, 'option_unexplained': 0 if explained else n,
+        'unexplained': 0 if explained else n}
+    assert len(row['unexplained_samples']) == (0 if explained else n)
+
+
+def test_compare_option_long_freeze_last_minute_is_new_behind():
+    """限界の明記（#131）: 2 分以上の凍結（新系の 14:00〜14:03 が同じ版、14:04 で追いつく。旧系は 14:01〜14:04 の毎分進む）は、
+    option では新系の T の約定時刻から遅れを測れないので最後の分（14:03）が new_behind になる。凍結の途中の分（14:01・14:02）は
+    直後も T と同じで unexplained に残る（凍結そのものは検出される）。14:04 は新旧一致"""
+    d = empty()
+    for m in range(6):
+        at = ts(m, 5)
+        put(d, 'new', at, spot_at(m), future_at(m), [opt_old() if m <= 3 else opt(1, 68000, 2010, jst(3, 14), 90, 27.0, 1500)])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+    for m in range(1, 4):
+        put(d, 'legacy', ts(m, 5), spot_at(m), future_at(m), [opt(1, 68000, 1990 + m, jst(m - 1, 14), 80 + m, 26.5, 1500)])
+    put(d, 'legacy', ts(4, 5), spot_at(4), future_at(4), [opt(1, 68000, 2010, jst(3, 14), 90, 27.0, 1500)])
+    row = run_compare(d)
+    assert counts(row, OPT_BEHIND_KEYS) == {
+        'option_compared': 4, 'option_new_behind': 1, 'option_unexplained': 2, 'unexplained': 2}
+    samples = sorted(s['created_at'][:16] for s in row['unexplained_samples'])
+    assert samples == ['2026-10-13 05:01', '2026-10-13 05:02']
 
 
 def s1_minute_fixture(table, next_kind):
