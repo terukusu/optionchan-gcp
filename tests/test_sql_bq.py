@@ -1055,6 +1055,96 @@ def test_compare_option_long_freeze_last_minute_is_new_behind():
     assert samples == ['2026-10-13 05:01', '2026-10-13 05:02']
 
 
+
+# ---- option の新しく載った行使価格の 1 分遅れ（new_strike、#134） ----
+# 2026-10-21 19:48 JST の形。新系 14:00〜14:04（05:00〜05:04 UTC）、旧系は 14:02 だけ。その限月には毎分約定する行（call 70000。
+# 新旧一致）があり、新しく載る行使価格は新系の 14:03 以降と旧系の 14:02 にだけある（新系はページの書き換えの途中の版を読んだ）
+
+def strike_next(typ, strike, traded=False):
+    """新しく載った行の新系の直後の版。traded は T の分（14:02）に出来高 1 の約定がある行"""
+    if traded:
+        return opt(typ, strike, 120, jst(2, 14), 1, 30.0, 100)
+    return {**no_trade(strike), 'type': typ}
+
+
+def opt_new_strike_fixture(shape, n=4):
+    """shape で新しく載る行の版を変える。'shape' は 10-21 の 4 行（put 2 行は直後と全列一致、call 2 行は ask だけ違い、
+    call 100000 は約定あり）。'limit' は n 行（直後と全列一致）。ほかは call 100000 の 1 行で 1 つの条件を外す"""
+    if shape == 'shape':
+        nexts = [strike_next(2, 95000), strike_next(2, 100000), strike_next(1, 95000), strike_next(1, 100000, traded=True)]
+        legacy = nexts[:2] + [{**r, 'ask': 7} for r in nexts[2:]]
+    elif shape == 'limit':
+        nexts = [strike_next(1, 95000 + 125 * k, traded=True) for k in range(n)]
+        legacy = list(nexts)
+    else:
+        nexts = [strike_next(1, 100000, traded=True)]
+        legacy = [{**nexts[0], 'ask': 7}]
+    if shape == 'trade_mismatch':
+        legacy = [{**legacy[0], 'volume': 2}]
+    elif shape == 'quotation_year':
+        legacy = [{**legacy[0], 'quotation_date': '2027-10-09'}]
+    new = {m: [opt_c(m)] + (nexts if m >= 3 else []) for m in range(5)}
+    legacy_moving = opt_c(2)
+    if shape == 'in_prev':
+        new[1] = new[1] + nexts                                # 直前にあり T だけ欠けた（本物の取りこぼし）
+    elif shape == 'no_next':
+        new[3], new[4] = [opt_c(3)], [opt_c(4)]                # 直後にも無い（2026-10-14 の凍結の形）
+    elif shape == 'frozen_t':
+        new[2] = [opt_c(1)]                                    # 新系の T のその限月が直前と同じ（凍結の最後の分）
+        legacy_moving = opt_c(1)
+    d = empty()
+    for m in range(5):
+        if shape == 'no_prev' and m <= 1:
+            continue                                           # T が読んだ範囲の最初のスナップショット
+        at = ts(m, 5)
+        put(d, 'new', at, spot_at(m), future_at(m), new[m])
+        d['new_runs'].append({'snapshot_at': at, 'page2_updated_at': at})
+    put(d, 'legacy', OPT_T, spot_at(2), future_at(2), [legacy_moving, *legacy])
+    return d
+
+
+
+NEW_STRIKE_KEYS = ('option_compared', 'option_new_strike', 'option_unexplained', 'unexplained')
+NEW_STRIKE_ZERO = ('option_version', 'option_quote_only', 'option_quotation_year', 'option_page2', 'option_new_behind',
+                   'option_legacy_older', 'option_legacy_older_unconfirmed', 'spot_unexplained', 'future_unexplained')
+
+
+def test_compare_option_new_strike_2026_10_21_shape():
+    """2026-10-21 19:48 JST の形: 新系の T・直前に無く直後から載った 4 行は new_strike（気配と表示の列は直後と違ってよい）"""
+    row = run_compare(opt_new_strike_fixture('shape'))
+    assert counts(row, NEW_STRIKE_KEYS) == {
+        'option_compared': 5, 'option_new_strike': 4, 'option_unexplained': 0, 'unexplained': 0}
+    assert counts(row, NEW_STRIKE_ZERO) == dict.fromkeys(NEW_STRIKE_ZERO, 0)
+    assert row['unexplained_samples'] == []
+
+
+@pytest.mark.parametrize('shape, explained', [
+    ('quotation_year', 1),     # 清算日だけ旧系が +1 年（旧系の年の補完の誤り）
+    ('in_prev', 0),            # 新系の直前にその行がある（T だけの欠けは説明しない）
+    ('no_next', 0),            # 新系の直後にも無い（2026-10-14 の凍結の間に旧系だけ多い形）
+    ('trade_mismatch', 0),     # 旧系の出来高が新系の直後と違う
+    ('frozen_t', 0),           # 新系の T のその限月が直前と同じ（凍結の最後の分で直後に行が載る形）
+    # T が読んだ範囲の最初のスナップショット（has_prev が偽）。直前が無いと凍結かどうか（new_month_moved）も測れず偽になるので、
+    # has_prev だけを切り分けるテストではない（どちらでも当たらないことの確認）
+    ('no_prev', 0),
+])
+def test_compare_option_new_strike_shapes(shape, explained):
+    row = run_compare(opt_new_strike_fixture(shape))
+    assert counts(row, NEW_STRIKE_KEYS) == {
+        'option_compared': 2, 'option_new_strike': explained, 'option_unexplained': 1 - explained,
+        'unexplained': 1 - explained}
+    assert counts(row, NEW_STRIKE_ZERO) == dict.fromkeys(NEW_STRIKE_ZERO, 0)
+
+
+@pytest.mark.parametrize('n, explained', [(10, True), (11, False)])
+def test_compare_option_new_strike_limit(n, explained):
+    """新しく載った行使価格の 1 分遅れも 1 日に 10 行まで。超えたら全部 unexplained（新しく載った行を系統的に取りこぼす不具合）"""
+    row = run_compare(opt_new_strike_fixture('limit', n))
+    assert counts(row, NEW_STRIKE_KEYS) == {
+        'option_compared': n + 1, 'option_new_strike': n if explained else 0, 'option_unexplained': 0 if explained else n,
+        'unexplained': 0 if explained else n}
+    assert len(row['unexplained_samples']) == (0 if explained else n)
+
 def s1_minute_fixture(table, next_kind):
     """2026-10-14 14:58 JST の先物の形: 新系 14:55〜14:59（14:57 の版 → 14:58 の版）、旧系の 14:58 は新系の直前（14:57）と同じ分の
     別の価格（基準価格は同じ）。旧系の次（14:59）は新系の 14:59 と同じで、next_kind で変える:
