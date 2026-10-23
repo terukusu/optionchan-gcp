@@ -31,11 +31,14 @@
 --                現在まで飛ぶ）と古い版に戻る形は遅れが 1 分を超えるので当たらない。新系が止まり続ける形（直後も T と同じ版。2026-10-14 18:52〜19:27 JST の凍結）は
 --                当たらず、new_stale の上限で unexplained になる。1 日に表ごと 10 行までなら説明済み、超えたら全部 unexplained
 --                （2026-10-15 は future 5 行・spot 3 行。上限 10 はそれに余裕を持たせた値。毎分遅れる不具合は 1 日数百行になる）。
---                option で新系の 1 分遅れ（#131）: 新系の T が直前と同じ（約定の列と清算日）で、新系の直後が T と違う版に進み、
+--                option で新系の 1 分遅れ（#131）: 新系の T が直前と同じ版か直前から進んでいる（出来高が直前より多く約定時刻が
+--                直前以上。#146。清算日は直前と同じ）で、
+--                新系の直後が T と違う版に進み、
 --                出来高が 新系の T < 旧系 ≤ 直後、約定時刻が 新系の T < 旧系 ≤ 直後（新系の T に約定が無ければ最小とみなす）。
 --                遅れは 1 分（旧系の約定時刻が T の 1 分前以後）。建玉・清算値が新系の T と同じ、清算日は新系の T と同じか ±1 年、
 --                基準価格（price − diff）が新系の直後と同じ。旧系・新系の T・直前・直後のどれにも行があるときだけ（2026-10-19 の
---                4 行・10-20 の 2 行の形）。1 日に 10 行までなら説明済み、超えたら option の new_behind を全部 unexplained。
+--                4 行・10-20 の 2 行、10-22 14:41 JST の 1 行（新系の T が直前から 1 分ぶん進んでいた）の形）。1 日に 10 行までなら説明済み、
+--                超えたら option の new_behind を全部 unexplained。
 --                option は約定が疎で新系の T の約定時刻から遅れを測れないので、2 分以上の凍結の最後の分（直後で追いつく）は
 --                当たりうる（凍結の途中の分は直後も T と同じで当たらず unexplained に残るので、凍結そのものは検出される）
 --   page2        option で新系の 2 限月ページの更新時刻が 1 限月と違うスナップショットの 2 限月の行（#11 AC 5。新系の T にも行があるときだけ）
@@ -481,6 +484,7 @@ opt_cand AS (
     p.option_prev_at IS NOT NULL AS has_prev,
     p.option_next_at IS NOT NULL AS has_next,
     pv.created_at IS NOT NULL AS in_prev, pv.tv AS ptv, pv.qv AS pqv, pv.qd AS pqd,
+    pv.vol AS pvol, pv.pt AS ppt,
     nx.created_at IS NOT NULL AS in_next, nx.tv AS xtv, nx.qv AS xqv, nx.qd AS xqd,
     nx.vol AS xvol, nx.pt AS xpt, nx.base AS xbase,
     -- legacy_older の条件: 新系の T の約定の列が新系の直後（ok_nx）か旧系の次のスナップショット（ok_ln）の同じ行と一致。
@@ -529,11 +533,15 @@ opt_cls0 AS (
           OR (in_next AND ltv = xtv AND (lqd IS NOT DISTINCT FROM xqd OR lqd IN (DATE_ADD(xqd, INTERVAL 1 YEAR), DATE_SUB(xqd, INTERVAL 1 YEAR))))
         ) THEN 'quote_only'
       WHEN in_new AND page2_differs AND last_trading_day > page1_month THEN 'page2'
-      -- 新系の 1 分遅れ（#131）: 新系の T が直前と同じ版のままで、直後が T と違う版に進み旧系に追いついた（出来高・約定時刻が
-      -- 新系の T < 旧系 ≤ 直後）。遅れは 1 分に限る。新系が止まり続ける形（直後も T と同じ）は当たらず unexplained に残る。
+      -- 新系の 1 分遅れ（#131）: 新系の T が直前と同じ版か、直前から進んでいて（出来高が直前より多く約定時刻が直前以上。#146。清算日は直前と同じ）、直後が T と
+      -- 違う版に進み旧系に追いついた（出来高・約定時刻が 新系の T < 旧系 ≤ 直後）。遅れは 1 分に限る。新系が止まり続ける形
+      -- （直後も T と同じ）は当たらず unexplained に残る。
       -- 基準価格は直後と比べる（新系の T は約定が無いことがある。2026-10-20 10:46 JST）。1 日の上限は opt_cls で見る
       WHEN in_legacy AND in_new AND in_prev AND in_next
-        AND ntv = ptv AND nqd IS NOT DISTINCT FROM pqd AND xtv != ntv
+        AND nqd IS NOT DISTINCT FROM pqd
+        AND (ntv = ptv OR (IFNULL(nvol, 0) > IFNULL(pvol, 0)
+          AND IFNULL(npt, DATETIME '1970-01-01') >= IFNULL(ppt, DATETIME '1970-01-01')))
+        AND xtv != ntv
         AND IFNULL(nvol, 0) < IFNULL(lvol, 0) AND IFNULL(lvol, 0) <= IFNULL(xvol, 0)
         AND IFNULL(npt, DATETIME '1970-01-01') < lpt AND lpt <= xpt
         AND lpt >= DATETIME_SUB(DATETIME(t, 'Asia/Tokyo'), INTERVAL 1 MINUTE)
