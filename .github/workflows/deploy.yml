@@ -24,7 +24,7 @@ defaults:
 
 env:
   TF_IN_AUTOMATION: "1"
-  # プロジェクト固有の値は repository variables で渡す（runbook「GitHub リポジトリの設定」）
+  # プロジェクト固有の値は repository variables で渡す（docs/setup.md の「2. GitHub の設定」）
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
   TF_VAR_project_id: ${{ vars.GCP_PROJECT_ID }}
@@ -69,7 +69,7 @@ jobs:
         run: |
           for v in GCP_PROJECT_ID TF_STATE_BUCKET; do
             if [ -z "${!v}" ]; then
-              echo "repository variable ${v} が未設定（runbook「GitHub リポジトリの設定」）"
+              echo "repository variable ${v} が未設定（docs/setup.md の「2. GitHub の設定」）"
               exit 1
             fi
           done

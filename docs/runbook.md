@@ -253,7 +253,7 @@ M2 を ERROR ログの一致にしないのは、既知のエラー（毎日 04:
 
 ### 作成
 
-Terraform 化（#10）前の手順の記録。今は Terraform が作るので使わない。ポリシーを消してしまい CI も使えない緊急時にだけ使い、その後「Terraform」節の「アラートの取り込み」で state を合わせる（古い ID を `terraform state rm` してから import）。
+Terraform 化（#10）前の手順の記録。今は Terraform が作るので使わない。ポリシーを消してしまい CI も使えない緊急時にだけ使い、その後「Terraform」節の「アラートの取り込み（#10、一度だけ）」で state を合わせる（古い ID を `terraform state rm` してから import）。
 
 同じ表示名のポリシーがあれば作らない。リポジトリ直下で実行する。
 
@@ -706,7 +706,7 @@ jq -n --argjson id "$(gh api user --jq .id)" \
 gh api -X POST $R/environments/prod/deployment-branch-policies -f name=master -f type=branch >/dev/null
 ```
 
-`TF_ALERT_POLICY_IDS` は下の「アラートの取り込み」で設定する。必須 status check は PR の CI が一度成功してから「GitHub 設定」の「ブランチ保護の設定」で入れる。確認は「GitHub 設定」の「確認」。
+`TF_ALERT_POLICY_IDS` は下の「アラートの取り込み（#10、一度だけ）」で設定する。必須 status check は PR の CI が一度成功してから「GitHub 設定」の「ブランチ保護の設定」で入れる。確認は「GitHub 設定」の「確認」。
 
 ### prod の state の初期化（#10、一度だけ）
 
@@ -820,7 +820,7 @@ $TF -chdir=infra/prod plan -input=false -detailed-exitcode > /dev/null; echo $? 
 | GCS `<PROJECT_ID>-raw` | 生 HTML（`raw/YYYY/MM/DD/YYYYMMDDTHHMM.json.gz`）。ソフト削除 7 日、期限なし | `infra/bootstrap/ingest.tf` |
 | 権限 | `sa-ingest`: `optionchan_tokyo` の `dataEditor`、プロジェクトの `bigquery.jobUser`（回収・照合・再処理のクエリ、#34）、バケットの `objectCreator`・`objectViewer`（削除・上書きなし）。`sa-scheduler`: サービス `ingest` の `run.invoker` だけ | `infra/bootstrap/ingest.tf`、`infra/prod/iam.tf` |
 
-時間外・休場日はアプリが 204 を返して何もしない（JPX にもアクセスしない）。取引時間中は 1 限月のページを毎分、2 限月のページは更新時だけ取得する。毎時 0 分（JST）は、通常の処理の後に取りこぼしを回収し、07:00 は前日分を照合する（「回収と照合」）。
+時間外・休場日はアプリが 204 を返して何もしない（JPX にもアクセスしない）。取引時間中は 1 限月のページを毎分、2 限月のページは更新時だけ取得する。毎時 0 分（JST）は、通常の処理の後に取りこぼしを回収し、07:00 は前日分を照合する（「回収と照合（#34）」）。
 
 ### 変数
 
@@ -865,7 +865,7 @@ gcloud run services get-iam-policy ingest --region $L --project $P --format=json
   | jq -c '[.bindings[] | {role, m: [.members[] | split("@")[0]]}]'   # [{"role":"roles/run.invoker","m":["serviceAccount:sa-scheduler"]}] だけ
 ```
 
-バケット・プロジェクトの付与は「Terraform」の「bootstrap の変更（#33）」の確認と同じ。
+バケット・プロジェクトの付与は「Terraform」の「bootstrap の変更（#33: 取り込み用の SA・バケット・付与）」の確認と同じ。
 
 書き込み（T0 後の取引時間中の 30 分。`ingest_runs` 10 行以上、不一致 0）:
 
@@ -1002,8 +1002,8 @@ gcloud logging read "$LF AND jsonPayload.event=\"ingested\"" --project $P --form
 `raw_unrecovered` を受けたとき:
 
 1. 同じ窓の `recovery_parse_failed` / `parse_failed` のログで、未回収の名前ごとに原因を見る（`gcloud logging read "... AND jsonPayload.object=\"<名前>\"" --project $P`）
-2. 解析の失敗ならパーサーを直す PR（`PARSER_VERSION` を上げる）をデプロイしてから、「再処理ジョブ」で `--only-missing` を実行する
-3. 書き込み・読み出しの失敗（BigQuery・GCS の障害が 6 時間以上続いた等）なら、そのまま「再処理ジョブ」で `--only-missing` を実行する
+2. 解析の失敗ならパーサーを直す PR（`PARSER_VERSION` を上げる）をデプロイしてから、「再処理ジョブ（#34）」で `--only-missing` を実行する
+3. 書き込み・読み出しの失敗（BigQuery・GCS の障害が 6 時間以上続いた等）なら、そのまま「再処理ジョブ（#34）」で `--only-missing` を実行する
 4. 結果（件数と原因の分類）を #11 にコメントする（名前の一覧・ログの全文は貼らない）
 
 確認（0 分の回の結果。窓は「ログ」と同じ `$LF` の形で、毎時 0〜1 分を含む時間帯にする）:
@@ -1078,7 +1078,7 @@ gcloud scheduler jobs pause ingest --location $L --project $P   # この PR が�
 gcloud scheduler jobs describe ingest --location $L --project $P --format='value(state)'   # PAUSED
 ```
 
-通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。`ingest_paused = true` の間は新系の M1 も Terraform が無効にする（`monitoring.tf` の `paused_with_ingest`。再開の PR で有効に戻る）。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系が動いている間は、旧系の値で「過去データの移行（#12）」の「E 以降の取りこぼしを補う」の手順で補える）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
+通常の停止・再開は `infra/prod/variables.tf` の `ingest_paused`（既定 `false`）の既定値を変える PR で行う。`ingest_paused = true` の間は新系の M1 も Terraform が無効にする（`monitoring.tf` の `paused_with_ingest`。再開の PR で有効に戻る）。止めている間は生 HTML も保存されないので、回収・再処理では埋められない（JPX のページは今の値しか出さない。旧系が動いている間は、旧系の値で「過去データの移行（#12）」の「E 以降の取りこぼしを補う（#14 で旧系を止めるとき）」の手順で補える）。止めると毎時の回収と 07:00 の照合も止まるので、再開後に「再処理ジョブ（#34）」の `--only-missing --dry-run` で止めていた前後の未完了を確かめる。
 
 ### 切り戻し
 
@@ -1088,7 +1088,7 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 | R2 イメージを前の版に戻す | 原因のコミットを revert する PR。plan が前の入力のタグを解決し、Artifact Registry に残っていれば（直近 5 版）その digest、無ければ apply job がビルドし直す | 1 回の apply で新しいリビジョン |
 | R3 計算資源を消す | Scheduler・Cloud Run（サービス・ジョブ `reprocess`）・invoker・テーブル関数の定義を消す PR（Cloud Run は `deletion_protection = false`）。plan の要約が delete だけ（その件数）であることを見てマージ | 新系が無くなる。データセット・テーブル・バケット・SA は残す |
 
-データは消さない（テーブルは `deletion_protection`、データセット・テーブル・バケットは `prevent_destroy` と `deletion_policy = "PREVENT"`）。並行稼働中に入った行は追記のみで、最新版の選択（テーブル関数、「最新版の読み方」）で選別する。
+データは消さない（テーブルは `deletion_protection`、データセット・テーブル・バケットは `prevent_destroy` と `deletion_policy = "PREVENT"`）。並行稼働中に入った行は追記のみで、最新版の選択（テーブル関数、「最新版の読み方（#34）」）で選別する。
 
 #34（回収・再処理・テーブル関数）だけを戻すときは、そのコミットを revert する PR（plan はサービスのイメージの update 1、ジョブ・テーブル関数の delete 5）。回収・再処理で書かれた行は消さない（同じスナップショットの 1 件だけが最新版として選ばれるので害は無い）。bootstrap の `bigquery.jobUser` は使われなければ無害なので残してよい（外すなら bootstrap の revert と所有者の apply）。
 
@@ -1183,7 +1183,7 @@ rm -rf $T
 4. サービスの状態: `gcloud run services describe ingest --region $L --project $P --format='value(status.conditions[0].status,status.latestReadyRevisionName)'`（`True` か）。直前のデプロイで壊れたなら「新しい取り込み（ingest）」の「切り戻し」の R2
 5. Google Cloud のステータスページ（Cloud Run / Cloud Scheduler、asia-northeast1）
 
-止まっていた間は生 HTML も保存されないので取り戻せない（JPX のページは今の値だけ）。欠けた時間帯を #11 に記録する。再開後、止まっていた前後の取りこぼしは「再処理ジョブ」の `--only-missing --dry-run` で確かめる。
+止まっていた間は生 HTML も保存されないので取り戻せない（JPX のページは今の値だけ）。欠けた時間帯を #11 に記録する。再開後、止まっていた前後の取りこぼしは「再処理ジョブ（#34）」の `--only-missing --dry-run` で確かめる。
 
 ### M2 を受けたとき
 
@@ -1197,19 +1197,19 @@ gcloud logging read "$F" --project $P --freshness=2h --limit=200 \
 
 | event / ログ | 意味 | 対応 |
 |---|---|---|
-| `parse_failed` | ページの構造が想定と違う（生 HTML は保存済み） | 1 回だけなら次の分を見る。続くならパーサーを直す PR（`PARSER_VERSION` を上げる）→ デプロイ後に「再処理ジョブ」で期間を作り直す |
+| `parse_failed` | ページの構造が想定と違う（生 HTML は保存済み） | 1 回だけなら次の分を見る。続くならパーサーを直す PR（`PARSER_VERSION` を上げる）→ デプロイ後に「再処理ジョブ（#34）」で期間を作り直す |
 | `stale` | 取引時間中にページの更新時刻が日中 30 分 / 夜間 40 分以上止まっている（毎分出る） | JPX 側の遅延。旧系の取り込み・JPX のページを見て、続くなら #11 に記録。新系の不具合ではないので何もしなくてよいことが多い |
 | `jpx_unavailable_stale` | 取引時間中に `jpx_unavailable`（ページが取れない・空）が続き、最後に保存できたスナップショット（`last_snapshot_at`。直近のしきい値分に 1 件も無ければこの項目は無い）から日中 30 分 / 夜間 40 分以上たった（`jpx_unavailable` の分ごとに出る。`detail` は取得の失敗（`HTTP 403`・`ConnectionError` など）か空ページの理由（`update-time is empty`・`no option rows`）） | `detail` で切り分ける。HTTP・接続のエラーなら JPX 側の障害か拒否（旧系の取り込みも止まっているか見る）。`update-time is empty` / `no option rows` が日中に続くなら JPX の改版を疑い、ページを開いて要素（`.update-time`・`.price-info-scroll .row-num`）を確かめ、パーサーを直す PR（`PARSER_VERSION` を上げる）。この間の生 HTML は無いので、取り込めなかった分は回復できない |
-| `write_failed` / `storage_failed` | BigQuery / GCS への書き込み・読み出しの失敗 | 生 HTML があれば毎時 0 分の回収（「回収と照合」）が埋める。続くなら BigQuery / GCS のステータス・権限を見る |
+| `write_failed` / `storage_failed` | BigQuery / GCS への書き込み・読み出しの失敗 | 生 HTML があれば毎時 0 分の回収（「回収と照合（#34）」）が埋める。続くなら BigQuery / GCS のステータス・権限を見る |
 | `deadline_exceeded`（`stage`） | 45 秒の期限切れ | 単発なら回収が埋める。続くなら `stage` の外部呼び出し（JPX・GCS・BigQuery）の遅延を見る |
 | `recovery_item_failed` | 回収の 1 件の想定外の例外 | その件は次の 0 分に再試行される。続くなら `object` の生 HTML とコードを見る |
-| `raw_unrecovered` | 07:00 の照合で未回収あり | 「回収と照合」の「`raw_unrecovered` を受けたとき」 |
-| `reconcile_failed` | 照合の一覧・クエリの失敗 | 回収も失敗している（`recovery_failed` は通知しない）可能性が高い。`recovery_failed` のログの `stage` を見て、権限（`bigquery.jobUser`）・BigQuery のステータスを確認する。直ったら翌朝の照合か「再処理ジョブ」の `--only-missing --dry-run` で確かめる |
+| `raw_unrecovered` | 07:00 の照合で未回収あり | 「回収と照合（#34）」の「`raw_unrecovered` を受けたとき」 |
+| `reconcile_failed` | 照合の一覧・クエリの失敗 | 回収も失敗している（`recovery_failed` は通知しない）可能性が高い。`recovery_failed` のログの `stage` を見て、権限（`bigquery.jobUser`）・BigQuery のステータスを確認する。直ったら翌朝の照合か「再処理ジョブ（#34）」の `--only-missing --dry-run` で確かめる |
 | `calendar_outdated` / `calendar_unavailable` / `calendar_load_rejected` | 取引カレンダーの期限切れ（09:00 に 1 回）・BigQuery の版を一度も読めていない（休業日なしで判定中）・ingest が版を使わなかった（壊れている・不自然） | 「取引カレンダー（#63）」の「ERROR を受けたとき」 |
 | `calendar_sync_failed` / `calendar_sync_rejected` / `calendar_sessions_changed`（サービス ingest の 06:40、ジョブ `calendar-sync`） | 取引カレンダーの取り込みの失敗・検証で拒否・取引時間の変更（前のカレンダーのまま） | 「取引カレンダー（#63）」の「ERROR を受けたとき」 |
 | `unexpected` | 想定外の例外（500） | ログの `detail` を見て Issue にする |
-| `reprocess_failed` / `reprocess_item_failed`（`cloud_run_job`） | 再処理ジョブの失敗 | 「再処理ジョブ」の終了コードの説明 |
-| `bigquery_dts_config`（`jsonPayload.message` が `quality:`・`legacy_compare:` など） | 定期クエリの失敗（品質チェックの違反・新旧の説明できない差分・コピーの遅れ・権限） | 「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき」 |
+| `reprocess_failed` / `reprocess_item_failed`（`cloud_run_job`） | 再処理ジョブの失敗 | 「再処理ジョブ（#34）」の終了コードの説明 |
+| `bigquery_dts_config`（`jsonPayload.message` が `quality:`・`legacy_compare:` など） | 定期クエリの失敗（品質チェックの違反・新旧の説明できない差分・コピーの遅れ・権限） | 「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき（M2 の `bigquery_dts_config`）」 |
 | Cloud Run の監査ログの ERROR（`cloudaudit.googleapis.com`） | Terraform のデプロイ失敗など、サービス・ジョブの更新の失敗 | deploy workflow の apply のログを見る |
 | リクエストログの 5xx（`jsonPayload.event` 無し） | アプリの 500（上の event と同時に出る）、または 503 / 504（インスタンスの起動失敗・タイムアウト） | 同時刻のアプリのログが無ければ、`log_name` が `run.googleapis.com%2Fvarlog%2Fsystem` のログ（メモリ超過など）を見る |
 
@@ -1241,7 +1241,7 @@ BigQuery Data Transfer Service（DTS）の 4 本。実行 SA は `sa-sq-dts`（t
 | `optionchan legacy-stage` | US | 07:02 | 旧 `optionchan` の 3 テーブルの窓の分を `optionchan_legacy_stage` に作り直す（+ 窓と件数の 1 行 `staged_window`）。旧系の夜間分は 06:20 頃までに入っている | — |
 | `optionchan legacy-copy` | asia-northeast1 | 07:10 | `optionchan_legacy_stage` → `optionchan_legacy_copy`（データセットコピー、上書き。1 日 約 100MB） | — |
 | `optionchan quality-daily` | asia-northeast1 | 07:15 | 品質チェック（target.md 3.4）。窓の `ingest_runs` と最新版（`*_latest`）を検査。ingest の 07:00 の照合・回収の後 | `optionchan_tokyo.quality_daily`（1 日 1 行）。違反が 1 件以上なら記録の後に失敗 |
-| `optionchan legacy-compare` | asia-northeast1 | 07:30 | コピーと最新版を行単位で比べる（#11 の AC 5〜7） | `optionchan_tokyo.legacy_compare_daily`（1 日 1 行）。コピーが今回の窓でなければ記録せずに失敗、コピーの行数が stage の件数と違えば記録の後に失敗。説明できない差分が 1 以上なら記録の後に失敗（窓の日付が 2026-10-14 以降。「ERROR の切り替え」） |
+| `optionchan legacy-compare` | asia-northeast1 | 07:30 | コピーと最新版を行単位で比べる（#11 の AC 5〜7） | `optionchan_tokyo.legacy_compare_daily`（1 日 1 行）。コピーが今回の窓でなければ記録せずに失敗、コピーの行数が stage の件数と違えば記録の後に失敗。説明できない差分が 1 以上なら記録の後に失敗（窓の日付が 2026-10-14 以降。「ERROR の切り替え（説明できない差分）」） |
 
 - 失敗は Cloud Logging の `resource.type="bigquery_dts_config"`・severity ERROR で、新系の M2（「新しい取り込みの監視（#35）」）が通知する。DTS の失敗メール（実行 SA 宛て）は使わない
 - 時刻を 07 時台に寄せているのは、M2 の通知が 1 時間に 1 回までのため。07:15 / 07:30 の失敗で始まる抑制は 08:15 / 08:30 に終わり、08:45 の寄り付き以降の ingest の ERROR は通知される。それでも DTS の失敗の通知の後の 1 時間は、ingest の ERROR が通知されないことがある（「M2 を受けたとき」のとおり直近の ERROR をすべて見る）
@@ -1325,7 +1325,7 @@ done
 bq ls --transfer_run --run_attempt=LATEST --max_results=3 --format=json "$(tc legacy-stage us)" | jq -c '.[] | {runTime, state}'
 ```
 
-`new_stale_rows`（`*_new_stale`）と `legacy_older_rows`（`*_legacy_older`）、`new_behind_rows`（`*_new_behind`。option は #131）と `unconfirmed_rows`（`*_legacy_older_unconfirmed`、#89。列を足す前の日は 0 と出す。`option_new_behind` は #131 の前の日は 0 と出す）は説明済みだが、新系の解析の誤りを吸いうる分類なので件数も見る（2026-10-13 08:52 JST〜10-14 01:08 JST は 5 行・3 行。#89 の 2 つは 2026-10-13〜15 の再計算で 1 日 0〜8 行・1〜3 行）。前の日より急増したら、その日の該当行を新旧で並べて見る（「ERROR の切り替え」）。`new_strike_rows`（`option_new_strike`、#134。列を足す前の日は 0 と出す）が 1 以上の日は、該当の行の T の新系の生 HTML（`ingest_runs.source_object` の raw）にその行使価格が無いこと（新系のパーサーの取りこぼしでないこと）を確かめて件数・時刻を #11 に記録する（行の全文は貼らない）。
+`new_stale_rows`（`*_new_stale`）と `legacy_older_rows`（`*_legacy_older`）、`new_behind_rows`（`*_new_behind`。option は #131）と `unconfirmed_rows`（`*_legacy_older_unconfirmed`、#89。列を足す前の日は 0 と出す。`option_new_behind` は #131 の前の日は 0 と出す）は説明済みだが、新系の解析の誤りを吸いうる分類なので件数も見る（2026-10-13 08:52 JST〜10-14 01:08 JST は 5 行・3 行。#89 の 2 つは 2026-10-13〜15 の再計算で 1 日 0〜8 行・1〜3 行）。前の日より急増したら、その日の該当行を新旧で並べて見る（「ERROR の切り替え（説明できない差分）」）。`new_strike_rows`（`option_new_strike`、#134。列を足す前の日は 0 と出す）が 1 以上の日は、該当の行の T の新系の生 HTML（`ingest_runs.source_object` の raw）にその行使価格が無いこと（新系のパーサーの取りこぼしでないこと）を確かめて件数・時刻を #11 に記録する（行の全文は貼らない）。
 
 前日の行が無い（実行自体が無い）ことは M2 では通知されない。上の確認で前日の行があることを見る。
 
@@ -1341,16 +1341,16 @@ bq ls --transfer_config --transfer_location=$L --project_id=$P --format=json \
 | メッセージ | 意味 | 対応 |
 |---|---|---|
 | `quality: {...}` | 品質チェックの違反（JSON は `quality_daily` の行と同じ） | 下の「品質チェックの違反」 |
-| `legacy_compare: unexplained N on <日付> {...}` | 説明できない差分（記録は済み。「ERROR の切り替え」が有効で、窓の日付が下限以降のときだけ出る） | 下の「説明できない差分」 |
-| `legacy_compare: copy incomplete on <日付> ...` | コピーの 3 テーブルの行数が stage の件数と違う（記録は済み、`copy_complete = false`。その日の比較は当てにならない） | `legacy-copy` の実行の状態とログを見る。直ったら「再実行」で copy → compare |
-| `legacy_compare: copy is not for the window ...` | `legacy-stage` か `legacy-copy` が失敗・遅延して、コピーが前日分でない（記録していない） | `legacy-stage`（US）と `legacy-copy` の実行の状態とログを見る。直ったら「再実行」で stage → copy → compare |
+| `legacy_compare: unexplained N on <日付> {...}` | 説明できない差分（記録は済み。「ERROR の切り替え（説明できない差分）」が有効で、窓の日付が下限以降のときだけ出る） | 下の「説明できない差分」 |
+| `legacy_compare: copy incomplete on <日付> ...` | コピーの 3 テーブルの行数が stage の件数と違う（記録は済み、`copy_complete = false`。その日の比較は当てにならない） | `legacy-copy` の実行の状態とログを見る。直ったら「再実行・バックフィル」で copy → compare |
+| `legacy_compare: copy is not for the window ...` | `legacy-stage` か `legacy-copy` が失敗・遅延して、コピーが前日分でない（記録していない） | `legacy-stage`（US）と `legacy-copy` の実行の状態とログを見る。直ったら「再実行・バックフィル」で stage → copy → compare |
 | `... is in the future (run_time ...)` | 手動実行の `run_time` が未来の窓を指している | `run_time` を直して再実行 |
 | `Access Denied` / `Permission ...` | `sa-sq-dts` の権限（bootstrap の `sq.tf`・prod の `sq.tf`） | plan で付与の差分を見る。旧テーブルの読み取りは bootstrap |
-| その他（クォータ・内部エラー） | BigQuery / DTS の障害 | 翌日の実行で戻るか見る。前日分は「再実行」 |
+| その他（クォータ・内部エラー） | BigQuery / DTS の障害 | 翌日の実行で戻るか見る。前日分は「再実行・バックフィル」 |
 
 **品質チェックの違反**: 項目ごとに原因を見る（窓は `quality_daily` の `window_start` / `window_end`。`bq query` は必ず `created_at` / `snapshot_at` で絞る）。
 
-- `rowcount_mismatch` / `missing_table`: 書き込みの途中失敗が最新版に入った可能性。`ingest_runs` と各テーブルを `ingest_run_id` ごとに数えて差のある実行を探し、生 HTML から「再処理ジョブ」で作り直す（新しい `ingest_run_id` が最新版になる）
+- `rowcount_mismatch` / `missing_table`: 書き込みの途中失敗が最新版に入った可能性。`ingest_runs` と各テーブルを `ingest_run_id` ごとに数えて差のある実行を探し、生 HTML から「再処理ジョブ（#34）」で作り直す（新しい `ingest_run_id` が最新版になる）
 - `dup_keys` / `months_not_2` / `atm_not_1`: パーサーか JPX のページの変化。取り込み時の構造の検査（`parse_failed`）をすり抜けたので、パーサーを直す PR（`PARSER_VERSION` を上げる）→ 再処理
 - `price_time_*` / `sunday`: 約定日時の年・日付の補完（`price_time_raw` と比べる）。祝日取引の日付は違反にしていない。JPX の表示の変化ならパーサーを直す
 - `body_frozen`（#88）: JPX が本文の止まったページを返した（「JPX の接続・取り直し・本文の凍結（#88）」の「`body_frozen` を受けたら」）。時間帯は窓の `option_price_latest` を本文の列でスナップショットごとにまとめ、直前と同じものを並べて探す（`created_at` で窓に絞る。1 日 数百 MB）。データは直せないので、その日は違反のまま記録を残す（品質チェックの定義の誤りでなければ再実行しない）。過去の日（2026-10-14 など）を再実行すると違反として記録されるので、#88 より前の日は再実行しない。#88 を戻すとき、`quality_daily` の `body_frozen` 列と品質チェックの SQL は戻さない（テーブルは削除保護つきで列を消せず、SQL だけ戻すと INSERT の列数が合わずに品質チェックが毎日失敗する）。誤検知なら、違反の合計から `body_frozen` を外す PR にする
@@ -1392,7 +1392,7 @@ bq ls --transfer_run --run_attempt=LATEST --max_results=1 --format=json "$(tc le
 
 記録の `fail_on_unexplained` 列は、この 2 つを合わせた「その実行で ERROR にする設定だったか」（下限より前の日は false）。経緯: 2026-10-13 の記録で分類を確かめ、#61 で旧系の古い版・途中の版（`*_legacy_older`）と新系の書き換え途中の版（`*_new_stale`）を足した（2026-10-13 の結果は「突き合わせの分類」の再現の項）。#89 で新系の 1 分遅れ（`*_new_behind`）と裏付けの無い古い版（`*_legacy_older_unconfirmed`）を足し、`*_legacy_older` の途中の版の下の境界を「S1 と同じ分」まで広げた（2026-10-13〜15 の再計算は同じ項）。#131 で option の新系の 1 分遅れ（`option_new_behind`）を足した（2026-10-19・10-20 の形）。#134 で option の新しく載った行使価格の 1 分遅れ（`option_new_strike`）を足した（2026-10-21 の形）。#135 で `*_legacy_older_unconfirmed` に旧系の次が新系の T と同じ分の別の価格の形を足した（2026-10-21 の future の形。新系・旧系とも 15:04 UTC のスナップショットが無く、旧系が途中の版を読んだ）。#146 で option の `new_behind` を新系の T が直前から進んでいる形にも広げた（2026-10-22 の形）。
 
-失敗を受けたら「説明できない差分」の手順で原因を調べ、新系の不具合か、分類の漏れ（説明の付く新しい種類）かを決める。分類の漏れなら `sql/legacy/compare.sql` と `tests/test_sql_bq.py` を直す PR を出し、その日を「再実行」して 0 になることを確かめる（直した分類は #11 にコメントする）。
+失敗を受けたら「説明できない差分」の手順で原因を調べ、新系の不具合か、分類の漏れ（説明の付く新しい種類）かを決める。分類の漏れなら `sql/legacy/compare.sql` と `tests/test_sql_bq.py` を直す PR を出し、その日を「再実行・バックフィル」して 0 になることを確かめる（直した分類は #11 にコメントする）。
 
 - `option_quote_only` の比率（`option_quote_only / option_compared`）も見る。2026-10-13 の 09:32〜11:58 JST は約 12%、08:52〜21:29 JST 全体は約 8%。気配の列だけを誤る新系のパーサーの不具合はこの分類に吸収されて検出できないので、比率が大きく上がったら気配の列を新旧で並べて見る
 - `*_new_stale` と `*_legacy_older` も件数を見る（2026-10-13 08:52 JST〜10-14 01:08 JST は `spot_new_stale` 2・`future_new_stale` 3（うち裏付けの無い書き換え途中の版 1）・`future_legacy_older` 1・`option_legacy_older` 2）。`*_new_stale` のうち、新系の T が直前と同じ中身の行と裏付けの無い書き換え途中の行は、それぞれ 1 日に表ごと 3 行を超えると全部 `unexplained` になる。どちらも新系の T の値が直前と同じか旧系より進んでいる行を説明済みにするので、急増したら新系の解析の誤りがすり抜けていないかを疑い、その日の行を新旧で並べて見る
@@ -1407,7 +1407,7 @@ bq ls --transfer_run --run_attempt=LATEST --max_results=1 --format=json "$(tc le
 
 ### #11 の判定に使う数
 
-- **連続 10 営業日（AC 5）**: `legacy_snapshots > 0` の日を営業日として、`unexplained = 0`（かつ `copy_complete`）の日が途切れずに 10 日続いたら満たす。「説明できない差分」の定義は行単位（上の「突き合わせの分類」。#11 にコメントで明記）。突き合わせのデプロイ後の日から数える（#11）。行の無い営業日（実行が無かった日）は「再実行」で埋めてから数える
+- **連続 10 営業日（AC 5）**: `legacy_snapshots > 0` の日を営業日として、`unexplained = 0`（かつ `copy_complete`）の日が途切れずに 10 日続いたら満たす。「説明できない差分」の定義は行単位（上の「突き合わせの分類」。#11 にコメントで明記）。突き合わせのデプロイ後の日から数える（#11）。行の無い営業日（実行が無かった日）は「再実行・バックフィル」で埋めてから数える
   - **#88 の対策（JPX の接続を要求ごとに張り直す・5xx 等の取り直し・本文の凍結の検知。「JPX の接続・取り直し・本文の凍結（#88）」）のデプロイ後の最初の営業日から数え直す**（下の `WHERE` に `compare_date >= '<デプロイ後の最初の営業日>'` を足す）。それより前の日は、2026-10-14 の本文の凍結（unexplained 190。本物の欠損なので説明済みにしない）と 04:00 JST の 502 の取りこぼし（2026-10-15 の `legacy_only` 1）の原因が残っていた期間として、数に入れない。数え直した後も、`quality_daily` の `body_frozen` が 1 以上の日はその日の `unexplained` の原因として #11 に記録する
 
   ```sh
@@ -1456,7 +1456,7 @@ done   # 合計の billed が 3 GiB 以下
 ### 停止・削除
 
 - 一時停止: `infra/prod/sq.tf` の該当の DTS に `disabled = true` を足す PR。急ぐときはコンソール（BigQuery → データ転送）で無効にし、続けて同じ PR を出す（出さないと次の apply で有効に戻る）
-- 旧系の停止（#14）で突き合わせを止める（その前に、新系の取りこぼしを旧系の値で補う。「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。作業用データセットを使う）: `legacy_stopped = true` の PR で `legacy-*` の DTS 3 本を無効にする（「旧系の停止（#14、5a）」）。旧系を消す #24 で、`legacy-*` の DTS 3 本・作業用データセット 2 つ・その付与を消し、bootstrap の旧テーブルの読み取り 3 件を外す（所有者の apply）。`legacy_compare_daily`（#11 の判定の記録）と品質チェックは残す
+- 旧系の停止（#14）で突き合わせを止める（その前に、新系の取りこぼしを旧系の値で補う。「過去データの移行（#12）」の「E 以降の取りこぼしを補う（#14 で旧系を止めるとき）」。作業用データセットを使う）: `legacy_stopped = true` の PR で `legacy-*` の DTS 3 本を無効にする（「旧系の停止（#14、5a）」）。旧系を消す #24 で、`legacy-*` の DTS 3 本・作業用データセット 2 つ・その付与を消し、bootstrap の旧テーブルの読み取り 3 件を外す（所有者の apply）。`legacy_compare_daily`（#11 の判定の記録）と品質チェックは残す
 - 全部を戻す（この Issue の revert）: prod は delete 13 と M2 の update 1（結果のテーブルは先に `deletion_protection = false`）、bootstrap は revert + 所有者の apply（`sa-sq-dts` は `deletion_policy = "PREVENT"` なので state から外すだけになる）。旧系の取り込みには影響しない
 
 ## 過去データの移行（#12）
@@ -1471,7 +1471,7 @@ done   # 合計の billed が 3 GiB 以下
 
 **何を移すか**: 旧系の T（3 表の `created_at`）のうち、新系の `ingest_runs` に同じ `snapshot_at` の記録が 1 件も無いもの。新系の稼働前（最初のスナップショットは 2026-10-12 23:39 UTC = 08:39 JST）はすべて、並行稼働中は新系の取りこぼし（`legacy_compare_daily` の `legacy_only`）だけになる。新系の記録がある T は新系のまま（#38 の前の 09:31 JST までの分も。旧系も 1 分の中のどれかの版を取っていて、#40 の分類で説明済み）。範囲の終わり E は品質チェック済みの窓の終わり以下（`insert.sql` が `quality_daily` の最大の `window_end` で止める）。
 
-**移行行の見え方**: T ごとに `ingest_run_id = 'legacy-<T の UTC, YYYYMMDDTHHMMSSZ>'`（例 `legacy-20261009T001500Z`）。`ingest_runs` に T ごとの完了記録（`trigger = 'legacy_import'`、`parser_version = 'legacy'`、`source_object = 'legacy:optionchan'`、`started_at = finished_at = T`、行数は実数）を書くので、最新版のテーブル関数（「最新版の読み方」）がそのまま返す。追加列（`page_updated_at`・`price_time_raw`・`parser_version`・`source_object`）は NULL（元データのまま。補正は #4。`price_time_raw` は #4 が埋める）。旧系の重複（同じ `created_at` で中身が違う行）・欠け（片方の表だけのスナップショット）もそのまま移る。`finished_at = T` なので、後で同じ T の生 HTML を再処理すれば新系の版が選ばれる。
+**移行行の見え方**: T ごとに `ingest_run_id = 'legacy-<T の UTC, YYYYMMDDTHHMMSSZ>'`（例 `legacy-20261009T001500Z`）。`ingest_runs` に T ごとの完了記録（`trigger = 'legacy_import'`、`parser_version = 'legacy'`、`source_object = 'legacy:optionchan'`、`started_at = finished_at = T`、行数は実数）を書くので、最新版のテーブル関数（「最新版の読み方（#34）」）がそのまま返す。追加列（`page_updated_at`・`price_time_raw`・`parser_version`・`source_object`）は NULL（元データのまま。補正は #4。`price_time_raw` は #4 が埋める）。旧系の重複（同じ `created_at` で中身が違う行）・欠け（片方の表だけのスナップショット）もそのまま移る。`finished_at = T` なので、後で同じ T の生 HTML を再処理すれば新系の版が選ばれる。
 
 **いつ行うか**: **土曜 13:00 JST 以降**に始め、日曜のうちに終える。E はその土曜の 07:00 JST（金曜 22:00 UTC）。
 
@@ -1546,7 +1546,7 @@ done   # 土曜の午後は旧系に書き込みが無いので、行数が同�
 
 失敗したら: 一時的な原因（内部エラー・クォータ）なら、実行中の実行が無いことを確かめて手で 1 回だけ実行し直す（`overwrite_destination_table` で上書きされる）。続けて失敗する・原因が権限や制限なら、その週末は中止する: DTS を消し（6. の 1 行目）、一時データセットを消し（`bq rm -r -f -d $P:$IMP`）、1. で上げたクエリ量上限を戻し、結果（状態・エラーの要約）を #12 にコメントする。
 
-1 時間足（`atm_*`）もコピーされる。これは 5. の後、6. の後片付けの前に「1 時間足（#49）」の「過去分の移行」で移す（この節の SQL では移さない）。
+1 時間足（`atm_*`）もコピーされる。これは 5. の後、6. の後片付けの前に「1 時間足（#49）」の「過去分の移行（#12 の後）」で移す（この節の SQL では移さない）。
 
 ### 3. コピーの検証
 
@@ -1645,7 +1645,7 @@ C0 の 7 日より前の日は、上の verify で足りる: 移行の記録は 
 
 ### 6. 後片付け
 
-先に「1 時間足（#49）」の「過去分の移行」を済ませる（一時データセットの旧 `atm_*` を使う）。
+先に「1 時間足（#49）」の「過去分の移行（#12 の後）」を済ませる（一時データセットの旧 `atm_*` を使う）。
 
 ```sh
 ids=$(tc legacy-import $L); [ "$(echo "$ids" | grep -c .)" = 1 ] && bq rm -f --transfer_config "$ids"
@@ -1671,7 +1671,7 @@ for t in spot_price future_price option_price; do
 done
 ```
 
-旧データセット `optionchan` はそのまま残っている（#15 まで消さない）。タイムトラベル（7 日）と 4. のテーブルスナップショット（14 日）で移行前の状態も読める。スナップショットからの復元（`bq cp --restore`）は移行の後に新系が書いた行も消すので、上の DELETE で戻せないときの最後の手段にする（復元するなら新系の取り込みを止め、復元の後に「再処理ジョブ」の `--only-missing` でその間を作り直す）。
+旧データセット `optionchan` はそのまま残っている（#15 まで消さない）。タイムトラベル（7 日）と 4. のテーブルスナップショット（14 日）で移行前の状態も読める。スナップショットからの復元（`bq cp --restore`）は移行の後に新系が書いた行も消すので、上の DELETE で戻せないときの最後の手段にする（復元するなら新系の取り込みを止め、復元の後に「再処理ジョブ（#34）」の `--only-missing` でその間を作り直す）。
 
 ### 所要時間・コストの見積もり
 
@@ -2237,7 +2237,7 @@ SELECT
    WHERE trade_date >= "2018-01-01") AS sco_mismatch'   # 0 0
 ```
 
-`--date_format`・`--time_format` で失敗するときは、#111 の「2. 歩み値の取り込み」の代わりの手順（全列 STRING の一時表 → トランザクションで月を入れ直す）を先物の 11 列で行う。調査で作った全列 STRING の一時表（`$IMP.dc_future_tick_stage`）は、確認が済んだら `bq rm -f -t $P:$IMP.dc_future_tick_stage` で消してよい。
+`--date_format`・`--time_format` で失敗するときは、#111 の「2. 歩み値の取り込み（月ごと）」の代わりの手順（全列 STRING の一時表 → トランザクションで月を入れ直す）を先物の 11 列で行う。調査で作った全列 STRING の一時表（`$IMP.dc_future_tick_stage`）は、確認が済んだら `bq rm -f -t $P:$IMP.dc_future_tick_stage` で消してよい。
 
 ### 2. 事前確認
 
@@ -2496,7 +2496,7 @@ for t in atm_iv atm_option_price atm_target_price; do
 done   # MONTH・started_at、["last_trading_day"]、[{"role":"roles/bigquery.dataEditor","m":["serviceAccount:sa-sq-dts"]}]
 ```
 
-DTS は作成直後に 1 回自動で実行される（`run_time` は作成時刻。窓はその日の 07:00 JST までの 1 日分）。`SUCCEEDED` になったか「日次の確認」の実行の状態で見る。失敗したら「失敗を受けたとき」。トランザクション（`BEGIN TRANSACTION`）を含むスクリプトが DTS で通らない場合は、`atm_hourly.sql` の `BEGIN TRANSACTION;` / `COMMIT TRANSACTION;` の 2 行を消す PR を出す（MERGE は 1 文ずつ原子的。途中で失敗しても再実行で直る）。
+DTS は作成直後に 1 回自動で実行される（`run_time` は作成時刻。窓はその日の 07:00 JST までの 1 日分）。`SUCCEEDED` になったか「日次の確認」の実行の状態で見る。失敗したら「失敗を受けたとき（M2 の `bigquery_dts_config`）」。トランザクション（`BEGIN TRANSACTION`）を含むスクリプトが DTS で通らない場合は、`atm_hourly.sql` の `BEGIN TRANSACTION;` / `COMMIT TRANSACTION;` の 2 行を消す PR を出す（MERGE は 1 文ずつ原子的。途中で失敗しても再実行で直る）。
 
 **デプロイ前の日を埋める**: 新系の最初の窓（2026-10-13 07:00 JST〜）からデプロイの前日の窓までを「再実行・バックフィル」の複数日の手順で作る。
 
@@ -2519,14 +2519,14 @@ GROUP BY window_date, tbl ORDER BY window_date DESC, tbl'   # 同じ窓の 3 表
 
 ### 失敗を受けたとき（M2 の `bigquery_dts_config`）
 
-「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき」のログの見方で、`config_id` が `atm-hourly` のものを見る。
+「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき（M2 の `bigquery_dts_config`）」のログの見方で、`config_id` が `atm-hourly` のものを見る。
 
 | メッセージ | 意味 | 対応 |
 |---|---|---|
 | `atm_hourly: win_end ... is in the future` | 手動実行の `run_time` が未来の窓 | `run_time` を直して再実行 |
-| `Transaction ...` / `Could not serialize access ...` | 同じ表への別の DML（移行・手動の再実行）と重なった | 重なった作業が終わってから「再実行」。トランザクションなので 3 表とも書かれていない |
+| `Transaction ...` / `Could not serialize access ...` | 同じ表への別の DML（移行・手動の再実行）と重なった | 重なった作業が終わってから「再実行・バックフィル」。トランザクションなので 3 表とも書かれていない |
 | `Access Denied` / `Permission ...` | `sa-sq-dts` の 3 表の付与（`infra/prod/sq.tf` の `sq_atm_ohlc_editor`）か `optionchan_tokyo` の読み取り | plan で付与の差分を見る |
-| その他（クォータ・内部エラー） | BigQuery / DTS の障害 | 翌日の実行で戻るか見る。前日分は「再実行」 |
+| その他（クォータ・内部エラー） | BigQuery / DTS の障害 | 翌日の実行で戻るか見る。前日分は「再実行・バックフィル」 |
 
 ### 再実行・バックフィル
 
@@ -2542,7 +2542,7 @@ bq ls --transfer_run --run_attempt=LATEST --max_results=20 --format=json "$(tc a
 
 **バックフィルは 1 日ずつ順に実行する**（`bq mk --transfer_run --start_time --end_time` でまとめて作らない）。3 表は月のパーティションなので、近い日の MERGE が並行に走るとトランザクションが衝突して片方が失敗しうる（失敗した日はロールバックされ、ERROR で M2 も鳴る）。流し終えたら全日が `SUCCEEDED` かを確かめ、失敗した日は再実行する。毎朝の定期実行（07:40）と重ならない時間に行う。
 
-作り直すとき: 再処理ジョブ（「再処理ジョブ（#34）」）・回収で前の日の最新版が変わったとき、#12 の移行の後（新系の取りこぼしが旧系の行で埋まった日）、#14 の補い（「過去データの移行（#12）」の「E 以降の取りこぼしを補う」）の後。データの無い窓（#12 の前の新系の稼働前の日）を流しても何も変わらない（ATM の行が無い窓は何もしない）。
+作り直すとき: 再処理ジョブ（「再処理ジョブ（#34）」）・回収で前の日の最新版が変わったとき、#12 の移行の後（新系の取りこぼしが旧系の行で埋まった日）、#14 の補い（「過去データの移行（#12）」の「E 以降の取りこぼしを補う（#14 で旧系を止めるとき）」）の後。データの無い窓（#12 の前の新系の稼働前の日）を流しても何も変わらない（ATM の行が無い窓は何もしない）。
 
 定期実行は前日の窓 1 日分だけを作る。07:40 より後に前日以前の窓の最新版が変わったこと（毎時の回収は直近 6 時間分なので通常は起きない。再処理・回収の遅れ）は、完了記録の `finished_at` がその窓の翌朝 07:40 より後の実行がある窓の日付で見つけ、その日を `rt` で作り直す:
 
@@ -2752,13 +2752,13 @@ COMMIT TRANSACTION;"
 | `optionchan_tokyo.atm_cm_iv` | 列は `schema/cm/atm_cm_iv.json`（`created_at`・`iv30`・`method` と、限月ごとの最終取引日・SQ までの日数・フォワード・補間 ATM IV）。パーティションは月（`created_at`）。1 日 約 1,000 行 |
 | `sql/cm/cm_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)` の作り直し（下の「過去分」） |
 
-- ビューアーは表の最後の行の 1 秒後から now まで（最大 3 日）を同じ計算で補う（`apps/viewer` の `sql/atm_cm.sql`）。表は 1 時間以内に新しくなるので、補う分はふつう UTC の 1 日分のパーティション（約 110 MiB）。表が止まると最大 3〜4 日分
+- ビューアーは表の最後の行の 1 秒後から now まで（最大 3 日）を同じ計算で補う（`apps/viewer/src/optionchan_viewer/sql/atm_cm.sql`）。表は 1 時間以内に新しくなるので、補う分はふつう UTC の 1 日分のパーティション（約 110 MiB）。表が止まると最大 3〜4 日分
 - 料金（課金バイト。2026-10-16 の値で実測）: 増分の回 約 150 MiB（`option_price` の UTC の日パーティション 1 つ 約 112 MiB + 検査 2 表の最低課金 10 MiB ずつ + INSERT 約 20 MiB。その日のパーティションは日中に育つので早い時刻ほど少ない。09:45〜10:45 JST の回は前日のパーティションも読む）、07:45 JST の回 約 250 MiB（2 パーティション）、何もしない回 10 MiB（`ingest_runs` だけ）。1 日で平日 4 GiB 以下（見積もり 2〜4 GiB）・日曜 0.3 GiB 以下。プロジェクトのクエリ量の上限（2026-10-19 から 102400 MiB/日。「コスト」）の数 %
 - 重ね 2 時間より遅れて終わった取り込みは、翌朝 07:45 の回まで古い値のまま。3 日を超えて止まったとき・前日より前の最新版が変わったとき（再処理・回収）は「過去分」の `cm_backfill.sql` でその範囲を作り直す
 
 ### 確認（prod の apply の後）
 
-`tc`・`q` は「定期クエリ（#40）」・「1 時間足（#49）」の関数。件数・要約だけを #117 に記録する（行・ログの全文は貼らない）。
+`tc`・`q` は「日次の品質チェックと新旧の突き合わせ（#40）」・「1 時間足（#49）」の関数。件数・要約だけを #117 に記録する（行・ログの全文は貼らない）。
 
 ```sh
 # 定期クエリができている（表示名で選ぶ）
@@ -2813,7 +2813,7 @@ GROUP BY d ORDER BY d"
 
 ### 失敗を受けたとき・手動の再実行
 
-「1 時間足（#49）」の「失敗を受けたとき」のログの見方・メッセージの表と同じ（`config_id` は `atm-cm`、メッセージの先頭は `atm_cm:`）。
+「1 時間足（#49）」の「失敗を受けたとき（M2 の `bigquery_dts_config`）」のログの見方・メッセージの表と同じ（`config_id` は `atm-cm`、メッセージの先頭は `atm_cm:`）。
 
 - 増分の回の失敗: 何もしなくてよい。次の回が表の最後の行 − 2 時間から読むので、失敗した区間も埋まる（続けて失敗するなら原因を直す。M2 は 1 時間に 1 回まで鳴り続けるので、すぐ直せないときは「停止・削除」の一時停止）
 - 07:45 の回の失敗（前日分の作り直し）: 原因を直した後、`rt` の `atm-hourly` を `atm-cm`、`22:40` を `22:45` に替えて、作り直す窓 `[D-1 07:00, D 07:00) JST` の始まりの日付 `D-1`（「1 時間足（#49）」の窓の日付と同じ）で手動実行する（`--run_time=<D-1>T22:45:00Z` は JST の D 07:45 = 7 時台なので 1 日の窓）。7 時台以外の `run_time` の手動実行は増分の回になる
@@ -2839,7 +2839,7 @@ done
 ```
 
 - 結果は 1 行（`snapshots` = 取り込みの回数、`with_iv30` = 30 日の IV のある回数）。年ごとの件数を #100 にコメントする（全文は貼らない）
-- 確認: 年ごとの `with_iv30 / snapshots` が README の「出せる割合」と同じ程度（日中・夜間の前半はほぼ 100%、2021〜2025 年は深夜が NULL で 72〜100%）
+- 確認: 年ごとの `with_iv30 / snapshots` が docs/data.md の「30 日固定の ATM IV の計算」の出せる割合と同じ程度（日中・夜間の前半はほぼ 100%、2021〜2025 年は深夜が NULL で 72〜100%）
 
 ### 停止・削除
 
@@ -3107,7 +3107,7 @@ legacy_state() {
 上から順に。1 つの端末で。
 
 1. 停止前の記録: `legacy_state > $WDIR/legacy-before.txt; curl -s -o /dev/null -w '%{http_code}\n' "https://$(gcloud app describe --project=$P --format='value(defaultHostname)')/" > $WDIR/app-before.txt`（旧 URL は IAP のログインへのリダイレクトで 302 のはず。scheduler 2 行が `ENABLED`、invoker 3 行が `["allUsers"]`、app が `SERVING`、アラート 4 本、DTS 5 本がすべて `disabled=false`）
-2. 新系の取りこぼしを補う: 「過去データの移行（#12）」の「E 以降の取りこぼしを補う」。E から金曜の窓までで `legacy_compare_daily` の `legacy_only_snapshots` が 1 以上の日すべて。**Terraform の apply（手順 4）の前に行う**（DTS を無効にすると legacy-stage / legacy-copy の手動実行ができない）。補った日の 1 時間足も作り直す
+2. 新系の取りこぼしを補う: 「過去データの移行（#12）」の「E 以降の取りこぼしを補う（#14 で旧系を止めるとき）」。E から金曜の窓までで `legacy_compare_daily` の `legacy_only_snapshots` が 1 以上の日すべて。**Terraform の apply（手順 4）の前に行う**（DTS を無効にすると legacy-stage / legacy-copy の手動実行ができない）。補った日の 1 時間足も作り直す
 3. 1 時間足の旧系の同値の確認を直近 30 日でもう一度流し、件数を #49 に記録する（「1 時間足（#49）」の「旧系との突き合わせ」。`insert_ohlc` を止める前の最後の記録）
 4. Terraform: `infra/prod/variables.tf` の `legacy_stopped` の既定値を `true` にする PR を出す。PR の plan の要約が **update 3**（`google_bigquery_data_transfer_config.legacy_stage` / `legacy_copy` / `legacy_compare` の `disabled`）と **delete 2**（`google_monitoring_alert_policy.this["m1"]` / `["m2"]`）だけであることを見てマージし、deploy の `apply` job を承認する。**Scheduler より先に**行う（先に Scheduler を止めると旧系の M1 が 35 分前後で鳴る）
 5. Scheduler を止める（取り込みの入口。`download_jpx` → GCS → `load_jpx_into_bq` と `insert_ohlc` が動かなくなる）
@@ -3190,7 +3190,7 @@ legacy_state() {
 4. 旧系の関数の実行が 0、App Engine が `USER_DISABLED`、Scheduler 2 ジョブが `PAUSED` のまま
 5. 課金エクスポートで Cloud Functions・App Engine の日ごとの費用が止めた翌日から 0
 6. 旧ビューアーが無くて困ったことが無い（所有者）
-7. EPIC 終了条件 5（旧系向けアラート 0 本）・7（`allUsers` の付いた関数 0、`auth.txt` を読むコード 0）を満たしている（下の「EPIC の終了条件の判定」）
+7. EPIC 終了条件 5（旧系向けアラート 0 本）・7（`allUsers` の付いた関数 0、`auth.txt` を読むコード 0）を満たしている（下の「EPIC の終了条件の判定（#14 の担当分）」）
 
 ### EPIC の終了条件の判定（#14 の担当分）
 
@@ -3267,7 +3267,7 @@ GitHub secret `TF_ALERT_POLICY_IDS` に消したポリシー（`m1`・`m2`）の
 - 版が無いとき（初回、または `--accept` で壊れた前の版を無視したとき）は差分の基準が無いので、上の表の「可」の検証（前の版との差分）はせず、形・祝日・年末年始の検証（「不可」の行）だけで受け入れる。`calendar_updated` の `added_closed` には今日以降の休業日がすべて出る
 - 取引時間の表が `settings.py` の `SESSION_*` と違えば ERROR `calendar_sessions_changed`（休業日の更新は止めない。取引時間は自動で変えない）
 - 1/1 は表に載らない（注1）ので、平日なら規則で休業の行を足す（`source = rule`）。表から消えた過去年の行は前の版から引き継ぐ
-- 過去年の行（`--backfill-from`、#67）は、xlsx と祝日 CSV の照合（下の「過去年の追加」）に通らなければ書かない（`calendar_sync_failed`、`stage=parse_history`。`--accept` でも越えない）
+- 過去年の行（`--backfill-from`、#67）は、xlsx と祝日 CSV の照合（下の「過去年の追加（#67）」）に通らなければ書かない（`calendar_sync_failed`、`stage=parse_history`。`--accept` でも越えない）
 
 ### デプロイ後（初回）
 
