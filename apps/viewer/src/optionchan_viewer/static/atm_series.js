@@ -119,9 +119,11 @@ var AtmSeries = (function() {
   // 日付へ移動（日付の欄）: 見せる時間の範囲の半分の幅（秒）。足ごとに、その日の 12:00 JST を中心に見せる
   var JUMP_HALF = { '1m': 2 * 3600, '5m': 6 * 3600, '15m': 18 * 3600, '1h': 3 * 86400, '1d': 60 * 86400 };
   var JST = 9 * 3600;
+  var JUMP_MIN = '2018-10-19';
 
   // 日付の欄の値（'YYYY-MM-DD'。JST の日付）と足 → 保つ時間の範囲 { from, to, atRight }（UTC 秒。atm_iv.js の select に渡す）。
-  // 形が不正・2010 年より前（サーバーの BARS_EPOCH）・今日（now の JST の日付）より後は null
+  // 形が不正・データの最初の日（JUMP_MIN。旧系の取り込みの始まり）より前・今日（now の JST の日付）より後は null。
+  // 下限は atm_iv.html の日付の欄の min と同じ値にする（#150）
   function jumpView(value, tf, now) {
     var m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value || '');
     var half = JUMP_HALF[tf];
@@ -130,7 +132,7 @@ var AtmSeries = (function() {
     }
     var day = Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])) / 1000 - JST;
     var d = new Date((day + JST) * 1000);
-    if (d.getUTCMonth() !== Number(m[2]) - 1 || day < Date.UTC(2010, 0, 1) / 1000 - JST || day > now) {
+    if (d.getUTCMonth() !== Number(m[2]) - 1 || value < JUMP_MIN || day > now) {
       return null;
     }
     var center = day + 12 * 3600;

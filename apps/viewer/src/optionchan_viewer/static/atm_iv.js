@@ -653,7 +653,7 @@ ViewerTheme.onChange(function() {
 function jump() {
   var view = AtmSeries.jumpView(el('jump-date').value, el('tf').value, nowSec());
   if (!view) {
-    note('日付を 2010-01-01〜今日の範囲で入れてください');
+    note('日付を 2018-10-19〜今日の範囲で入れてください');
     return;
   }
   select(view);
