@@ -85,6 +85,16 @@ def test_result_matches_schema(name):
     assert names == [c['name'] for c in cols]
 
 
+@pytest.mark.parametrize('path', [os.path.join(SQL_DIR, n) for n in sorted(PERIOD)] + [VIEWER_CM],
+                         ids=sorted(PERIOD) + ['viewer'])
+def test_holiday_is_every_calendar_row(path):
+    """SQ の日を決める休業日は取引カレンダーの全行（is_trading_day で絞らない。祝日取引の実施日も SQ にならない。
+    docs/architecture/target.md 3.2「取引カレンダー（#63）」の契約。#149）"""
+    [holiday] = re.findall(r'^holiday AS \(\n(.*?)^\),\n', body(read(path)), re.S | re.M)
+    assert '`${project}.${dataset}.trading_calendar_latest`' in holiday
+    assert 'is_trading_day' not in holiday
+
+
 @pytest.mark.parametrize('name', sorted(PERIOD))
 def test_reads_period_and_replaces_only_atm_cm_iv(name):
     start, end = PERIOD[name]
