@@ -976,6 +976,15 @@ def opt_behind_fixture(shape, n=1):
         new[1] = new[2] = [no_trade(k) for k in strikes]
         legacy = [opt(1, k, 120, jst(2, 14), 5, 30.0, 100) for k in strikes]
         new[3] = new[4] = [opt(1, k, 125, jst(2, 14), 7, 30.1, 100) for k in strikes]
+    elif shape == 'advanced':
+        # 2026-10-22 14:41 JST の形: 新系の T は直前から進んでいる（止まってはいない）が、旧系よりは古い
+        new[1] = [opt(1, k, 1955, jst(29, 13), 78, 26.3, 1500) for k in strikes]
+    elif shape == 'went_back':
+        new[1] = [opt(1, k, 1970, jst(31, 13), 79, 26.5, 1500) for k in strikes]  # 新系の T が直前より古い版に戻った
+    elif shape == 'vol_back':
+        new[1] = [opt(1, k, 1960, jst(30, 13), 80, 26.34, 1500) for k in strikes]
+    elif shape == 'price_only':
+        new[1] = [opt(1, k, 1955, jst(30, 13), 79, 26.3, 1500) for k in strikes]
     elif shape == 'frozen':
         new[3] = new[2]                                        # 直後も T と同じ（止まり続ける）
     elif shape == 'delay_2min':
@@ -1009,6 +1018,10 @@ OPT_BEHIND_KEYS = ('option_compared', 'option_new_behind', 'option_unexplained',
     ('same', 1),               # 2026-10-19 の形: 新系の T = 直前（古い約定）、旧系は T の 1 分前の約定、直後で追いつく
     ('no_trade', 1),           # 2026-10-20 10:46 JST の形
     ('quotation_year', 1),     # 清算日だけ旧系が +1 年（旧系の年の補完の誤り）
+    ('advanced', 1),           # 2026-10-22 の形: 新系の T が直前から進んでいる（#146）
+    ('went_back', 0),          # 新系の T が直前より古い（遅れが 1 分を超えうる）
+    ('vol_back', 0),           # 新系の T の出来高が直前より少ない
+    ('price_only', 0),         # 出来高・約定時刻は直前と同じで価格だけ違う（新系の解析の誤りを吸わない）
     ('frozen', 0),             # 直後も T と同じ（凍結は説明しない）
     ('delay_2min', 0),         # 旧系の約定時刻が T の 2 分前（遅れが 1 分を超える）
     ('next_behind', 0),        # 直後の出来高が旧系より少ない（追いついていない）
