@@ -13,11 +13,11 @@ quote AS (
   SELECT created_at, last_trading_day, type, target_price, is_atm, bid, ask, bid_iv, ask_iv
   FROM `${project}.${dataset}.option_price_latest`(@fill_start, @fill_end)
 ),
+-- SQ の日を決める休業日（sql/cm/atm_cm.sql と同じ。is_trading_day に関係なく全行。#149）
 holiday AS (
   SELECT calendar_date
   FROM `${project}.${dataset}.trading_calendar_latest`
   WHERE calendar_date >= @holiday_start AND calendar_date < @holiday_end
-    AND NOT is_trading_day
 ),
 stored AS (
   SELECT created_at, iv30

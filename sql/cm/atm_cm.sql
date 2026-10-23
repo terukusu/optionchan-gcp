@@ -53,12 +53,12 @@ quote AS (
   SELECT created_at, last_trading_day, type, target_price, is_atm, bid, ask, bid_iv, ask_iv
   FROM `${project}.${dataset}.option_price_latest`(win_start, win_end)
 ),
--- SQ の日を決める休業日（窓の日付から 120 日先まで。2 限月の SQ は約 2 か月先）
+-- SQ の日を決める休業日（窓の日付から 120 日先まで。2 限月の SQ は約 2 か月先）。is_trading_day に関係なく全行（祝日取引の
+-- 実施日も業務規程上は休業日で SQ にならない。docs/architecture/target.md 3.2「取引カレンダー（#63）」の契約。#149）
 holiday AS (
   SELECT calendar_date
   FROM `${project}.${dataset}.trading_calendar_latest`
   WHERE calendar_date >= DATE(win_start, 'Asia/Tokyo') AND calendar_date < DATE_ADD(DATE(win_end, 'Asia/Tokyo'), INTERVAL 120 DAY)
-    AND NOT is_trading_day
 ),
 -- source:end
 -- cm:begin

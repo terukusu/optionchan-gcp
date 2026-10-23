@@ -117,6 +117,28 @@ def test_near_sq_uses_m2_only_and_holiday_moves_sq():
     assert num(row['m1_days']) == 5.0 and row['method'] == 'interp'
 
 
+CALENDAR = [('calendar_date', 'DATE'), ('is_trading_day', 'BOOL')]
+
+
+@pytest.mark.parametrize('path', [DAILY, BACKFILL], ids=['atm_cm', 'cm_backfill'])
+@pytest.mark.parametrize('is_trading_day', [False, True])
+def test_holiday_trading_day_is_not_sq(path, is_trading_day):
+    """SQ の日は取引カレンダーの全行を休業日として飛ばす（祝日取引の実施日 is_trading_day = true も SQ にならない。
+    docs/architecture/target.md 3.2 の契約。#149）。holiday の CTE は SQL のものを使い、表だけを固定値にする"""
+    at = '2026-11-11 00:00:00+00'  # 1 限月の SQ（11-13 の金）まで 2 日
+    source = between(read(path), '-- source:begin', '-- source:end').group(1)
+    [holiday] = re.findall(r'^holiday AS \(\n.*?^\),\n', source, re.S | re.M)
+    sources = (cte('cal', CALENDAR, [{'calendar_date': '2026-11-13', 'is_trading_day': is_trading_day}])
+               + cte('quote', QUOTE, month_rows(at, M1, 60200, smile1) + month_rows(at, M2, 60300, smile2))
+               + holiday.replace('`${project}.${dataset}.trading_calendar_latest`', 'cal'))
+    window = ("DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP '2026-11-10 00:00:00+00';\n"
+              "DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP '2026-11-12 00:00:00+00';\n"
+              "DECLARE start_at TIMESTAMP DEFAULT win_start;\nDECLARE end_at TIMESTAMP DEFAULT win_end;\n")
+    [row] = bq(window + result_body(path, sources, dataset='optionchan_tokyo'))
+    # どちらでも 11-13 は SQ にならず、SQ は 11-16（月）: 5 日 → 補間
+    assert num(row['m1_days']) == 5.0 and row['method'] == 'interp'
+
+
 def test_missing_forward_or_side_is_null():
     # 1 限月の call に気配が無い → F が出ない → 1 限月の IV も 30 日も NULL（SQ まで 3 日以上なので 2 限月だけにはしない）
     m1 = [dict(r, bid=0) if r['type'] == 1 else r for r in month_rows(T0, M1, 60200, smile1)]
