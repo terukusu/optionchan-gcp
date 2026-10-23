@@ -5,8 +5,10 @@
 3. docs/runbook.md の先頭（最初の `##` 節より前）に、`##` 節すべてへのリンク（目次）がある
 4. README と docs/ の文書（runbook 自身は除く）の「runbook の「節」の「小節」」の引用が runbook の見出しと一字一句一致する
    （「の」でつないだ 2 つ目以降は直前の見出しの節の中。「の」なしで並べたものは直前と同じ範囲で探す）
+   runbook の本文の「…」のうち節名の形のもの（（#番号）を含むか、見出しの頭と一致するもの）が見出しにある（#148）。
+   workflow の「docs/<文書>.md の「節」」「runbook「節」」がその文書の見出しにある（#148）
 5. docs/data.md に infra/prod の optionchan_tokyo の表・ビュー・テーブル関数の名前と、主な表の schema の列名がすべて出る
-6. README と docs/ の新しい文書のバッククォートで囲んだリポジトリのパスが実在する
+6. README と docs/ の新しい文書と runbook のバッククォートで囲んだリポジトリのパスが実在する（runbook は #148。gitignore 済みの手元のファイルは除く）
 7. README と docs/ の文書に `/home/` と、サービスアカウント（iam.gserviceaccount.com）以外のメールアドレスが無い
 見出し・リンクはコードブロック（``` / ~~~ の中）を除いて数える。アンカーの規則は github_slug。
 """
@@ -310,6 +312,58 @@ def test_runbook_citations():
     assert not errors, '\n'.join(errors)
 
 
+def stale_heading_quote(name, heading_names, runbook_names):
+    """runbook の本文の「name」が古い節名の形なら True（#148）。
+    本文の「…」には画面の文言・段落の見出し・用語も多いので、節名の形のものだけを見る:
+    どの文書の見出しにも無く、（#番号）を含むか、runbook の見出しの頭（「（」「・」の前まで）と一致するもの。
+    頭の一致を runbook の見出しに限るのは、画面の文言（「期近つなぎ」など）が viewer.md の見出しの頭と同じため"""
+    if name in heading_names:
+        return False
+    if re.search(r'（#\d', name):
+        return True
+    return any(h.startswith(name + '（') or h.startswith(name + '・') for h in runbook_names)
+
+
+def test_stale_heading_quote():
+    names = {'再処理ジョブ（#34）', '再実行・バックフィル', '料金の目安'}
+    assert stale_heading_quote('再処理ジョブ', names, names)
+    assert stale_heading_quote('再実行', names, names)
+    assert stale_heading_quote('定期クエリ（#40）', names, names)
+    assert not stale_heading_quote('再処理ジョブ（#34）', names, names)
+    assert not stale_heading_quote('料金', names, names)
+    assert not stale_heading_quote('再試行', names, names)
+    assert not stale_heading_quote('再実行', names | {'再実行'}, set())
+
+
+def test_runbook_self_citations():
+    """runbook の本文（コードブロックのコメントを含む）が引く節名が、どれかの文書の見出しにある"""
+    names = {h for doc in all_docs() for _, h in headings(read(doc))}
+    runbook_names = {h for _, h in headings(read(RUNBOOK))}
+    errors = []
+    for i, line in enumerate(read(RUNBOOK).split('\n'), 1):
+        for q in re.findall(r'「([^」]+)」', line):
+            if stale_heading_quote(q, names, runbook_names):
+                errors.append(f'docs/runbook.md:{i} 「{q}」')
+    assert not errors, '\n'.join(errors)
+
+
+def test_workflow_doc_citations():
+    """workflow のコメント・文言の「docs/<文書>.md の「節」」「runbook「節」」が、その文書の見出しにある"""
+    errors = []
+    count = 0
+    for wf in sorted(glob.glob(os.path.join(ROOT, '.github', 'workflows', '*.yml'))):
+        for i, line in enumerate(read(wf).split('\n'), 1):
+            for m in re.finditer(r'(?:(docs/[\w/-]+\.md) の|(runbook))「([^」]+)」', line):
+                doc = m.group(1) or 'docs/runbook.md'
+                count += 1
+                path = os.path.join(ROOT, doc)
+                if not os.path.exists(path) or m.group(3) not in {h for _, h in headings(read(path))}:
+                    errors.append(f'{rel(wf)}:{i} {doc}「{m.group(3)}」')
+    # deploy.yml・ci.yml の 2 件ずつ
+    assert count >= 4, count
+    assert not errors, '\n'.join(errors)
+
+
 # ---- 5. data.md の網羅 ----
 
 def hcl_blocks(text, kinds):
@@ -465,6 +519,16 @@ def test_new_doc_paths_exist(doc):
     path = os.path.join(ROOT, doc)
     assert os.path.exists(path), f'{doc} が無い'
     missing = [f'{doc}:{i} {p}' for i, p in repo_paths(read(path)) if not path_exists(p)]
+    assert not missing, '\n'.join(missing)
+
+
+# 手元で作る gitignore 済みのファイル（リポジトリには無い）
+LOCAL_ONLY_PATHS = {'infra/bootstrap/local.auto.tfvars'}
+
+
+def test_runbook_paths_exist():
+    missing = [f'docs/runbook.md:{i} {p}' for i, p in repo_paths(read(RUNBOOK))
+               if p not in LOCAL_ONLY_PATHS and not path_exists(p)]
     assert not missing, '\n'.join(missing)
 
 
