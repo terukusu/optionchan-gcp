@@ -56,16 +56,21 @@ JPX_CONNECT_TIMEOUT_SECONDS = 5
 # 最大 len(JPX_RETRY_WAITS_SECONDS) 回（1 限月・2 限月の合計）、回ごとに伸ばした待ち（3 → 5 → 8 秒。リクエスト全体の
 # 通し番号で選ぶ）の後に取り直す。4xx・空ページは取り直さない（次の分に任せる）。
 # 期限: 取り直しの前ごとに、予算 = 残り − 今回の待ち − JPX_RETRY_RESERVE_SECONDS（取り直しの後の GCS・BigQuery の分。
-# JPX の後の処理は実測 p50 2.0 / p99 2.7 / 最大 3.7 秒。10-17 以降の ingested。#130）が JPX_RETRY_MIN_TIMEOUT_SECONDS
-# 以上のときだけ取り直し、取り直しのタイムアウトは min(JPX_TIMEOUT_SECONDS, 予算)。足りなければ待たずに止める。
+# JPX の後の処理は実測 p50 2.0 / p99 2.7 / 最大 3.7 秒。10-17 以降の ingested。#130。#154 で 15 → 10 秒）が
+# JPX_RETRY_MIN_TIMEOUT_SECONDS 以上のときだけ取り直し、取り直しのタイムアウトは min(JPX_TIMEOUT_SECONDS, 予算)。
+# 足りなければ待たずに止める。
 # 8 秒目の即時の 502 は 11・16・24 秒目頃に取り直し（最後の取り直しは 1 回目の失敗から 15 秒以上後）、
-# 15 秒の読み取りタイムアウトの後（1 回目でも取り直しでも）は予算が無いので取り直さない。
+# 1 回目が 15 秒の読み取りタイムアウトなら、取り直しは 1 回だけ（タイムアウト約 9 秒。その後は予算が無い。#154 の前は
+# 予約 15 秒で取り直さなかった）。
 # 待ち: 毎晩 04:00・04:20 JST の 502 は分の 8 秒目に即時に返り、3 秒後の取り直しも 502、次の分は取れていた。
+# 502 が収まるのは分の 20〜29 秒目ごろで、収まった直後の応答は 5 秒前後かかる（10-27・10-28。#154）。
+# 予約 10 秒なら、8 秒目からの即時の 502 の最後の取り直し（24 秒目頃）のタイムアウトは約 11 秒
+# （予約 15 秒のときは約 6 秒で待ちきれなかった）。
 # 旧系の失敗は同じ分の 2〜11 秒目に散らばる（#88・#130 の調査）。
 # FETCH_AT_SECOND + 待ちの合計 + JPX_RETRY_MIN_TIMEOUT_SECONDS + JPX_RETRY_RESERVE_SECONDS ≤ REQUEST_DEADLINE_SECONDS
-# に保つ（8 + 16 + 5 + 15 = 44。即時の 502 が続けば上限の回数まで取り直せる。test_app で検査）
+# に保つ（8 + 16 + 5 + 10 = 39。即時の 502 が続けば上限の回数まで取り直せる。test_app で検査）
 JPX_RETRY_WAITS_SECONDS = (3, 5, 8)
-JPX_RETRY_RESERVE_SECONDS = 15
+JPX_RETRY_RESERVE_SECONDS = 10
 JPX_RETRY_MIN_TIMEOUT_SECONDS = 5
 # GCS: timeout（10 秒、残り時間で頭打ち）を (接続, 読み取り) の組で渡す。
 # 存在確認（読み取り・冪等）は 1 回 GCS_EXISTS_ATTEMPT_TIMEOUT_SECONDS 秒の試行を、最後の試行が timeout 内に
