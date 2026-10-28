@@ -165,7 +165,11 @@ def fixtures(options=(), hourly=(), runs=(), calendar=(), mid_hourly=(), cm=(), 
 
 
 def with_fixtures(sql, fx):
-    """WITH の先頭に固定値の CTE を足す（WITH が無ければ作る）"""
+    """WITH の先頭に固定値の CTE を足す（WITH が無ければ作る）。一時関数の区間（-- functions:begin〜end。#156）が
+    あれば、その後の WITH に足す"""
+    if "\n-- functions:end\n" in sql:
+        i = sql.index("\n-- functions:end\n") + len("\n-- functions:end\n")
+        return sql[:i] + with_fixtures(sql[i:], fx)
     m = re.match(r"(\s*(?:--[^\n]*\n\s*)*)WITH\b", sql)
     if m:
         return sql[:m.end()] + "\n" + fx + ",\n" + sql[m.end():]
@@ -1092,3 +1096,37 @@ def test_atm_cm_joins_table_and_fill():
     # 表に入っている範囲だけなら生データを読まない（逆向きの区間）: 補う分の値は出ない
     past = run("atm_cm", api.cm_params(NOW, last, start, datetime(2026, 10, 12, 22, tzinfo=UTC), 3600))
     assert [r["started_at"] for r in past] == [datetime(2026, 10, 12, h, tzinfo=UTC) for h in (20, 21)]
+
+
+def cm_quote_only_month(at, month, fwd, base, days):
+    """気配だけの 1 限月分（#156）: is_atm・bid_iv・ask_iv が NULL。Black-76（金利 0、F = fwd、
+    σ = base + (K − 60000) / 500 %、t = days / 365）の理論値を円に丸め、bid / ask は ±10 円"""
+    import math
+
+    def ncdf(x):
+        return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+    t = days / 365
+    rows = []
+    for k in CM_STRIKES:
+        st = (base + (k - 60000) / 500) / 100 * math.sqrt(t)
+        d1 = (math.log(fwd / k) + 0.5 * st * st) / st
+        d2 = d1 - st
+        for typ, theo in ((1, fwd * ncdf(d1) - k * ncdf(d2)), (2, k * ncdf(-d2) - fwd * ncdf(-d1))):
+            rows.append(opt(at, typ, k, month, is_atm=None, bid=round(theo) - 10, ask=round(theo) + 10))
+    return rows
+
+
+def test_atm_cm_fill_quote_only():
+    """補う分に IV・ATM の印の無い取り込み元の気配（#156）: 気配から計算した 30 日の IV が出る。気配は JPX の形の
+    固定値と同じスマイルから作ったので、値は cm_expected に近い（円に丸めた分だけずれる。1e-6 の一致は
+    ルートの tests/test_cm_bq.py）"""
+    last = datetime(2026, 10, 12, 21, 59, tzinfo=UTC)
+    t1 = datetime(2026, 10, 13, 0, 0, tzinfo=UTC)  # 10-13（火）09:00 JST: 残存の起点の日は 10-13
+    options = (cm_quote_only_month(utc(13, 0, 0), M1, 60200, 20, 31)
+               + cm_quote_only_month(utc(13, 0, 0), M2, 60300, 22, 59))
+    run = fixture_runner(fixtures(options))
+    minute = run("atm_cm", api.cm_params(NOW, last, t1, datetime(2026, 10, 13, 6, tzinfo=UTC), 60))
+    [(started_at, close)] = [(r["started_at"], r["close"]) for r in minute]
+    assert started_at == t1
+    assert close == pytest.approx(cm_expected(t1), abs=0.03)
