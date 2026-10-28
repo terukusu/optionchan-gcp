@@ -1049,19 +1049,25 @@ def test_no_retry_after_retry_returns_4xx(capsys):
     assert record["jpx_retry"] == {"page": 1, "first": str(HTTP_502), "retries": 1, "result": "failed"}
 
 
-def test_no_retry_beyond_deadline(capsys):
-    """読み取りタイムアウト（15 秒）の後は、待ち + 取り直し + 残りの処理が期限に収まらないので取り直さない"""
-    fake = Fake(pages={1: [JpxTransient("page 1: ReadTimeout"), PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
-    fake.cost = {"fetch1": 15.0}
+def test_retry_once_after_read_timeout(capsys):
+    """1 回目が読み取りタイムアウト（15 秒）なら、取り直しは 1 回だけ（タイムアウトは予算の約 9 秒。#154）。
+    それも読み取りタイムアウトなら、待ち + 取り直し + 残りの処理が期限に収まらないので止める"""
+    timeout = JpxTransient("page 1: ReadTimeout")
+    fake = Fake(pages={1: [timeout, timeout, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
+    with_fetch_costs(fake, "fetch1", [15.0, 9.0])
     result = handle(IN_HOURS, fake.deps())
     assert (result.status, result.outcome) == (200, "jpx_unavailable")
-    assert fetches(fake) == [("fetch", 1)]
-    assert fake.sleeps == [8.0]  # 分の頭の待ちだけ
+    assert fetches(fake) == [("fetch", 1), ("fetch", 1)]
+    assert fake.sleeps == [8.0, WAITS[0]]
+    assert [t for k, t in fake.timeouts if k == "fetch1"] == [
+        settings.JPX_TIMEOUT_SECONDS,
+        pytest.approx(settings.REQUEST_DEADLINE_SECONDS - 8 - 15 - WAITS[0] - settings.JPX_RETRY_RESERVE_SECONDS),
+    ]
     record = logs(capsys)[-1]
     assert record["jpx_retry"] == {
         "page": 1,
         "first": "page 1: ReadTimeout",
-        "retries": 0,
+        "retries": 1,
         "result": "skipped_deadline",
     }
     assert record["detail"] == "page 1: ReadTimeout"
@@ -1070,15 +1076,16 @@ def test_no_retry_beyond_deadline(capsys):
 @pytest.mark.parametrize(
     "first_cost, retried",
     [
-        # 残り − 待ち 3（WAITS[0]）− 予約 15 が 5 以上なら取り直す: 期限 45 − 待ち 8 − 1 回目 = 残り
-        (14.0, True),  # 残り 23 → 予算 5
-        (14.5, False),  # 残り 22.5 → 予算 4.5
+        # 残り − 待ち 3（WAITS[0]）− 予約 10 が 5 以上なら取り直す: 期限 45 − 待ち 13 − 1 回目 = 残り
+        # （1 回目は JPX_TIMEOUT_SECONDS より短くするため、分の頭の待ちを 13 秒にして境界を作る）
+        (14.0, True),  # 残り 18 → 予算 5
+        (14.5, False),  # 残り 17.5 → 予算 4.5
     ],
 )
 def test_retry_deadline_boundary(capsys, first_cost, retried):
-    assert WAITS[0] == 3  # 上のコメントの数値の前提
-    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=8.0)
-    fake.cost = {"fetch1": first_cost}
+    assert (WAITS[0], settings.JPX_RETRY_RESERVE_SECONDS) == (3, 10)  # 上のコメントの数値の前提
+    fake = Fake(pages={1: [HTTP_502, PAGE1], 2: PAGE2}, arrival=0.0, fetch_at_second=13.0)
+    with_fetch_costs(fake, "fetch1", [first_cost, 0.0])  # 取り直しは即時に返す（後の処理を期限に収める）
     handle(IN_HOURS, fake.deps())
     assert len(fetches(fake)) == (3 if retried else 1)
     if retried:
@@ -1152,6 +1159,17 @@ def test_retry_spans_15_seconds(capsys):
     assert record["event"] == "jpx_unavailable"
     assert record["elapsed_ms"] <= (settings.REQUEST_DEADLINE_SECONDS - settings.JPX_RETRY_RESERVE_SECONDS) * 1000
     assert record["jpx_retry"]["retries"] == N
+
+
+def test_last_retry_waits_for_slow_response(capsys):
+    """8 秒目からの即時の 502 が続くとき、最後の取り直しのタイムアウトは 10 秒以上（502 が収まった直後の 5 秒前後の
+    遅い応答を待てる。10-27・10-28 の 04:20 JST は予約 15 秒で約 6 秒しかなく ReadTimeout。#154）"""
+    fake = Fake(pages={1: [HTTP_502], 2: PAGE2}, arrival=0.0)
+    result = handle(IN_HOURS, fake.deps())
+    assert (result.status, result.outcome) == (200, "jpx_unavailable")
+    timeouts = [t for k, t in fake.timeouts if k == "fetch1"]
+    assert len(timeouts) == N + 1
+    assert timeouts[-1] >= 10
 
 
 def test_deadline_exceeded_during_retry_is_error(capsys):
