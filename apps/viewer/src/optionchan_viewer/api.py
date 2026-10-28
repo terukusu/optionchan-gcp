@@ -351,8 +351,9 @@ def cm_params(now: datetime, last_created_at: datetime | None, start: datetime, 
     return {
         "fill_start": fill_start,
         "fill_end": fill_end,
-        # SQ の日を決める休業日（2 限月の SQ は約 2 か月先。sql/cm/atm_cm.sql と同じ 120 日）
-        "holiday_start": jst_date(fill_start),
+        # SQ の日を決める休業日（2 限月の SQ は約 2 か月先。sql/cm/atm_cm.sql と同じ 120 日）。
+        # 気配だけの限月の残存の起点の日（6 時間前の日付から。#156）のため前日から
+        "holiday_start": jst_date(fill_start) - timedelta(days=1),
         "holiday_end": jst_date(fill_end) + timedelta(days=st.CM_HOLIDAYS_AHEAD_DAYS),
         "range_start": start,
         "range_end": end,

@@ -176,9 +176,10 @@ def test_scheduled_sql_filters_period(path):
         if dataset == 'stage_dataset':
             continue  # stage.sql が作る作業用テーブル（書き込み先と、その件数の数え直し）
         if table == 'trading_calendar_latest':
-            # 休業日のカレンダー（ビュー。1 年 十数行）は日付で絞る（30 日固定の SQ の日、#100）
+            # 休業日のカレンダー（ビュー。1 年 十数行）は日付で絞る（30 日固定の SQ の日、#100。前日から、#156）
             following = text[m.end():m.end() + 120]
-            assert re.match(r"\s*WHERE calendar_date >= DATE\(win_start, 'Asia/Tokyo'\) AND calendar_date < ", following), (path, following)
+            assert re.match(r"\s*WHERE calendar_date >= DATE_SUB\(DATE\(win_start, 'Asia/Tokyo'\), INTERVAL 1 DAY\)\s+"
+                            r"AND calendar_date < ", following), (path, following)
             continue
         if table.endswith('_latest') or table == 'latest_runs':
             assert args and re.match(

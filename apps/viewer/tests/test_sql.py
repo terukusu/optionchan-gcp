@@ -4,7 +4,8 @@
 - 読むのは最新版のテーブル関数（*_latest・latest_runs）と 1 時間足 atm_iv・atm_mid_iv（#98）・取引カレンダーの最新版
   trading_calendar_latest（#68）だけ（生テーブルを直接読まない）。期間で絞る。欠けの一覧の表 data_gaps（#123。数百行）は
   data_gaps.sql からだけ全体を読んでよい
-- 書き込み・DDL をしない
+- 書き込み・DDL をしない。例外は atm_cm.sql の一時関数の区間（-- functions:begin〜end。気配だけの限月の IV。#156）の
+  CREATE TEMP FUNCTION 1 つだけ（本文が sql/tick_build/build.sql と同じことはルートの tests/test_cm.py が検査）
 """
 
 import re
@@ -25,9 +26,13 @@ FULL_TABLES = {"data_gaps": "data_gaps"}
 # 文字列リテラル: タイムゾーン名と、30 日固定（#100）の計算の出し方の名前（sql/cm/atm_cm.sql と同じ本文）
 LITERALS = {"Asia/Tokyo"}
 CM_METHODS = {"m1", "interp", "m2"}
+# 一時関数の区間（#156）
+FUNCTIONS = re.compile(r"^-- functions:begin\n(.*?)^-- functions:end\n", re.S | re.M)
 
 
 def body(text):
+    """コメントと一時関数の区間を除いた本文（区間は test_temp_function_only_in_atm_cm が別に検査）"""
+    text = FUNCTIONS.sub("", text)
     return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("--"))
 
 
@@ -77,6 +82,26 @@ def test_read_only(name):
     text = body(SQL[name]).upper()
     assert not re.search(r"\b(INSERT|UPDATE|DELETE|MERGE|CREATE|DROP|TRUNCATE|ALTER|DECLARE|EXECUTE)\b", text), name
     assert ";" not in body(SQL[name])
+
+
+@pytest.mark.parametrize("name", sorted(SQL))
+def test_temp_function_only_in_atm_cm(name):
+    """一時関数の区間は atm_cm.sql の WITH の前に 1 つだけ。中身はコメントと CREATE TEMP FUNCTION black76_iv の 1 文だけ
+    （BigQuery は一時関数の文 + 1 つのクエリをパラメータつきで受け付ける）"""
+    regions = FUNCTIONS.findall(SQL[name])
+    if name != "atm_cm":
+        assert regions == [] and "-- functions:" not in SQL[name]
+        return
+    [region] = regions
+    text = SQL[name]
+    assert text.index("-- functions:end\n") < text.index("\nWITH\n")
+    code = "\n".join(line for line in region.splitlines() if not line.startswith("--")) + "\n"
+    assert code.startswith("CREATE TEMP FUNCTION black76_iv(")
+    assert code.endswith('\n""";\n')
+    # JS の本文（三重引用符の中）の外は 1 文: CREATE と ; は 1 つずつ
+    head, js, tail = re.fullmatch(r'(.*?r""")(.*)(""";\n)', code, re.S).groups()
+    assert '"""' not in js
+    assert len(re.findall(r"\bCREATE\b", head + tail)) == 1 and (head + tail).count(";") == 1
 
 
 def test_atm_iv_uses_hourly_bars_and_put():

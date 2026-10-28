@@ -1182,7 +1182,7 @@ def test_atm_iv_bars_cm_params(make):
     assert runner.calls[0] == ("atm_cm_meta", {"start_at": NOW - timedelta(days=14), "end_at": NOW})
     assert runner.calls[1] == ("atm_cm", {
         "fill_start": CM_LAST + timedelta(seconds=1), "fill_end": NOW,
-        "holiday_start": date(2026, 10, 13), "holiday_end": date(2026, 10, 13) + timedelta(days=120),
+        "holiday_start": date(2026, 10, 12), "holiday_end": date(2026, 10, 13) + timedelta(days=120),
         "range_start": utc(12), "range_end": utc(13, 6), "step": 60})
     # 1h: step 3600
     runner.calls.clear()
