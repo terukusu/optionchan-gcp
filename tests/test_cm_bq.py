@@ -9,18 +9,20 @@ CI では動かさない（BigQuery の認証が要る）。手元で `OPTIONCHA
   手順を Python で計算した値（quote_only_expected）と 1e-6 以内で一致する。JPX の形の限月との混在・片側の気配・裁定の範囲の外・
   両方の気配のある行使価格が無い限月・祝日取引の日と週末の残存の起点
 - 実データの 1 日（#156 AC 4）: 新しい計算を本番の最新版に当てた結果が atm_cm_iv の行と同じ（JPX の値が変わらない。読むだけ）
-- 実テーブルの dry run: 見積もりバイト数（PR に記録する）
+- 過去分の作り直し（cm_backfill.sql）は約定 IV からの行（basis = 'trade'。#158）を残す（一時テーブルに書く）
+- 実テーブルの dry run: 見積もりバイト数（PR に記録する）。basis を読む SQL は、本番の表に列がある（deploy の apply の後）ときだけ
 """
 import json
 import math
 import os
 import re
+import subprocess
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
 from test_ohlc_bq import run_error, run_script, split_declares, tables_to_temp, temp_table
-from test_sql_bq import GiB, MiB, PROJECT, between, bq, cte, read, render, result_body
+from test_sql_bq import GiB, MiB, PROJECT, TOKYO, between, bq, cte, read, render, result_body
 
 pytestmark = pytest.mark.skipif(
     os.environ.get('OPTIONCHAN_BQ_TEST') != '1' or not PROJECT,
@@ -193,8 +195,19 @@ def test_dry_run_real_tables():
         assert 0 < out < limit, out
 
 
+def prod_has_basis():
+    """本番の atm_cm_iv に列 basis（#158）があるか（Terraform の apply の前は無い）"""
+    out = subprocess.run(['bq', f'--project_id={PROJECT}', f'--location={TOKYO}', 'show', '--schema', '--format=json',
+                          f'{PROJECT}:optionchan_tokyo.atm_cm_iv'], capture_output=True, text=True, timeout=60)
+    assert out.returncode == 0, 'bq show failed'
+    return 'basis' in {c['name'] for c in json.loads(out.stdout)}
+
+
 def test_dry_run_accuracy():
-    """突き合わせ（#156。読むだけ）の見積もり: docs/data.md の 2 週（PR に記録する）"""
+    """突き合わせ（#156。読むだけ）の見積もり: docs/data.md の 2 週（PR に記録する）。気配の行（basis が NULL）だけと比べるので、
+    本番の表に basis を足す前は飛ばす"""
+    if not prod_has_basis():
+        pytest.skip('atm_cm_iv に basis がまだ無い（Terraform の apply の後に流す）')
     start, end = '2026-10-05 00:00:00+09:00', '2026-10-19 00:00:00+09:00'
     text = render(read(ACCURACY), project=PROJECT, dataset='optionchan_tokyo')
     out = bq(text, dry_run=True, params=[f'start_at:TIMESTAMP:{start}', f'end_at:TIMESTAMP:{end}'])
@@ -415,7 +428,8 @@ def test_real_day_matches_table():
     """新しい計算（気配だけの道を足した cm の本文）を、ある 1 日の最新版に当てた結果が atm_cm_iv の行と同じ
     （JPX の限月は今の計算のまま）。窓は定期クエリの 7 時台の回と同じ。読むのは UTC の 2 パーティション（約 226 MiB）"""
     start, end = REAL_DAY
-    cols = [c for c, _ in CM_IV if c != 'created_at']
+    # basis（#158）は計算の結果に無い列（定期クエリは書かない = NULL）
+    cols = [c for c, _ in CM_IV if c not in ('created_at', 'basis')]
     floats = {c for c, t in CM_IV if t == 'FLOAT64'}
     same = ' AND '.join(
         f'((c.{c} IS NULL AND s.{c} IS NULL) OR ABS(c.{c} - s.{c}) <= 1e-9)' if c in floats
@@ -624,3 +638,35 @@ def test_incremental_runs_match_daily_window():
     after = iv_row(utc(13, 22, 10), 5.0)
     _, _, rebuilt = run_cm(rebuild_time, table + [table_value(after)], runs, quote)
     same_rows(rebuilt, daily + [table_value(after)])
+
+
+# ---- 過去分の作り直しと約定 IV からの行（#158。一時テーブルに書く） ----
+
+def test_backfill_keeps_trade_rows():
+    """cm_backfill.sql は気配の行（basis が NULL）だけを置き換える。約定 IV からの行（basis = 'trade'）は残り、同じ時刻の
+    計算の行（#114 の行には気配が無いので値の無い行）は足さない"""
+    start, end = '2026-10-20 00:00:00+00', '2026-10-20 01:00:00+00'
+    trade_at, quote_at = '2026-10-20 00:05:00+00', '2026-10-20 00:10:00+00'
+    # #114 の形の行（気配・気配の IV が無い。ATM の印はある）
+    tick = [dict(r, bid=None, ask=None, bid_iv=None, ask_iv=None) for r in snapshot(trade_at)]
+    text = render(tables_to_temp(read(BACKFILL)), project=PROJECT, dataset='optionchan_tokyo')
+    m = between(text, '-- source:begin', '-- source:end')
+    sources = (cte('quote_fixed', QUOTE, tick + snapshot(quote_at))
+               + 'quote AS (SELECT * FROM quote_fixed WHERE created_at >= start_at AND created_at < end_at),\n'
+               + cte('holiday', HOLIDAY, [{'calendar_date': '1999-01-01'}]))
+    text = text[:m.start()] + sources + text[m.end():]
+    declares, rest = split_declares(text)
+    existing = [{'created_at': '2026-10-19 23:00:00+00', 'iv30': 7.0, 'method': 'm1'},
+                {'created_at': trade_at, 'iv30': 9.0, 'method': 'interp', 'basis': 'trade'},
+                {'created_at': quote_at, 'iv30': 1.0, 'method': 'm1'}]
+    script = (declares + temp_table('atm_cm_iv', CM_IV, existing) + rest
+              + '\nSELECT ARRAY(SELECT AS STRUCT * FROM atm_cm_iv ORDER BY created_at) AS after;\n')
+    out = run_script(script, params=[f'start_at:TIMESTAMP:{start}', f'end_at:TIMESTAMP:{end}'])
+    [[summary], [after]] = out[-2:]
+    assert int(summary['snapshots']) == 2
+    rows = {r['created_at'][:16]: table_value(r) for r in after['after']}
+    assert sorted(rows) == ['2026-10-19 23:00', '2026-10-20 00:05', '2026-10-20 00:10']
+    assert rows['2026-10-19 23:00']['iv30'] == 7.0
+    assert rows['2026-10-20 00:05']['basis'] == 'trade' and rows['2026-10-20 00:05']['iv30'] == 9.0
+    computed = rows['2026-10-20 00:10']
+    assert computed['basis'] is None and computed['method'] == 'interp' and computed['iv30'] != 1.0

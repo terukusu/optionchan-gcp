@@ -2,6 +2,8 @@
 -- 範囲 [@start_at, @end_at)（UTC の正時。未来は不可）の atm_cm_iv を、最新版から計算し直した行で置き換える。
 -- 計算（-- cm:begin 〜 -- cm:end）は定期クエリ sql/cm/atm_cm.sql と一字一句同じ（tests/test_cm.py が検査）。
 -- 1 日 約 70 MiB を読む（全期間で約 35 GiB）。1 日のクエリ量の上限（#95）に合わせて範囲を区切って流す。
+-- 置き換えるのは気配から作った行（basis が NULL）だけ。約定 IV から作った行（basis = 'trade'。sql/cm_trade/fill.sql。#158）は残し、
+-- 同じ時刻の行は足さない（#114 の行からは気配の値が出ないので、足すのは値の無い行だけ）。
 -- 範囲に結果の行が 1 件も無ければ何もしない。プロジェクトとデータセットは render で入れる（runbook）。
 DECLARE start_at TIMESTAMP DEFAULT @start_at;
 DECLARE end_at TIMESTAMP DEFAULT @end_at;
@@ -265,8 +267,14 @@ SELECT * FROM cm
 
 IF EXISTS (SELECT 1 FROM result) THEN
   BEGIN TRANSACTION;
-  DELETE FROM `${project}.${dataset}.atm_cm_iv` WHERE created_at >= start_at AND created_at < end_at;
-  INSERT INTO `${project}.${dataset}.atm_cm_iv` SELECT * FROM result;
+  DELETE FROM `${project}.${dataset}.atm_cm_iv` WHERE created_at >= start_at AND created_at < end_at AND basis IS NULL;
+  INSERT INTO `${project}.${dataset}.atm_cm_iv`
+    (created_at, iv30, method, m1_last_trading_day, m1_days, m1_forward, m1_iv, m2_last_trading_day, m2_days, m2_forward, m2_iv)
+  SELECT * FROM result
+  WHERE created_at NOT IN (
+    SELECT created_at FROM `${project}.${dataset}.atm_cm_iv`
+    WHERE created_at >= start_at AND created_at < end_at AND basis = 'trade'
+  );
   COMMIT TRANSACTION;
 END IF;
 

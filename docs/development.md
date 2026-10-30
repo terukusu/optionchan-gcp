@@ -129,7 +129,7 @@ prod の Terraform（`infra/prod/`）は次のファイルを `file()`・`templa
 | `sql/cm/atm_cm.sql` | `infra/prod/sq.tf` | 定期クエリ `atm-cm` |
 | `monitoring/m1-liveness.json`・`monitoring/m2-errors.json`・`monitoring/ingest-m1-liveness.json`・`monitoring/ingest-m2-errors.json` | `infra/prod/monitoring.tf` | アラート（定義の正は JSON。`tests/test_monitoring.py` が検査） |
 
-`schema/tokyo/` は取り込みのイメージの入力でもあるので、直すとイメージのタグも変わる。ほかの `sql/` の下（`sql/gaps/`・`sql/legacy_import/`・`sql/price_time_fix/`・`sql/tick_fill/`・`sql/tick_build/`、`sql/ohlc/` と `sql/cm/` のほかのファイル）は runbook の手順で手で流すもので、Terraform は読まない。
+`schema/tokyo/` は取り込みのイメージの入力でもあるので、直すとイメージのタグも変わる。ほかの `sql/` の下（`sql/gaps/`・`sql/legacy_import/`・`sql/price_time_fix/`・`sql/tick_fill/`・`sql/tick_build/`・`sql/cm_trade/`、`sql/ohlc/` と `sql/cm/` のほかのファイル）は runbook の手順で手で流すもので、Terraform は読まない。
 
 ## 公開リポジトリの決まり
 
