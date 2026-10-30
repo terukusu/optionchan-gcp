@@ -71,10 +71,11 @@ holiday AS (
   WHERE calendar_date >= DATE_SUB(DATE(@start_at, 'Asia/Tokyo'), INTERVAL 1 DAY)
     AND calendar_date < DATE_ADD(DATE(@end_at, 'Asia/Tokyo'), INTERVAL 120 DAY)
 ),
+-- 気配から作った行だけ（約定 IV からの行（basis = 'trade'。#158）は比べない）
 stored AS (
   SELECT *
   FROM `${project}.${dataset}.atm_cm_iv`
-  WHERE created_at >= @start_at AND created_at < @end_at
+  WHERE created_at >= @start_at AND created_at < @end_at AND basis IS NULL
 ),
 -- source:end
 -- cm:begin

@@ -17,6 +17,7 @@
 --   README の「30 日固定の ATM IV」。
 -- 窓の中を置き換える（再実行しても同じ結果。3 日を超える停止・前日より前の最新版の変化は cm_backfill.sql で作り直す）。
 -- 窓に結果の行が 1 件も無ければ何もしない（休場日・週末と、データの無い過去の日の手動実行で既存の行を消さないため）。
+-- INSERT は列の名前を並べる（表の最後の列 basis（#158）は書かない = NULL（気配から）。列の追加の前後どちらでも動く）。
 -- スキャン量（dry run）: option_price は UTC の日パーティションを丸ごと読むので、増分の回 約 112 MiB（1 パーティション）、
 -- 作り直しの回 約 226 MiB（2 パーティション）。1 日の見積もりは docs/runbook.md の「30 日固定の ATM IV（#100）」。
 -- -- source:begin 〜 -- source:end / -- result:begin 〜 -- result:end は tests/test_cm_bq.py が固定値の入力に差し替える印。
@@ -301,6 +302,8 @@ SELECT * FROM cm
 IF EXISTS (SELECT 1 FROM result) THEN
   BEGIN TRANSACTION;
   DELETE FROM `${project}.${dataset}.atm_cm_iv` WHERE created_at >= win_start AND created_at < win_end;
-  INSERT INTO `${project}.${dataset}.atm_cm_iv` SELECT * FROM result;
+  INSERT INTO `${project}.${dataset}.atm_cm_iv`
+    (created_at, iv30, method, m1_last_trading_day, m1_days, m1_forward, m1_iv, m2_last_trading_day, m2_days, m2_forward, m2_iv)
+  SELECT * FROM result;
   COMMIT TRANSACTION;
 END IF;

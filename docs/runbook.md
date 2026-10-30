@@ -19,6 +19,7 @@
 - [日次の品質チェックと新旧の突き合わせ（#40）](#日次の品質チェックと新旧の突き合わせ40) — 毎朝の定期クエリの確認、その失敗を受けたとき、再実行・バックフィル
 - [1 時間足（#49）](#1-時間足49) — 1 時間足の定期クエリの確認・失敗・再実行、過去分の作り直し
 - [30 日固定の ATM IV（#100）](#30-日固定の-atm-iv100) — 30 日固定の定期クエリの確認・失敗・再実行、過去分、気配から計算した IV の突き合わせ
+- [約定 IV からの 30 日固定（#158）](#約定-iv-からの-30-日固定158) — #114 の区間の 30 日固定を約定 IV から作る手順（dryrun・退避・書き込み・検証・合い方・切り戻し）
 - [ビューアー（#13）](#ビューアー13) — ビューアーの初回のデプロイ（IAP）・確認・ユーザーの追加・撤去、費用の確認
 - [取引カレンダー（#63）](#取引カレンダー63) — 取引カレンダーの初回の版、ERROR を受けたとき、版・ビューが壊れたとき、過去年の追加
 
@@ -2749,7 +2750,7 @@ COMMIT TRANSACTION;"
 | もの | 内容 |
 |---|---|
 | DTS `optionchan atm-cm`（asia-northeast1、`sa-sq-dts`、毎時 :45 = `every 1 hours`、`schedule_options.start_time` を過去の :45（`2026-10-01T22:45:00Z`）にして分をそろえる。#117） | `sql/cm/atm_cm.sql`。最新版の全行使価格の気配から取り込み 1 回ごとに 1 行を作り、`atm_cm_iv` の窓の中を置き換える（結果が 0 行の窓では何もしない）。窓は 2 つ: **07:45 JST の回**（`@run_time` が JST の 7 時台）は「1 時間足（#49）」と同じ `[D-1 07:00, D 07:00) JST` の作り直し（重ねより遅れた取り込み・再処理の安全網）。**他の回**は増分 `[表の最後の行 − 2 時間, @run_time)`（始まりは `@run_time` − 3 日より前にしない）。増分の回は、3 日の範囲の snapshot で `@run_time` − 65 分以降に終わった取り込み（`ingest_runs`）が無ければ何もしない（週末・休場日・早朝。`ingest_runs` だけを読んで終わる）。失敗の M2（1 時間に 1 回まで）は毎時の回でも出る |
-| `optionchan_tokyo.atm_cm_iv` | 列は `schema/cm/atm_cm_iv.json`（`created_at`・`iv30`・`method` と、限月ごとの最終取引日・SQ までの日数・フォワード・補間 ATM IV）。パーティションは月（`created_at`）。1 日 約 1,000 行 |
+| `optionchan_tokyo.atm_cm_iv` | 列は `schema/cm/atm_cm_iv.json`（`created_at`・`iv30`・`method` と、限月ごとの最終取引日・SQ までの日数・フォワード・補間 ATM IV、最後に元のデータの印 `basis`（#158。定期クエリ・`cm_backfill.sql` の行は NULL））。パーティションは月（`created_at`）。1 日 約 1,000 行 |
 | `sql/cm/cm_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)` の作り直し（下の「過去分」） |
 | `sql/cm/cm_accuracy.sql`（東京、手で流す。読むだけ） | 気配から計算した IV と JPX の値の突き合わせ（下の「気配から計算した IV の突き合わせ（#156）」） |
 
@@ -2825,7 +2826,8 @@ GROUP BY d ORDER BY d"
 
 表ができる前（デプロイの後に定期クエリが最初に作った窓の始まり E より前）は `sql/cm/cm_backfill.sql` で作り直す（同じ計算で範囲の中を置き換える。冪等）。
 
-- 範囲: 2018-10-01 〜 E（範囲は正時で now より前。SQL が検査する）。欠け 1・3 の区間は #114 で作った行に気配が無いので、行ができない（docs/data-gaps.md）
+- 範囲: 2018-10-01 〜 E（範囲は正時で now より前。SQL が検査する）。欠け 1・3 の区間は #114 で作った行に気配が無いので、気配からは値ができない（docs/data-gaps.md）。その区間は「約定 IV からの 30 日固定（#158）」の行（`basis = 'trade'`）で埋める
+- 置き換えるのは気配からの行（`basis` が NULL）だけ。`basis = 'trade'` の行は消さず、同じ時刻の行（#114 の時刻の値の無い行）は足さない。流し直しても #158 の行は残る
 - 量: 全部で 約 35 GiB（必要な列を全期間で読んだときの dry run）。1 か月 0.3〜1.2 GiB（行数の多い 2026 年が大きい）。プロジェクトのクエリ量の上限（32 GiB/日）を超えるので、**1 日に流すのは 20 GiB まで**（2018〜2023 年で約 15 GiB、2024 年〜E で約 20 GiB の 2 日に分ける）
 - 1 年ずつ流す（`ro` は「1 時間足（#49）」の変数。`sql/cm/` を読むように替える）:
 
@@ -2864,6 +2866,129 @@ rc cm_accuracy | qr "2026-10-05 00:00:00+09:00" "2026-10-19 00:00:00+09:00" --lo
 
 - 一時停止: `infra/prod/sq.tf` の `atm_cm` に `disabled = true` を足す PR。ビューアーは表が古いと補う分（最大 3 日）だけを計算し、それより前の期間は空になる
 - 戻す: `atm_cm_iv` の `deletion_protection = false` の PR → #100 の revert の PR
+
+## 約定 IV からの 30 日固定（#158）
+
+#114 で DataCube の歩み値から作った行（`ingest_run_id` が `legacy-fill114-` で始まる）には気配が無く、「30 日固定の ATM IV（#100）」の計算では値が出ない。その区間の `atm_cm_iv` に、#114 のスナップショットごとに約定 IV と先物から作った 1 行を、印 `basis = 'trade'` を付けて足す。作り方と気配からの値との合い方は docs/data.md の「約定 IV からの値（#158）」。SQL は `sql/cm_trade/`（試験は `tests/test_cm_trade.py`・`tests/test_cm_trade_bq.py`）。書き込みは Terraform 外で、所有者がこの節の手順で行う。列 `basis` は先に deploy.yml の apply（`schema/cm/atm_cm_iv.json`）で足しておく（無いと `fill.sql`・`verify.sql` が `Unrecognized name: basis` で止まる）。
+
+**規約（DataCube の自己使用）**: 「DataCube の歩み値での穴埋め（#111）」と同じ。作った値も加工した値として同じ扱い。**リポジトリ・Issue・PR には行・日ごとの値を貼らない**（件数・期間・分位点だけ）。
+
+| SQL | 内容 |
+|---|---|
+| `fill.sql` | 書き込み。`@mode = 'dryrun'` は数えるだけ、`'apply'` は 1 つのトランザクションで、範囲の `basis = 'trade'` の行と、結果と同じ時刻の値の無い気配の行（`basis` が NULL で `iv30` が NULL）を消し、結果のうち範囲に残った行と同じ時刻でないものを足す。気配から作った値は消さない・上書きしない（`conflicts` に数える）。流し直しても表は同じ。範囲は #114 の `build.sql` と同じ 2018-10-01 〜 2024-08-06 12:25 JST の中だけ（外ならエラー） |
+| `verify.sql` | 検証（作り方を使わない独立の検査。1 行。読むだけ） |
+| `rollback.sql` | 切り戻し。範囲の `basis = 'trade'` の行を消す |
+| `accuracy.sql` | 合い方。JPX の気配がある窓で、#114 と同じ作り方の行を 5 分ごとに作って `fill.sql` と同じ計算を当て、気配からの値と比べる（読むだけ） |
+
+### 変数
+
+「DataCube の歩み値での行の作成（#114）」の「変数」（`P`・`L`・`W`・`q`、範囲 `RA`・`RB`・`RC`・`RE`）に加えて:
+
+```sh
+render158() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" "sql/cm_trade/$1.sql"; }
+# fill.sql: 範囲 [$1, $2)、モード $3（dryrun / apply）
+fl158() { local s=$1 e=$2 m=$3; shift 3; render158 fill | q --location=$L --format=json --maximum_bytes_billed=6442450944 \
+  --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" --parameter="mode:STRING:$m" "$@"; }
+vf158() { local s=$1 e=$2; shift 2; render158 verify | q --location=$L --format=json --maximum_bytes_billed=1073741824 \
+  --parameter="start_at:TIMESTAMP:$s" --parameter="end_at:TIMESTAMP:$e" "$@"; }
+```
+
+### 1. 事前確認
+
+```sh
+bq show --schema --format=json $P:optionchan_tokyo.atm_cm_iv | jq -r '.[-1] | .name + " " + .mode'   # basis NULLABLE
+for n in A B C; do
+  case $n in A) s=$RA e=$RB ;; B) s=$RB e=$RC ;; C) s=$RC e=$RE ;; esac
+  fl158 "$s" "$e" dryrun > $W/cm158-dryrun-$n.json
+  jq -c '.[-1][0] | del(.mode, .start_at, .end_at)' $W/cm158-dryrun-$n.json
+done
+vf158 "$RA" "$RE" | jq -c '.[-1][0] | del(.short_days)' > $W/cm158-verify-before.json
+```
+
+- 見込み（2026-10-31 に結果の SELECT で数えた）: `snapshots` A 15,169・B 180,669・C 9,440（計 205,278 = #114 のスナップショット）、`with_iv30` A 12,534・B 151,903・C 7,114（計 171,551）、`to_delete` 0・`conflicts` 0（#114 の時刻に `atm_cm_iv` の行が無い）。`to_insert` = `snapshots`
+- `verify` の前: `trade_rows` 0・`missing_snapshots` = 205,278・`quote_rows` を控える
+
+### 2. 退避
+
+列の追加は戻せない（BigQuery の列の削除と Terraform の表の作り直しになる）ので、戻すときは列を残して行だけを消す。書く前に表のスナップショットを取る（30 日で自動で消える。データセットの time travel 168 時間もある）:
+
+```sh
+q --location=$L "CREATE SNAPSHOT TABLE \`$P.optionchan_tokyo.atm_cm_iv_bak158\` CLONE \`$P.optionchan_tokyo.atm_cm_iv\`
+OPTIONS (expiration_timestamp = TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 30 DAY), description = 'before cm_trade fill (#158)')"
+bq show --format=json $P:optionchan_tokyo.atm_cm_iv_bak158 | jq -c '{type, n: .numRows, exp: .expirationTime}'   # SNAPSHOT、n = 今の行数
+```
+
+### 3. 書き込み
+
+定期クエリ `atm-cm`（毎時 :45）と同じ表に DML を出すので、:40〜:50 を避ける。範囲ごとに apply し、同じ範囲の dryrun をもう一度流して、消す数 = 足す数（前の行を同じ行で置き換える）になることを確かめる:
+
+```sh
+for n in A B C; do
+  case $n in A) s=$RA e=$RB ;; B) s=$RB e=$RC ;; C) s=$RC e=$RE ;; esac
+  fl158 "$s" "$e" apply > $W/cm158-apply-$n.json
+  echo "$n plan=$(jq -c '.[-1][0] | [.to_delete, .to_insert]' $W/cm158-dryrun-$n.json) applied=$(jq -c '.[-1][0] | [.deleted, .inserted]' $W/cm158-apply-$n.json)"
+  fl158 "$s" "$e" dryrun | jq -c '.[-1][0] | [.to_delete, .to_insert, .conflicts]'   # [snapshots, snapshots, 0]
+done
+```
+
+- `deleted`・`inserted` が dryrun の `to_delete`・`to_insert` と同じ
+- 失敗したら原因（`cm_trade: ...` の `ERROR()`・クォータ・定期クエリとの衝突 `Could not serialize access ...`）を直して同じコマンドを流し直す（冪等）
+
+### 4. 検証
+
+```sh
+vf158 "$RA" "$RE" | jq -c '.[-1][0] | del(.short_days)' > $W/cm158-verify-after.json
+vf158 "$RA" "$RE" | jq -r '.[-1][0].short_days | join(" ")'
+```
+
+- 0 になる項目: `duplicate_rows`・`basis_errors`・`outside_rows`・`missing_snapshots`・`iv_range_rows`・`method_errors`・`forward_errors`
+- `trade_rows` = `snapshots`（205,278）。`trade_iv30_rows` が 1. の `with_iv30` の合計と同じ。`quote_rows` が書く前と同じ（消す値の無い気配の行は 0 の見込み）
+- `short_days`（引けが 14:30 より前か無い取引日）が 2022-11-17 と 2024-08-06 だけ（2024-08-06 は範囲が 12:25 JST で終わるため。その日の引けは範囲の外の気配の行にある）。#158 の AC の 169 日のうち 168 日で引けが 14:30 以降
+- ビューアーの `/atm_iv` の 30日固定で欠け 1（2022-09〜2023-04）を開き、線がつながって背景に帯が出ること（オーナーが目視）
+
+結果は件数・分位点だけを #158 にコメントする（dryrun・apply・verify の数、スキャン量）。JSON の全文・行・値は貼らない。
+
+### 合い方の測り直し
+
+作り方（`-- trade:begin`〜`-- trade:end`）や #114 の作り方を変えたときに流す（読むだけ。1 窓 約 0.5 GiB）。窓は JST の日の境目で、data.md の表の 6 窓（例: 2021-11-22〜26 JST）:
+
+```sh
+render158 accuracy | q --location=$L --format=json --maximum_bytes_billed=5368709120 \
+  --parameter="start_at:TIMESTAMP:2021-11-21 15:00:00+00" --parameter="end_at:TIMESTAMP:2021-11-26 15:00:00+00" \
+  | jq -c '.[-1][0] | del(.start_at, .end_at)'
+```
+
+- 閾値（#158 の AC）: 急落の窓（2024-08-06〜09）を除く窓で、`iv_abs_p50` が 0.4 以下・`iv_abs_p90` が 1.2 以下
+
+### 切り戻し
+
+印の行を消すと書く前と同じになる（足したのは元の表に無かった行。値の無い気配の行を消していれば、その時刻は `cm_backfill.sql` で戻る）:
+
+```sh
+render158 rollback | q --location=$L --format=json --parameter="start_at:TIMESTAMP:$RA" --parameter="end_at:TIMESTAMP:$RE" | jq -c '.[-1][0]'
+vf158 "$RA" "$RE" | jq -c '.[-1][0] | {trade_rows, quote_rows}'   # trade_rows 0、quote_rows が書く前と同じ
+```
+
+- 全部を書く前に戻すとき（最後の手段）: 2. のスナップショットと今の表を `created_at` で比べ、`basis = 'trade'` 以外の行が同じことを確かめてから、`basis = 'trade'` の行を消す（スナップショットからの復元は、書いた後に定期クエリが足した行も消すのでしない）
+- 列 `basis` は残す（読み手は列の名前で読むので、残っても困らない）
+- 作り方を変えてやり直すときは、そのまま `fill.sql` を流し直す（前の `basis = 'trade'` の行を置き換える）
+
+### 費用
+
+| 項目 | 見込み（dry run） |
+|---|---|
+| dryrun・apply（3 範囲 × 3 回） | A 0.7 GiB・B 2.2 GiB・C 0.3 GiB（option の最新版の必要な列 + future + `atm_cm_iv`）。1 回の 3 範囲で 約 3.2 GiB、全部で 約 10 GiB |
+| verify（前後） | `atm_cm_iv` の全範囲 + `ingest_runs` の小さい列。各 約 0.1 GiB |
+| 合い方（1 窓） | 約 0.5 GiB（#114 の作り方の歩み値 + `atm_cm_iv`） |
+| 保存 | 約 20.5 万行（`atm_cm_iv` の 1 割強）。月に 1 円未満 |
+
+### 他の仕組みとの関係
+
+- **定期クエリ `atm-cm`**: 窓は直近 3 日で、#158 の行（2024-08-06 より前）に届かない。INSERT は列の名前を並べるので、列 `basis` の追加の前後どちらでも動く
+- **`cm_backfill.sql`**: `basis = 'trade'` の行を残す（「30 日固定の ATM IV（#100）」の「過去分」）
+- **`cm_accuracy.sql`**: 気配の行（`basis` が NULL）だけと比べる
+- **ビューアー**: `/atm_iv` の 30日固定は表の `iv30` を読むので、書いた区間の線がつながる。#114 の区間（`data_gaps` の `filled`・`partial`）は約定と同じく帯を塗る（docs/viewer.md）
+- **シミュレーター**: `atm_cm_iv` を列の名前で読む（`basis` は読まない）。#158 の区間の `m1_forward`・`m2_forward` は先物の値（気配の F との差は中央値 5〜20 円）
 
 ## ビューアー（#13）
 

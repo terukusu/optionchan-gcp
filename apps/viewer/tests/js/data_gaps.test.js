@@ -57,12 +57,13 @@ test('parse: 4 列・数字・prevAt < nextAt の行だけ、prevAt 昇順、per
   assert.deepEqual(parse(undefined), []);
 });
 
-test('modeOf: 約定（0・1・期近つなぎ）は trade、mid・30日固定は quote', () => {
+test('modeOf: 約定（0・1・期近つなぎ）と 30日固定（#158）は trade、mid は quote', () => {
   assert.equal(modeOf(AtmSeries.seriesOf('0'), 'trade'), 'trade');
   assert.equal(modeOf(AtmSeries.seriesOf('roll'), 'trade'), 'trade');
   assert.equal(modeOf(AtmSeries.seriesOf('1'), 'mid'), 'quote');
-  assert.equal(modeOf(AtmSeries.seriesOf('cm'), 'trade'), 'quote');
-  assert.equal(modeOf(AtmSeries.seriesOf('cm'), 'mid'), 'quote');
+  // 30日固定は IV を選べない（画面は mid として渡す）が、#114 の区間は約定 IV から作った値があるので帯
+  assert.equal(modeOf(AtmSeries.seriesOf('cm'), 'trade'), 'trade');
+  assert.equal(modeOf(AtmSeries.seriesOf('cm'), 'mid'), 'trade');
 });
 
 test('spans: 分足・1 時間足は [time, time + 秒)、日足は 16:00 JST が境目（先頭は time − 8 時間）', () => {
@@ -166,7 +167,7 @@ test('5 分・15 分足・期近つなぎでも足の時刻と長さだけで同
     .map((m) => m.time), [jst(1, 4, 10, 2)]);
 });
 
-test('filled: 約定は帯（印なし）、mid・30日固定は印（帯なし）。none はどれでも印。partial は約定で帯', () => {
+test('filled: 約定・30日固定は帯（印なし）、mid は印（帯なし）。none はどれでも印。partial は約定で帯', () => {
   const span = [jst(1, 4, 10, 30), jst(1, 4, 12)];
   const filled = gaps([...span, 'bug_format', 'filled']);
   let r = assign(HOURLY, H, filled, 'trade');

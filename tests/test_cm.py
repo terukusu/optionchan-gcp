@@ -3,8 +3,10 @@
 - 計算（-- cm:begin〜end）と一時関数（-- functions:begin〜end。気配だけの限月の IV。#156）は定期クエリ sql/cm/atm_cm.sql・
   過去分の作り直し sql/cm/cm_backfill.sql・突き合わせ sql/cm/cm_accuracy.sql・ビューアーの sql/atm_cm.sql で一字一句同じ。
   一時関数は sql/tick_build/build.sql の black76_iv と同じ本文
-- 結果の列の順は schema/cm/atm_cm_iv.json と同じ（INSERT は列の位置で入る）
-- 書くのは atm_cm_iv だけで、窓 / 範囲の中を置き換える。生データは窓 / 範囲で絞る。cm_accuracy.sql は書かない
+- 結果の列の順は schema/cm/atm_cm_iv.json の basis（#158）より前の 11 列と同じ。INSERT は列の名前を並べる（列の追加の前後どちらでも動く）
+- 表の列: 最後が basis（STRING、NULLABLE。NULL = 気配から、trade = 約定 IV から。#158）で、前の 11 列は #100 のまま
+- 書くのは atm_cm_iv だけで、窓 / 範囲の中を置き換える。cm_backfill.sql は気配の行（basis が NULL）だけを置き換え、basis = 'trade' の行は
+  残す。生データは窓 / 範囲で絞る。cm_accuracy.sql は書かない（比べるのは気配の行だけ）
 - 定期クエリは毎時（#117）: 7 時台の回は前日 07:00〜当日 07:00 の作り直し、他の回は表の最後の行 − 2 時間（上限 3 日）からの増分で、
   新しい取り込みが無ければ何もしない
 - infra/prod/sq.tf のテーブル・テーブル単位の付与・DTS（スケジュールは tests/test_infra.py、窓は tests/test_sql.py）
@@ -125,7 +127,27 @@ def test_result_matches_schema(name):
     final = re.search(r'^cm AS \(\n  SELECT\n(.*?)\n  FROM cm_var\n\)', between(text, '-- cm:begin', '-- cm:end'),
                       re.S | re.M).group(1)
     names = [re.split(r'\s+AS\s+', item.strip().rstrip(','))[-1] for item in re.split(r',\n(?=    \w)', final)]
-    assert names == [c['name'] for c in cols]
+    assert names == CM_COLUMNS
+    # INSERT は列の名前を並べる（basis は書かない = NULL。表に basis を足す前でも後でも動く。#158）
+    [insert] = re.findall(r'INSERT INTO `\$\{project\}\.\$\{dataset\}\.atm_cm_iv`\n\s+\(([^()]*)\)\n\s+SELECT \* FROM result\b',
+                          text)
+    assert [c.strip() for c in insert.split(',')] == CM_COLUMNS
+
+
+# #100 の 11 列（名前・型・モード）。#158 で最後に basis を足した
+CM_SCHEMA = [('created_at', 'TIMESTAMP', 'REQUIRED'), ('iv30', 'FLOAT', 'NULLABLE'), ('method', 'STRING', 'NULLABLE'),
+             ('m1_last_trading_day', 'DATE', 'NULLABLE'), ('m1_days', 'FLOAT', 'NULLABLE'), ('m1_forward', 'FLOAT', 'NULLABLE'),
+             ('m1_iv', 'FLOAT', 'NULLABLE'), ('m2_last_trading_day', 'DATE', 'NULLABLE'), ('m2_days', 'FLOAT', 'NULLABLE'),
+             ('m2_forward', 'FLOAT', 'NULLABLE'), ('m2_iv', 'FLOAT', 'NULLABLE')]
+CM_COLUMNS = [name for name, _, _ in CM_SCHEMA]
+
+
+def test_schema_basis():
+    """表の列: 前の 11 列は変わらず、最後に basis（STRING、NULLABLE）。列の追加は Terraform の in-place の変更（作り直さない）"""
+    cols = json.loads(read(SCHEMA))
+    assert [(c['name'], c['type'], c['mode']) for c in cols[:-1]] == CM_SCHEMA
+    assert (cols[-1]['name'], cols[-1]['type'], cols[-1]['mode']) == ('basis', 'STRING', 'NULLABLE')
+    assert 'trade' in cols[-1]['description']
 
 
 @pytest.mark.parametrize('path', [os.path.join(SQL_DIR, n) for n in sorted(PERIOD)] + [VIEWER_CM],
@@ -163,6 +185,9 @@ def test_accuracy_is_read_only():
     for col in ('CAST(NULL AS BOOL) AS is_atm', 'CAST(NULL AS FLOAT64) AS bid_iv', 'CAST(NULL AS FLOAT64) AS ask_iv'):
         assert col in quote
     assert re.search(r'^  FROM jpx$', quote, re.M)
+    # 表の値は気配の行（basis が NULL）だけと比べる（#158 の約定 IV からの行は比べない）
+    stored = re.search(r'^stored AS \(\n(.*?)^\),\n', source, re.S | re.M).group(1)
+    assert stored.rstrip().endswith('WHERE created_at >= @start_at AND created_at < @end_at AND basis IS NULL')
 
 
 @pytest.mark.parametrize('name', WRITERS)
@@ -172,12 +197,21 @@ def test_replaces_only_atm_cm_iv(name):
     writes = re.findall(r'\b(?:INSERT INTO|MERGE|DELETE FROM|UPDATE|TRUNCATE TABLE|CREATE OR REPLACE TABLE|DROP)\s+`([^`]+)`',
                         text)
     assert writes == ['${project}.${dataset}.atm_cm_iv'] * 2
-    # 窓 / 範囲の中だけを 1 つのトランザクションで置き換える。結果が無ければ何もしない
+    # 窓 / 範囲の中だけを 1 つのトランザクションで置き換える。結果が無ければ何もしない。
+    # 過去分の作り直しは気配の行（basis が NULL）だけを消し、約定 IV からの行（basis = 'trade'。#158）と同じ時刻は足さない。
+    # 定期クエリの窓（直近 3 日）には約定 IV からの行（2024-08 より前）が無いので、窓の中を消す
+    keep = {'atm_cm.sql': ('', ''),
+            'cm_backfill.sql': (' AND basis IS NULL',
+                                r'\s+WHERE created_at NOT IN \(\s+SELECT created_at FROM `\$\{project\}\.\$\{dataset\}\.atm_cm_iv`\s+'
+                                rf"WHERE created_at >= {start} AND created_at < {end} AND basis = 'trade'\s+\)")}[name]
     assert re.search(
         r'IF EXISTS \(SELECT 1 FROM result\) THEN\s+BEGIN TRANSACTION;\s+'
-        rf'DELETE FROM `\$\{{project\}}\.\$\{{dataset\}}\.atm_cm_iv` WHERE created_at >= {start} AND created_at < {end};\s+'
-        r'INSERT INTO `\$\{project\}\.\$\{dataset\}\.atm_cm_iv` SELECT \* FROM result;\s+COMMIT TRANSACTION;\s+END IF;',
+        rf'DELETE FROM `\$\{{project\}}\.\$\{{dataset\}}\.atm_cm_iv` WHERE created_at >= {start} AND created_at < {end}'
+        + re.escape(keep[0]) + r';\s+'
+        r'INSERT INTO `\$\{project\}\.\$\{dataset\}\.atm_cm_iv`\s+\([^()]*\)\s+SELECT \* FROM result'
+        + keep[1] + r';\s+COMMIT TRANSACTION;\s+END IF;',
         text)
+    assert ('basis' in text) == (name == 'cm_backfill.sql')
 
 
 def test_hourly_window():

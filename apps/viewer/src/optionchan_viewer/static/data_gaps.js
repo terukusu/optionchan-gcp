@@ -5,8 +5,9 @@
 // - 足が覆う時間（その足に入るスナップショットの時刻の範囲）: 分足・1 時間足（期近つなぎも）は [time, time + 足の秒数)。
 //   日足（time = 取引日の 00:00 JST）は前の足の time + 16 時間〜この足の time + 16 時間（16:00 JST を日中と夜間の境目にする。
 //   週末・休業日は前の足で越える）。先頭の日足は time − 8 時間から
-// - 約定（n = 0・1・期近つなぎ）で #114 が作った区間（filled・partial）は帯（当たる足すべて）。それ以外（作れなかった区間、
-//   mid・30日固定のすべて）は欠けの印（当たる最初の足。当たる足が無ければ区間の後で最初の足）。1 本の足に 1 つにまとめる
+// - 約定（n = 0・1・期近つなぎ）と 30日固定で #114 が作った区間（filled・partial）は帯（当たる足すべて。30日固定は #158 で
+//   #114 の行の約定 IV から作った）。それ以外（作れなかった区間、mid のすべて）は欠けの印（当たる最初の足。当たる足が無ければ
+//   区間の後で最初の足）。1 本の足に 1 つにまとめる
 var DataGaps = (function() {
   var JST = 9 * 3600;
   var DAY = 86400;
@@ -59,9 +60,10 @@ var DataGaps = (function() {
     return first <= last ? { first: first, last: last } : null;
   }
 
-  // 'trade'（約定: 作った区間は帯）/ 'quote'（mid・30日固定: 作った区間も気配が無いので欠け）
+  // 'trade'（約定・30日固定: 作った区間は帯。30日固定は #158 で作った区間の約定 IV からの値がある）/ 'quote'（mid: 作った区間も
+  // 気配が無いので欠け）
   function modeOf(series, iv) {
-    return !series.fixedIv && iv !== 'mid' ? 'trade' : 'quote';
+    return series.fixedIv || iv !== 'mid' ? 'trade' : 'quote';
   }
 
   // 足ごとの覆う時間 [from, to)（UTC 秒）。bars は time 昇順

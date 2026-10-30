@@ -9,7 +9,7 @@
     "name": "iv30",
     "type": "FLOAT",
     "mode": "NULLABLE",
-    "description": "30 日固定の ATM IV（%）。1 限月の SQ まで 30 日以上なら 1 限月の補間 ATM IV（method = m1）、3〜30 日なら 1 限月・2 限月の補間 ATM IV の総分散を満期について線形に補間した値（method = interp）、3 日未満なら 2 限月の補間 ATM IV（method = m2）。出せなければ NULL"
+    "description": "30 日固定の ATM IV（%）。1 限月の SQ まで 30 日以上なら 1 限月の補間 ATM IV（method = m1）、3〜30 日なら 1 限月・2 限月の補間 ATM IV の総分散を満期について線形に補間した値（method = interp）、3 日未満なら 2 限月の補間 ATM IV（method = m2）。出せなければ NULL。basis = trade の行は約定 IV と先物から（#158）"
   },
   {
     "name": "method",
@@ -33,13 +33,13 @@
     "name": "m1_forward",
     "type": "FLOAT",
     "mode": "NULLABLE",
-    "description": "1 限月のフォワード（ATM に近い 5 本のうち call・put の両方に気配のある行使価格の C − P + K の中央値。3 本未満は NULL）"
+    "description": "1 限月のフォワード（ATM に近い 5 本のうち call・put の両方に気配のある行使価格の C − P + K の中央値。3 本未満は NULL）。basis = trade の行はスナップショットの先物の値（#158。m2_forward も同じ値）"
   },
   {
     "name": "m1_iv",
     "type": "FLOAT",
     "mode": "NULLABLE",
-    "description": "1 限月の補間 ATM IV（%）: フォワードをはさむ 2 本の行使価格の IV（call・put の mid IV の平均）を log(K / F) で線形に補間"
+    "description": "1 限月の補間 ATM IV（%）: フォワードをはさむ 2 本の行使価格の IV（call・put の mid IV の平均）を log(K / F) で線形に補間。basis = trade の行は call・put の約定 IV（スナップショットの 120 分前以降の約定）の平均"
   },
   {
     "name": "m2_last_trading_day",
@@ -64,5 +64,11 @@
     "type": "FLOAT",
     "mode": "NULLABLE",
     "description": "2 限月の補間 ATM IV（%。m1_iv と同じ出し方）"
+  },
+  {
+    "name": "basis",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "元のデータ: NULL = 気配から（#100。定期クエリ・cm_backfill.sql の行）、trade = #114 の行の約定 IV と先物から（#158。sql/cm_trade/fill.sql の行）"
   }
 ]
