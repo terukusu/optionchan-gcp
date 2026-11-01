@@ -96,9 +96,9 @@ def test_dts_configs():
         assert len(re.findall(r'\bschedule_options\b', body)) == len(starts), name
         if name in DTS_START_TIME:
             assert len(starts) == 1 and DTS_START_TIME[name].fullmatch(starts[0]), (name, starts)
-            # 未来の時刻だとその時刻まで動かない
+            # 未来の時刻だとその時刻まで動かない。作成の API は過去を拒むので、新しく作るものは近い未来（1 日以内）にする
             start = datetime.datetime.fromisoformat(starts[0].replace('Z', '+00:00'))
-            assert start < datetime.datetime.now(datetime.UTC)
+            assert start < datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1)
         else:
             assert not starts, name
     tf = dict(all_tf())['prod/sq.tf']

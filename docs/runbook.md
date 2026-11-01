@@ -2997,7 +2997,7 @@ vf158 "$RA" "$RE" | jq -c '.[-1][0] | {trade_rows, quote_rows}'   # trade_rows 0
 
 | もの | 内容 |
 |---|---|
-| DTS `optionchan option-hourly`（asia-northeast1、`sa-sq-dts`、毎時 :45 = `every 1 hours`、`schedule_options.start_time` を過去の :45 にして分をそろえる） | `sql/hourly/option_price_hourly.sql`。窓の決め方は「30 日固定の ATM IV（#100）」の `atm-cm` と同じ: **07:45 JST の回**は `[D-1 07:00, D 07:00) JST` の作り直し、**他の回**は増分 `[表の最後の足 − 2 時間, @run_time)`（始まりは `@run_time` − 3 日を正時に切り捨てた時刻より前にしない）。増分の回は新しい取り込みが無ければ何もしない。窓の中の足を置き換える（結果が 0 行の窓では何もしない）。`atm-cm` と別の DTS なので、片方の失敗がもう片方を止めない |
+| DTS `optionchan option-hourly`（asia-northeast1、`sa-sq-dts`、毎時 :45 = `every 1 hours`、`schedule_options.start_time` を :45 にして分をそろえる。作成の API は過去の時刻を拒むので、作ったときの近い未来の :45） | `sql/hourly/option_price_hourly.sql`。窓の決め方は「30 日固定の ATM IV（#100）」の `atm-cm` と同じ: **07:45 JST の回**は `[D-1 07:00, D 07:00) JST` の作り直し、**他の回**は増分 `[表の最後の足 − 2 時間, @run_time)`（始まりは `@run_time` − 3 日を正時に切り捨てた時刻より前にしない）。増分の回は新しい取り込みが無ければ何もしない。窓の中の足を置き換える（結果が 0 行の窓では何もしない）。`atm-cm` と別の DTS なので、片方の失敗がもう片方を止めない |
 | `optionchan_tokyo.option_price_hourly` | 1 行 = 1 時間 × 限月 × 行使価格 × call / put。パーティションは `last_trading_day` の月（`require_partition_filter = true`）、クラスタは `target_price`・`type`・`started_at`。新系の 1 限月 約 45 万行（1 パーティション 約 70 MiB）、全期間で約 1,500 万行・約 2 GiB の見込み |
 | `sql/hourly/hourly_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)`（どちらも JST の 07:00）の作り直し（下の「過去分」） |
 
