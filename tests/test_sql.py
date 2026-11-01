@@ -99,6 +99,8 @@ SCHEDULED = {
     'sql/ohlc/atm_hourly.sql': ({'project', 'dataset'}, None, None),
     # 30 日固定の ATM IV（#100）。結果は atm_cm_iv の窓の置き換え（検査は tests/test_cm.py）
     'sql/cm/atm_cm.sql': ({'project', 'dataset'}, None, None),
+    # 銘柄ごとの 1 時間足（#161）。結果は option_price_hourly の窓の置き換え（検査は tests/test_hourly.py）
+    'sql/hourly/option_price_hourly.sql': ({'project', 'dataset'}, None, None),
 }
 WINDOW_DECLARE = (
     "DECLARE win_end TIMESTAMP DEFAULT TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), 'Asia/Tokyo');\n"
@@ -112,6 +114,14 @@ HOURLY_WINDOW_DECLARE = {
         "DECLARE win_end TIMESTAMP DEFAULT IF(rebuild, TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), "
         "'Asia/Tokyo'), @run_time);\n"
         'DECLARE win_start TIMESTAMP DEFAULT TIMESTAMP_SUB(win_end, INTERVAL IF(rebuild, 1, 3) DAY);'
+    ),
+    # 増分の始まりは正時に切り捨てる（足の始まりは正時。#161）
+    'sql/hourly/option_price_hourly.sql': (
+        "DECLARE rebuild BOOL DEFAULT EXTRACT(HOUR FROM DATETIME(@run_time, 'Asia/Tokyo')) = 7;\n"
+        "DECLARE win_end TIMESTAMP DEFAULT IF(rebuild, TIMESTAMP(DATETIME(DATE(@run_time, 'Asia/Tokyo'), TIME '07:00:00'), "
+        "'Asia/Tokyo'), @run_time);\n"
+        'DECLARE win_start TIMESTAMP DEFAULT IF(rebuild, TIMESTAMP_SUB(win_end, INTERVAL 1 DAY), '
+        'TIMESTAMP_TRUNC(TIMESTAMP_SUB(win_end, INTERVAL 3 DAY), HOUR));'
     ),
 }
 

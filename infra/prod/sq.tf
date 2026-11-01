@@ -1,6 +1,6 @@
-# 日次の品質チェックと新旧の突き合わせ（#40、target.md 3.4）と 1 時間足（#49、3.2）。BigQuery Data Transfer Service（DTS）の 5 本と、
+# 日次の品質チェックと新旧の突き合わせ（#40、target.md 3.4）と 1 時間足（#49、3.2）など。BigQuery Data Transfer Service（DTS）の 7 本と、
 # その作業用データセット・結果のテーブル・付与。実行 SA sa-sq-dts とプロジェクト単位・旧データセットへの付与は infra/bootstrap/sq.tf。
-# 窓はどれも @run_time の JST の日付 D に対し [D-1 07:00, D 07:00)（atm-cm の増分の回だけ別。下）。スケジュールは UTC（JST − 9 時間）。
+# 窓はどれも @run_time の JST の日付 D に対し [D-1 07:00, D 07:00)（atm-cm・option-hourly の増分の回だけ別。下）。スケジュールは UTC（JST − 9 時間）。
 #   legacy-stage   07:02 JST  US    旧系の前日分 → optionchan_legacy_stage（旧系の夜間分は 06:20 頃までに入っている）
 #   legacy-copy    07:10 JST  東京  optionchan_legacy_stage → optionchan_legacy_copy（データセットコピー）
 #   quality-daily  07:15 JST  東京  品質チェック → quality_daily。違反があれば失敗（新系の M2 で通知）。ingest の 07:00 の照合・回収の後
@@ -8,6 +8,8 @@
 #   atm-hourly     07:40 JST  東京  最新版から 1 時間足を作り atm_iv / atm_option_price / atm_target_price（#49。旧系の insert_ohlc の置き換え）と atm_mid_iv（#98）に MERGE
 #   atm-cm         毎時 :45   東京  最新版の全行使価格の気配から 30 日固定の ATM IV を作り atm_cm_iv の窓を置き換える（#100）。
 #                                   毎時の回は表の最後の行 − 2 時間からの増分（#117）、07:45 JST の回が前日分の作り直し
+#   option-hourly  毎時 :45   東京  最新版の全銘柄から銘柄ごとの 1 時間足を作り option_price_hourly の窓を置き換える（#161）。
+#                                   窓の決め方は atm-cm と同じ（増分は表の最後の足 − 2 時間から、07:45 JST の回が前日分の作り直し）
 # 1 日 1 回のものを 07 時台に寄せるのは、失敗の M2（通知は 1 時間に 1 回まで）の抑制が 08:45 の寄り付きの前に終わるようにするため。
 # legacy-* と作業用データセット・legacy_compare_daily は並行稼働の間だけ。旧系の停止（#14）で legacy-* を無効にし（var.legacy_stopped）、
 # 旧系の削除（#24）で消す。品質チェックと 1 時間足は残す。
@@ -293,4 +295,60 @@ resource "google_bigquery_data_transfer_config" "atm_cm" {
   }
 
   depends_on = [google_bigquery_dataset_iam_member.sq_tokyo_viewer, google_bigquery_table_iam_member.sq_atm_cm_editor]
+}
+
+# ---- 銘柄ごとの 1 時間足（#161） ----
+# 全銘柄（限月 × 行使価格 × call / put）の 1 時間足。シミュレーター（別のアプリ）が 1 銘柄の値段と IV の推移を読む（列は公開の
+# インターフェース。正は schema/tokyo/option_price_hourly.json で、読み手が固定コミットの schema と照合する。docs/data.md の「列の契約」）。
+# schema/tokyo/ に置くので取り込みのイメージのタグも変わる（ingest のコードは変わらない）。取り込みの表ではないので tables.json には入れない。
+# 読み方は「1 銘柄の一生」（last_trading_day・target_price・type の等号）なので、パーティションは last_trading_day の月（1 銘柄が
+# ほぼ 1 パーティション。dry run の見積もりがクラスタを入れないので、started_at の月だと 3 か月の範囲で 3〜3.5 倍になる）、
+# クラスタは target_price・type・started_at。全期間で約 1,500 万行・約 2 GiB の見込みなので、絞らない読み方は require_partition_filter で止める。
+# データは最新版から作り直せる（sql/hourly/hourly_backfill.sql）ので deletion_protection だけ（消すときは外す PR を先に出す）
+
+resource "google_bigquery_table" "option_price_hourly" {
+  project                  = var.project_id
+  dataset_id               = google_bigquery_dataset.tokyo.dataset_id
+  table_id                 = "option_price_hourly"
+  description              = "銘柄ごとの 1 時間足（#161。sql/hourly/option_price_hourly.sql）。1 行 = 足 × 限月 × 行使価格 × call / put: 気配の中値の OHLC と終値の気配、約定の OHLC と IV、出来高・建玉"
+  schema                   = file("${path.module}/../../schema/tokyo/option_price_hourly.json")
+  clustering               = ["target_price", "type", "started_at"]
+  require_partition_filter = true
+  deletion_protection      = true
+
+  time_partitioning {
+    type  = "MONTH"
+    field = "last_trading_day"
+  }
+}
+
+# 定期クエリが窓の行を置き換える（テーブル単位。データセットは sq_tokyo_viewer の読み取りだけ）
+resource "google_bigquery_table_iam_member" "sq_option_hourly_editor" {
+  project    = var.project_id
+  dataset_id = google_bigquery_table.option_price_hourly.dataset_id
+  table_id   = google_bigquery_table.option_price_hourly.table_id
+  role       = "roles/bigquery.dataEditor"
+  member     = "serviceAccount:${local.sa_sq}"
+}
+
+# 毎時 :45。atm-cm と同じ時刻・窓の決め方だが、別の DTS にする（片方の ERROR がもう片方の更新を止めない。止める・消すのが 1 リソース）。
+# 07:45 JST の回が前日分の作り直しで、他の回は増分（窓は sql/hourly/option_price_hourly.sql）。start_time は過去の :45（分をそろえる）
+resource "google_bigquery_data_transfer_config" "option_hourly" {
+  project              = var.project_id
+  display_name         = "optionchan option-hourly"
+  location             = local.bq.dataset.location
+  data_source_id       = "scheduled_query"
+  schedule             = "every 1 hours"
+  service_account_name = local.sa_sq
+  schedule_options {
+    start_time = "2026-10-01T22:45:00Z"
+  }
+  params = {
+    query = templatefile("${path.module}/../../sql/hourly/option_price_hourly.sql", {
+      project = var.project_id
+      dataset = google_bigquery_dataset.tokyo.dataset_id
+    })
+  }
+
+  depends_on = [google_bigquery_dataset_iam_member.sq_tokyo_viewer, google_bigquery_table_iam_member.sq_option_hourly_editor]
 }
