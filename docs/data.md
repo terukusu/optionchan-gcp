@@ -54,6 +54,7 @@
 | `atm_target_price` | ATM の行使価格の 1 時間足 | 限月 × 1 時間 | 月（`started_at`） | `last_trading_day` | 同上 |
 | `atm_mid_iv` | ATM の put の mid IV の 1 時間足（旧系に無い表） | 限月 × 1 時間 | 月（`started_at`） | `last_trading_day` | 同上 |
 | `atm_cm_iv` | 30 日固定の ATM IV と、限月ごとのフォワード・補間 ATM IV・SQ までの日数 | 取り込み 1 回（`created_at`） | 月（`created_at`） | なし | 定期クエリ `atm-cm`（毎時 :45、`sql/cm/atm_cm.sql`）。#114 の区間は `sql/cm_trade/fill.sql`（手で流す。#158） |
+| `option_price_hourly` | 銘柄ごとの 1 時間足: 気配の中値の OHLC と終値の気配、約定の OHLC と IV、出来高・建玉（#161。シミュレーターが読む） | 1 時間 × 限月 × 行使価格 × call / put | 月（`last_trading_day`）。**`require_partition_filter = true`** | `target_price`・`type`・`started_at` | 定期クエリ `option-hourly`（毎時 :45、`sql/hourly/option_price_hourly.sql`）。過去分は `sql/hourly/hourly_backfill.sql`（手で流す） |
 | `trading_calendar` | 取引カレンダーの版の履歴（追記のみ） | 版 × 休業日に当たる平日 1 日 | なし | なし | Cloud Run `ingest`（毎日 06:40 JST のリクエスト）と手動のジョブ `calendar-sync` |
 | `trading_calendar_latest` | ビュー。`trading_calendar` の最新版（`version_at` が最大の版）の行だけ | 同上 | — | — | Terraform（`sql/calendar/trading_calendar_latest.sql`） |
 | `data_gaps` | 過去データの欠けの区間の一覧 | 欠けの区間 1 つ | なし | なし | 所有者が手で入れる（`sql/gaps/gaps.sql` の結果を `bq load --replace`。runbook の「欠けの一覧の表 data_gaps（#123）」） |
@@ -225,6 +226,30 @@
 | `m2_iv` | FLOAT | NULLABLE | 2 限月の補間 ATM IV（%） |
 | `basis` | STRING | NULLABLE | 元のデータ: NULL = 気配から（定期クエリ・`cm_backfill.sql` の行）、`trade` = #114 の行の約定 IV と先物から（#158）。気配から作った値と区別したいときに絞る |
 
+### option_price_hourly
+
+列の正は `schema/tokyo/option_price_hourly.json`（公開のインターフェース。下の「列の契約」）。1 行 = 1 時間（`started_at`）× 限月 × 行使価格 × call / put。計算は下の「1 時間足の計算（銘柄ごと）」。**気配・数の列と約定の列で足の切り方が違う**（気配・数は `created_at`、約定は `price_time`）。
+
+| 列 | 型 | モード | 説明 |
+|---|---|---|---|
+| `started_at` | TIMESTAMP | REQUIRED | 足の始まり（UTC の正時 = JST の正時）。クラスタの列 |
+| `last_trading_day` | DATE | REQUIRED | 最終取引日（限月）。パーティション（月）の列。**読むときは必ずこの列で絞る** |
+| `target_price` | INTEGER | REQUIRED | 行使価格。クラスタの列 |
+| `type` | INTEGER | REQUIRED | 1 = call、2 = put |
+| `mid_open` / `mid_high` / `mid_low` / `mid_close` | FLOAT | NULLABLE | 中値（(`bid` + `ask`) / 2）の OHLC。連続売買の窓の中の、`bid > 0`・`ask > 0`・`bid ≤ ask` の行から（`created_at` の足）。該当する行が無ければ NULL |
+| `bid_close` / `ask_close` | INTEGER | NULLABLE | `mid_close` の行の `bid` / `ask` |
+| `bid_iv_close` / `ask_iv_close` | FLOAT | NULLABLE | `mid_close` の行の `bid_iv` / `ask_iv` |
+| `trade_open` / `trade_high` / `trade_low` / `trade_close` | INTEGER | NULLABLE | 約定（`price`）の OHLC（`price_time` の足。同じ立会の約定だけ）。約定が無ければ NULL |
+| `iv_close` | FLOAT | NULLABLE | `trade_close` の行の `iv` |
+| `volume` | INTEGER | NULLABLE | 足の最後の行（`created_at` が最も遅い行）の出来高（その取引日の累計。NULL もありうる） |
+| `positions` | INTEGER | NULLABLE | 足の中の最後の NULL でない建玉 |
+| `snapshots` | INTEGER | NULLABLE | 足に入ったスナップショット（`created_at`）の数。約定だけの足は 0 |
+| `last_at` | TIMESTAMP | NULLABLE | 足に入った行の `created_at` の最大。約定だけの足は NULL |
+
+- キーは（`started_at`・`last_trading_day`・`target_price`・`type`）で一意。気配・数の足と約定の足は同じキーの行に入る（約定だけ・気配だけの足もある）
+- #114 で DataCube の歩み値から作った行（気配が NULL）の時間は、中値・終値の気配の列が NULL で約定の列だけが入る
+- 窓は毎時 :45 の回が直近の増分、07:45 JST の回が前日 07:00〜当日 07:00 JST を置き換える（runbook の「銘柄ごとの 1 時間足（#161）」）
+
 ## 時刻
 
 | 列 | 型 | 中身 |
@@ -316,6 +341,28 @@ ATM IV（その時点で `is_atm` の put の IV）は、原資産が動いて A
   - 片寄り（2022-08 の −0.27）は約定 IV（#114 のモデル）と JPX の気配の IV の作り方の違いで、窓によって符号が違うので直さない
 - **約定 IV からの値は、気配からの値と同じではない**（上の差）。急変の日の値は誤差が大きい。気配からの値だけが要るときは `basis IS NULL` で絞る
 
+## 1 時間足の計算（銘柄ごと）
+
+`option_price_hourly`（#161）の作り方。本文は `sql/hourly/option_price_hourly.sql` の `-- bars:begin`〜`-- bars:end`（過去分の `sql/hourly/hourly_backfill.sql` と一字一句同じ）。元の行は `option_price_latest`（スナップショットごとに最新の完了した実行の行）で、`type` が NULL の行は使わない。
+
+1. **気配・数の列の足**: `created_at` を UTC の正時に切り捨てる（`mid_*`・`bid_close`・`ask_close`・`bid_iv_close`・`ask_iv_close`・`volume`・`positions`・`snapshots`・`last_at`）
+2. **中値に使う行**: `bid > 0`・`ask > 0`・`bid ≤ ask` で、`created_at`（JST）が連続売買の窓の中（`[始まり, 終わり)`）。窓は取引の日 sd（JST − 7 時間の日付。夜間は夕方の日）の時代で切り替える。引けの板寄せの前の 5 分は入れない:
+
+   | 取引の日 sd | 日中 | 夜間 |
+   |---|---|---|
+   | sd < 2021-09-21 | 9:00〜15:10 | 16:30〜翌 5:25 |
+   | 2021-09-21 ≤ sd < 2024-11-05 | 8:45〜15:10 | 16:30〜翌 5:55 |
+   | sd ≥ 2024-11-05 | 8:45〜15:40 | 17:00〜翌 5:55 |
+
+   時代の区切りは立会の時間の変更（[data-gaps.md](data-gaps.md) の「立会の時間」）。祝日取引の日も、行があればそのまま足にする（取引カレンダーとは照合しない）
+3. **中値の OHLC**: 始値 / 終値 = 中値に使う行のうち `created_at` が最も早い / 遅い行、高値 / 安値 = 最大 / 最小。`bid_close`・`ask_close`・`bid_iv_close`・`ask_iv_close` は終値の行の値。同じ `created_at` に同じ銘柄の行が複数ある（旧系の重複）ときの順は値で決める（始値は `bid`・`ask` の小さい方、終値は大きい方）
+4. **約定の列の足**: `price_time`（JST の約定の分）を JST の正時に切り捨てる（`trade_*`・`iv_close`）。`price_time` の立会（JST の 07:00 と 16:00 で切る）が `created_at` の立会と同じ行だけを数える。前の足の約定を持ち越した行（`created_at` は今の足）は前の足の約定に数え、前の立会の約定を持ち越した行（週明けの朝の金曜夜間の約定・朝の夜間の約定・夕方の日中の約定）はどの足にも入れない。日中の引け（15:45 など）・夜間の終わりの約定はその時刻の足に入る
+5. **約定の OHLC**: 始値 = `price_time` が最も早い分の、最初のスナップショットの `price`。終値 = `price_time` が最も遅い分の、その分が終わった後の最初のスナップショットの `price`（無ければその分の最後のスナップショット。同じ分の 2 回目のスナップショットで値が変わったときは後の値）。`iv_close` はその行の `iv`（持ち越しの行の `iv` はスナップショットごとに変わりうるので使わない）
+6. `volume` = 足の最後の行の値（NULL もありうる。同じ時刻は大きい方）、`positions` = 最後の NULL でない値、`snapshots` = `created_at` の数、`last_at` = `created_at` の最大
+
+- 2 つの足は 7 割ほどの行で違う（約定の持ち越し）。たとえば 11:00 のスナップショットが 10:59 の約定を出していれば、気配・数は 11 時台、約定は 10 時台の足に入る
+- 1 時間の中で ATM や限月の並びは関係しない（銘柄ごとに作る）
+
 ## 過去データの欠け
 
 旧系（2018-10〜2026-10）の解析の不具合などで、過去のデータに欠けがある。欠けごとの原因・期間・今の状態は [data-gaps.md](data-gaps.md)。
@@ -383,10 +430,24 @@ ORDER BY last_trading_day, started_at
 
 - 限月を 1 つにするときは `last_trading_day` で絞る（1 時間足は同じ時刻に 2 限月の行がある）
 
+銘柄ごとの 1 時間足（1 銘柄の一生。`last_trading_day` の等号でパーティションを 1 つにする）:
+
+```sql
+SELECT
+  DATETIME(started_at, 'Asia/Tokyo') AS started_jst,
+  mid_close,
+  trade_close,
+  iv_close
+FROM `<PROJECT_ID>.optionchan_tokyo.option_price_hourly`
+WHERE last_trading_day = DATE '2026-11-12' AND target_price = 50000 AND type = 2
+ORDER BY started_at
+```
+
 ## 費用の注意
 
-- **パーティションの列で絞る**。取り込みの 3 表は `created_at`、`ingest_runs` は `snapshot_at`、1 時間足は `started_at`、`atm_cm_iv` は `created_at`。絞らないと全期間（2018-10〜）を読む
-- `option_price` は `require_partition_filter = true` で、`created_at` の絞り込みが無いクエリはエラーになる（`dc_option_tick`・`dc_future_tick` も `trade_date` で同じ）
+- **パーティションの列で絞る**。取り込みの 3 表は `created_at`、`ingest_runs` は `snapshot_at`、1 時間足は `started_at`、`atm_cm_iv` は `created_at`、銘柄ごとの 1 時間足 `option_price_hourly` は `last_trading_day`（月。1 限月がほぼ 1 パーティション）。絞らないと全期間（2018-10〜）を読む
+- `option_price` は `require_partition_filter = true` で、`created_at` の絞り込みが無いクエリはエラーになる（`dc_option_tick`・`dc_future_tick` も `trade_date` で同じ。`option_price_hourly` は `last_trading_day` で同じ。ある時刻の全銘柄を読むときも `last_trading_day` の範囲を付ける）
+- `option_price_hourly` の 1 限月のパーティションは最大 約 70〜90 MiB（全列）。dry run の見積もりはパーティションの絞り込みだけを入れ、クラスタ（`target_price`・`type`・`started_at`）の絞り込みは入れない。実際の課金（`total_bytes_billed`）はクラスタで小さくなりうる（最低 10 MB）
 - 最新版のテーブル関数は期間の引数が必須。中で `created_at`・`snapshot_at` を絞るので、期間に応じたパーティションだけを読む
 - パーティションは UTC の日なので、JST の 1 日（00:00〜24:00）は UTC の 2 日のパーティションを読む。`option_price` は列が多く 1 日のパーティションが大きい（`sql/cm/atm_cm.sql` の冒頭のコメントに dry run の値がある）。要る列だけを `SELECT` する（列指向なので読む列の分だけ課金される）
 - 先に `bq query --dry_run` で読むバイト数を見る。プロジェクトのクエリ量の上限・予算は `docs/runbook.md` の最初の節（[コスト](runbook.md#コスト)）
@@ -396,6 +457,7 @@ ORDER BY last_trading_day, started_at
 - `trading_calendar` の列・型・モードは、オーナーが承認した契約（`apps/ingest/tests/test_schema.py` の `TRADING_CALENDAR` が `schema/tokyo/trading_calendar.json` と一致することを検査する。別のアプリ（シミュレーター）の契約テストも同じファイルを照合する）。変えるときは読み手と合意してから。列の追加は NULLABLE で末尾に。改名・削除・型の変更はしない（`docs/architecture/target.md` の 3.2「取引カレンダー（#63）」）
 - 取り込みの 3 表（`spot_price`・`future_price`・`option_price`）は、旧系の列（`schema/*.json`）の名前・型・モードを変えない（`apps/ingest/tests/test_schema.py` の `test_existing_columns_unchanged`）。新系で足した列（`ingest_run_id`・`parser_version`・`source_object`・`page_updated_at`・`price_time_raw`）は NULLABLE
 - `atm_cm_iv` は #158 で最後に `basis`（NULLABLE）を足した。前の 11 列の名前・型・モードは変えない（`tests/test_cm.py` の `test_schema_basis`）。読み手（ビューアー・シミュレーター）は列の名前で読む
+- `option_price_hourly`（#161）の列・型・モードは公開のインターフェース（シミュレーターが固定コミットの `schema/tokyo/option_price_hourly.json` と照合する）。`tests/test_hourly.py` の `HOURLY_SCHEMA` が並びを固定する。足の切り方（気配・数は `created_at`、約定は `price_time`）・連続売買の窓・中値の条件も契約の一部（schema の `description` と上の「1 時間足の計算（銘柄ごと）」）。変えるときはシミュレーターに知らせてから。列の追加は NULLABLE で末尾に
 - 列を変えるときは、読む側（ビューアー・別のアプリ）に知らせてから。`schema/` を変えると Terraform の差分になり、`schema/tokyo/` は取り込みのイメージにも入る（`docs/development.md`）
 
 ## 作業用のデータセット（旧系）

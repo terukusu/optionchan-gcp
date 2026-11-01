@@ -35,11 +35,11 @@ README_TARGETS = (
 NEW_DOCS = ('README.md', 'docs/setup.md', 'docs/data.md', 'docs/viewer.md', 'docs/development.md', 'docs/glossary.md')
 PATH_PREFIXES = ('apps/', 'sql/', 'infra/', 'schema/', 'monitoring/', 'docs/', 'tests/', '.github/', '.claude/')
 # data.md の表の拾い方が壊れて 0 件で通らないように、拾った名前に含まれるべきもの
-KNOWN_TABLES = {'option_price', 'atm_cm_iv', 'latest_runs', 'trading_calendar_latest', 'atm_mid_iv'}
+KNOWN_TABLES = {'option_price', 'atm_cm_iv', 'latest_runs', 'trading_calendar_latest', 'atm_mid_iv', 'option_price_hourly'}
 SCHEMAS = (
     'schema/tokyo/option_price.json', 'schema/tokyo/future_price.json', 'schema/tokyo/spot_price.json',
     'schema/tokyo/ingest_runs.json', 'schema/tokyo/trading_calendar.json', 'schema/ohlc/atm_ohlc.json',
-    'schema/cm/atm_cm_iv.json',
+    'schema/cm/atm_cm_iv.json', 'schema/tokyo/option_price_hourly.json',
 )
 RUNBOOK_MIN_SECTIONS = 18
 EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')

@@ -20,6 +20,7 @@
 - [1 時間足（#49）](#1-時間足49) — 1 時間足の定期クエリの確認・失敗・再実行、過去分の作り直し
 - [30 日固定の ATM IV（#100）](#30-日固定の-atm-iv100) — 30 日固定の定期クエリの確認・失敗・再実行、過去分、気配から計算した IV の突き合わせ
 - [約定 IV からの 30 日固定（#158）](#約定-iv-からの-30-日固定158) — #114 の区間の 30 日固定を約定 IV から作る手順（dryrun・退避・書き込み・検証・合い方・切り戻し）
+- [銘柄ごとの 1 時間足（#161）](#銘柄ごとの-1-時間足161) — 全銘柄の 1 時間足の定期クエリの確認・失敗・再実行、過去分、突き合わせ、シミュレーターの読み方の量
 - [ビューアー（#13）](#ビューアー13) — ビューアーの初回のデプロイ（IAP）・確認・ユーザーの追加・撤去、費用の確認
 - [取引カレンダー（#63）](#取引カレンダー63) — 取引カレンダーの初回の版、ERROR を受けたとき、版・ビューが壊れたとき、過去年の追加
 
@@ -2989,6 +2990,172 @@ vf158 "$RA" "$RE" | jq -c '.[-1][0] | {trade_rows, quote_rows}'   # trade_rows 0
 - **`cm_accuracy.sql`**: 気配の行（`basis` が NULL）だけと比べる
 - **ビューアー**: `/atm_iv` の 30日固定は表の `iv30` を読むので、書いた区間の線がつながる。#114 の区間（`data_gaps` の `filled`・`partial`）は約定と同じく帯を塗る（docs/viewer.md）
 - **シミュレーター**: `atm_cm_iv` を列の名前で読む（`basis` は読まない）。#158 の区間の `m1_forward`・`m2_forward` は先物の値（気配の F との差は中央値 5〜20 円）
+
+## 銘柄ごとの 1 時間足（#161）
+
+シミュレーター（別のアプリ）が 1 銘柄の値段と IV の推移を読むための、全銘柄（限月 × 行使価格 × call / put）の 1 時間足。BigQuery Data Transfer Service のスケジュールされたクエリ 1 本と、結果の表。計算の規則は docs/data.md の「1 時間足の計算（銘柄ごと）」、列は `schema/tokyo/option_price_hourly.json`（公開のインターフェース。変えるときはシミュレーターに知らせてから）。定義は `infra/prod/sq.tf`、SQL は `sql/hourly/`（試験は `tests/test_hourly.py`・`tests/test_hourly_bq.py`）。
+
+| もの | 内容 |
+|---|---|
+| DTS `optionchan option-hourly`（asia-northeast1、`sa-sq-dts`、毎時 :45 = `every 1 hours`、`schedule_options.start_time` を過去の :45 にして分をそろえる） | `sql/hourly/option_price_hourly.sql`。窓の決め方は「30 日固定の ATM IV（#100）」の `atm-cm` と同じ: **07:45 JST の回**は `[D-1 07:00, D 07:00) JST` の作り直し、**他の回**は増分 `[表の最後の足 − 2 時間, @run_time)`（始まりは `@run_time` − 3 日を正時に切り捨てた時刻より前にしない）。増分の回は新しい取り込みが無ければ何もしない。窓の中の足を置き換える（結果が 0 行の窓では何もしない）。`atm-cm` と別の DTS なので、片方の失敗がもう片方を止めない |
+| `optionchan_tokyo.option_price_hourly` | 1 行 = 1 時間 × 限月 × 行使価格 × call / put。パーティションは `last_trading_day` の月（`require_partition_filter = true`）、クラスタは `target_price`・`type`・`started_at`。新系の 1 限月 約 45 万行（1 パーティション 約 70 MiB）、全期間で約 1,500 万行・約 2 GiB の見込み |
+| `sql/hourly/hourly_backfill.sql`（東京、手で流す） | 範囲 `[@start_at, @end_at)`（どちらも JST の 07:00）の作り直し（下の「過去分」） |
+
+- 料金（dry run の上界）: 元の行（`option_price_latest` の 13 列）が増分の回 約 121 MiB（UTC の日パーティション 1 つ）、07:45 JST の回 約 245 MiB（2 つ）。これに表の DELETE（生きている限月のパーティションの全列。2 限月で最大 約 150 MiB）と MAX（数 MiB）が足される。目安は**毎時の回 300 MiB 以下、07:45 の回 450 MiB 以下**、取り込みのある回は平日 約 22 回で 1 日 約 6 GiB 以下。何もしない回は `ingest_runs` だけの 10 MiB
+- 重ね 2 時間より遅れて終わった取り込みは、翌朝 07:45 の回まで古い値のまま。3 日を超えて止まったとき・前日より前の最新版が変わったとき（再処理・回収）は「過去分」の SQL でその範囲を作り直す
+- 表を読むときは必ず `last_trading_day` で絞る（絞らないクエリはエラー）。ある時刻の全銘柄を読むときも、限月の範囲（例: `last_trading_day >= DATE(<時刻>, 'Asia/Tokyo') AND last_trading_day < その 1 年後`）を付ける
+
+### 変数
+
+「日次の品質チェックと新旧の突き合わせ（#40）」の「変数」（`P`・`L`・`tc`）、「1 時間足（#49）」の「変数」（`q`・`qr`）に加えて:
+
+```sh
+T=$P.optionchan_tokyo.option_price_hourly
+rh() { sed -e "s/[$]{project}/$P/g" -e "s/[$]{dataset}/optionchan_tokyo/g" "sql/hourly/$1.sql"; }
+# JST の日付 $1 の 07:00 を UTC の TIMESTAMP の文字列にする（過去分の範囲の端）
+j7() { date -u -d "$1 07:00 +0900" '+%F %T+00'; }
+# 過去分: 範囲 [$1 07:00 JST, $2 07:00 JST) を流して要約 1 行を出す（$1・$2 は JST の日付）
+hb() { rh hourly_backfill | qr "$(j7 $1)" "$(j7 $2)" --location=$L --format=json --maximum_bytes_billed=5368709120 \
+  | jq -c --arg s "$1" --arg e "$2" '{s: $s, e: $e} + .[-1][0]'; }
+# 月 $1（YYYY-MM）〜 $2 の各月を、月の 1 日 07:00 JST 〜 翌月 1 日 07:00 JST で順に流す
+hmonths() { local m=$1 n; while [[ ! "$m" > "$2" ]]; do n=$(date -d "$m-01 + 1 month" +%Y-%m); hb "$m-01" "$n-01" || return 1; m=$n; done; }
+```
+
+### 確認（prod の apply の後）
+
+prod の plan の目安: create 3（テーブル 1、テーブル IAM 1、DTS 1）と、ingest のイメージのタグの変更（`schema/tokyo/` を足したので。コードは同じ）。件数・要約だけを #161 に記録する（行・ログの全文は貼らない）。
+
+```sh
+# 列（名前・型・モード）が schema と同じ（AC 15）
+diff <(bq show --schema --format=json "$P:optionchan_tokyo.option_price_hourly" | jq -c '[.[] | [.name, .type, .mode]]') \
+     <(jq -c '[.[] | [.name, .type, .mode]]' schema/tokyo/option_price_hourly.json) && echo same
+# パーティション（MONTH・last_trading_day）・require_partition_filter・クラスタ（target_price, type, started_at）
+bq show --format=json "$P:optionchan_tokyo.option_price_hourly" | jq -c '{timePartitioning, requirePartitionFilter, clustering}'
+bq get-iam-policy --format=json "$P:optionchan_tokyo.option_price_hourly" | jq -c '[.bindings[]? | {role, m: [.members[] | split("@")[0]]}]'
+# 定期クエリ: every 1 hours、nextRunTime の分が :45
+bq show --transfer_config --format=json "$(tc option-hourly $L)" | jq '{schedule, scheduleOptions, nextRunTime}'
+```
+
+DTS は作成直後に 1 回自動で実行される（表が空なので、増分の回なら 3 日分を作る）。最初の 07:45 の回と、その後の毎時の回が `SUCCEEDED` で、ERROR のログが 0 件であること、回ごとの課金バイトが目安（毎時 300 MiB・07:45 450 MiB）の中であること（AC 16）:
+
+```sh
+CID=$(tc option-hourly $L | awk -F/ '{print $NF}')
+bq ls --transfer_run --run_attempt=LATEST --max_results=30 --format=json "$(tc option-hourly $L)" | jq -r '.[].state' | sort | uniq -c
+gcloud logging read "resource.type=\"bigquery_dts_config\" AND resource.labels.config_id=\"$CID\" AND severity>=ERROR" \
+  --project=$P --freshness=2d --format='value(timestamp)' | wc -l
+# 回ごと（親ジョブ）の課金バイト。JST の時が 7 の回が作り直し
+q --location=$L --format=pretty "
+SELECT FORMAT_TIMESTAMP('%F %H:%M', creation_time, 'Asia/Tokyo') AS jst, ROUND(total_bytes_billed / POW(1024, 2)) AS mib
+FROM \`region-asia-northeast1\`.INFORMATION_SCHEMA.JOBS
+WHERE creation_time >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 2 DAY) AND statement_type = 'SCRIPT'
+  AND EXISTS (SELECT 1 FROM UNNEST(labels) l WHERE l.key = 'dts_config_id' AND l.value = '$CID')
+ORDER BY jst"
+```
+
+表ができた後に、表を読み書きする文（MAX・DELETE・INSERT）の dry run も流す（`OPTIONCHAN_BQ_TEST=1 ... pytest -q tests/test_hourly_bq.py -k dry_run_table_statements`。表が無い間は飛ばす）。
+
+### 失敗を受けたとき・手動の再実行
+
+「1 時間足（#49）」の「失敗を受けたとき（M2 の `bigquery_dts_config`）」のログの見方・メッセージの表と同じ（`config_id` は `option-hourly`、メッセージの先頭は `option_price_hourly:`）。
+
+| メッセージ | 意味 | 対応 |
+|---|---|---|
+| `option_price_hourly: win_end ... is in the future` | 手動実行の `run_time` が未来 | `run_time` を直して再実行 |
+| `option_price_hourly: last_trading_day out of range` | 結果に、最終取引日が足の JST の日付より前か 1 年以上先の行がある（置き換えの範囲から漏れて重複するので書かない） | その窓の最新版の `last_trading_day` を調べる（取り込みの不具合）。直すまで同じ窓の回は失敗し続けるので、すぐ直せないときは「停止・削除」の一時停止 |
+| `Cannot query over table ... without a filter ...` | 表の読み書きの限月の絞り込みが効いていない | SQL の `ltd_lo`・`ltd_hi` の条件を直す PR（データは書かれていない） |
+| `Transaction ...` / `Could not serialize access ...` | 同じ表への別の DML（過去分・手動の再実行）と重なった | 重なった作業が終わってから再実行。トランザクションなので書かれていない |
+
+- 増分の回の失敗: 何もしなくてよい（次の回が表の最後の足 − 2 時間から作る）
+- 07:45 の回の失敗（前日分の作り直し）: 原因を直した後、「30 日固定の ATM IV（#100）」の「失敗を受けたとき・手動の再実行」と同じく、`run_time` を `<D-1>T22:45:00Z` にして手動実行する（`tc option-hourly $L` の設定に `bq mk --transfer_run`）。:40〜:50 は毎時の回と重なるので避ける
+- 3 日を超えて止まった・前日より前の最新版が変わった: 「過去分」でその範囲を作り直す
+
+### 過去分
+
+表ができる前の期間（`option_price` の最初の月 2018-10 から）は `sql/hourly/hourly_backfill.sql` で作る（同じ計算で範囲の中を置き換える。冪等）。範囲の端はどちらも JST の 07:00（SQL が検査する。日中・夜間の途中で切ると約定の足が境目で欠ける）。
+
+- 量: 元の行の dry run で全期間 約 47 GiB（1 か月 約 0.4 GiB（2018〜2023）〜 約 2.3 GiB（2026））+ DELETE（初回はほぼ空）。プロジェクトのクエリ量の上限（「コスト」の「BigQuery のクエリ量上限」）に合わせて **3 日に分ける**: 1 日目 2018-10〜2022-12（約 18 GiB）、2 日目 2023-01〜2025-12（約 19 GiB）、3 日目 2026-01〜流す日（約 10 GiB）。各日の前に「今日のスキャン量」を見て、上限の残りが 25 GiB より少なければ次の日にする
+- 2026 年の分は、生きている限月のパーティションに定期クエリと同じ表の DML を出すので、:40〜:50 を避ける
+- 最後の範囲の終わりは流す日の 07:00 JST（それより後は定期クエリの作り直し・増分が作る）。範囲が定期クエリの作った窓と重なっても、同じ計算で置き換えるだけ
+
+```sh
+# 1 日目（1 行 1 か月の要約: bars = 足の数、with_mid = mid_close のある足、with_trade = trade_close のある足）
+hmonths 2018-10 2022-12
+# 2 日目
+hmonths 2023-01 2025-12
+# 3 日目: 流す日の前の月まで + その月の 1 日 〜 流す日の 07:00 JST
+hmonths 2026-01 <流す日の前の月 YYYY-MM>
+hb <流す日の月>-01 <流す日 YYYY-MM-DD>
+```
+
+- 失敗した月は、原因を見てからその月だけ `hb <YYYY-MM-01> <翌月の YYYY-MM-01>` でやり直す（冪等）
+- 確認（AC 17）: キーの重複が 0 行、年ごとの行数と最初・最後の足。結果の要約（年ごとの行数・最初と最後の `started_at`）を #161 とこの節の末尾に書く
+
+```sh
+q --location=$L --format=pretty "
+SELECT started_at, last_trading_day, target_price, type, COUNT(*) AS n FROM \`$T\`
+WHERE last_trading_day >= '2018-01-01' GROUP BY 1, 2, 3, 4 HAVING COUNT(*) > 1 LIMIT 10"   # 0 行
+q --location=$L --format=pretty "
+SELECT EXTRACT(YEAR FROM started_at AT TIME ZONE 'Asia/Tokyo') AS y, COUNT(*) AS bars, COUNTIF(mid_close IS NOT NULL) AS with_mid,
+  COUNTIF(trade_close IS NOT NULL) AS with_trade, MIN(started_at) AS first, MAX(started_at) AS last
+FROM \`$T\` WHERE last_trading_day >= '2018-01-01' GROUP BY y ORDER BY y"
+```
+
+### 突き合わせ
+
+1 日の突き合わせ（AC 18）: 取引日 D（2024-11-06 以降の日。窓の取引の日は D-1 で、それが 2024-11-05 以降なら下の式の窓になるため）の窓 `[D-1 07:00, D 07:00) JST` で、表の `snapshots` の合計・`mid_close` のある足の数が、同じ窓の最新版から直接数えた値と同じ:
+
+```sh
+D=<YYYY-MM-DD>
+q --location=$L --format=pretty "
+DECLARE s TIMESTAMP DEFAULT TIMESTAMP('$D 07:00:00', 'Asia/Tokyo') - INTERVAL 1 DAY;
+DECLARE e TIMESTAMP DEFAULT TIMESTAMP('$D 07:00:00', 'Asia/Tokyo');
+WITH src AS (
+  SELECT TIMESTAMP_TRUNC(created_at, HOUR) AS h, last_trading_day, target_price, type, COUNT(DISTINCT created_at) AS n,
+    LOGICAL_OR(bid > 0 AND ask > 0 AND bid <= ask AND (
+      TIME(DATETIME(created_at, 'Asia/Tokyo')) BETWEEN TIME '08:45:00' AND TIME '15:39:59'
+      OR TIME(DATETIME(created_at, 'Asia/Tokyo')) >= TIME '17:00:00' OR TIME(DATETIME(created_at, 'Asia/Tokyo')) < TIME '05:55:00')) AS has_mid
+  FROM \`$P.optionchan_tokyo.option_price_latest\`(s, e) WHERE type IS NOT NULL GROUP BY 1, 2, 3, 4)
+SELECT
+  (SELECT SUM(snapshots) FROM \`$T\` WHERE last_trading_day >= DATE(s, 'Asia/Tokyo')
+     AND last_trading_day < DATE_ADD(DATE(e, 'Asia/Tokyo'), INTERVAL 1 YEAR) AND started_at >= s AND started_at < e) AS table_snapshots,
+  (SELECT SUM(n) FROM src) AS src_snapshots,
+  (SELECT COUNTIF(mid_close IS NOT NULL) FROM \`$T\` WHERE last_trading_day >= DATE(s, 'Asia/Tokyo')
+     AND last_trading_day < DATE_ADD(DATE(e, 'Asia/Tokyo'), INTERVAL 1 YEAR) AND started_at >= s AND started_at < e) AS table_mid_bars,
+  (SELECT COUNTIF(has_mid) FROM src) AS src_mid_bars"   # 2 組とも同じ値
+```
+
+#114 の行の時間（AC 19）: `data_gaps` の `bug_comma` で作った区間（`status = 'filled'`、3 時間以上）を 1 つ選び、区間の中の足に `trade_close` のある足があり、`mid_close` は全部 NULL:
+
+```sh
+q --location=$L --format=pretty "
+DECLARE a TIMESTAMP; DECLARE b TIMESTAMP;
+SET (a, b) = (SELECT AS STRUCT prev_at, next_at FROM \`$P.optionchan_tokyo.data_gaps\`
+  WHERE cause = 'bug_comma' AND status = 'filled' AND TIMESTAMP_DIFF(next_at, prev_at, HOUR) >= 3 ORDER BY prev_at LIMIT 1);
+SELECT COUNT(*) AS bars, COUNTIF(trade_close IS NOT NULL) AS with_trade, COUNTIF(mid_close IS NOT NULL) AS with_mid FROM \`$T\`
+WHERE last_trading_day >= DATE(a, 'Asia/Tokyo') AND last_trading_day < DATE_ADD(DATE(a, 'Asia/Tokyo'), INTERVAL 1 YEAR)
+  AND started_at >= TIMESTAMP_ADD(TIMESTAMP_TRUNC(a, HOUR), INTERVAL 1 HOUR) AND TIMESTAMP_ADD(started_at, INTERVAL 1 HOUR) <= b"
+# with_trade > 0、with_mid = 0
+```
+
+シミュレーターの読み方の量（AC 20）: 1 銘柄の一生（満期の済んだ新しい限月 `<LTD>`、ATM 付近の行使価格 `<K>` の put）を、読む列の数を変えて dry run と実際の課金（`total_bytes_billed`）で比べる。値・結果は貼らず、バイト数だけを #161 と PR に書く:
+
+```sh
+W="last_trading_day = DATE '<LTD>' AND target_price = <K> AND type = 2"
+for cols in "started_at, mid_close, trade_close, iv_close" "*"; do
+  q --location=$L --dry_run "SELECT $cols FROM \`$T\` WHERE $W" | grep -o '[0-9]* bytes'
+  J=hourly_ac20_$(date +%s%N)
+  bq --project_id=$P --location=$L --job_id=$J query --use_legacy_sql=false --nouse_cache --format=none "SELECT $cols FROM \`$T\` WHERE $W"
+  bq --project_id=$P --location=$L show --format=json -j $J | jq -c --arg c "$cols" '{c: $c, billed: .statistics.query.totalBytesBilled}'
+done
+# started_at の 3 か月の範囲を足した形も同じように（WHERE に AND started_at >= ... AND started_at < ... を足す）
+```
+
+- 見込み（計画の推定。1 限月 45〜55 万行）: 7 列で dry run 約 24〜29 MiB、全 21 列で 約 72〜88 MiB（どれも 128 MiB 以下）。実課金はクラスタで小さくなりうる（最低 10 MB）
+
+### 停止・削除
+
+- 一時停止: `infra/prod/sq.tf` の `option_hourly` に `disabled = true` を足す PR（表は古いまま残る）
+- 撤去: DTS を消す PR → 表の `deletion_protection = false` の PR → 表と付与を消す PR。他の表・DTS・取り込みには影響しない（`schema/tokyo/option_price_hourly.json` を消すと ingest のイメージのタグがまた変わる。無害）。撤去の前にシミュレーターに知らせる
 
 ## ビューアー（#13）
 

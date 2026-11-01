@@ -65,10 +65,13 @@ DTS_EXPECTED = {
     # 30 日固定の ATM IV（#100）。毎時 :45（#117。分は schedule_options の start_time でそろえる）。07:45 JST の回（1 時間足の後）が
     # 前日分の作り直しで、他の回は増分
     'prod/sq.tf:google_bigquery_data_transfer_config.atm_cm': ('scheduled_query', 'every 1 hours'),
+    # 銘柄ごとの 1 時間足（#161）。atm-cm と同じ毎時 :45（07:45 JST の回が前日分の作り直し）
+    'prod/sq.tf:google_bigquery_data_transfer_config.option_hourly': ('scheduled_query', 'every 1 hours'),
 }
 # 間隔の形（every N hours）の起点。過去の :45（UTC。JST も :45）
 DTS_START_TIME = {
     'prod/sq.tf:google_bigquery_data_transfer_config.atm_cm': re.compile(r'20\d\d-\d\d-\d\dT\d\d:45:00Z'),
+    'prod/sq.tf:google_bigquery_data_transfer_config.option_hourly': re.compile(r'20\d\d-\d\d-\d\dT\d\d:45:00Z'),
 }
 
 
@@ -313,3 +316,27 @@ def test_datacube_future_tick_table():
     # クラスタの列は表にある
     with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'dc_future_tick.json'), encoding='utf-8') as f:
         assert 'contract_month' in {c['name'] for c in json.load(f)}
+
+
+def test_option_price_hourly_table():
+    """銘柄ごとの 1 時間足（#161）: last_trading_day の MONTH パーティション（1 銘柄の一生がほぼ 1 パーティション）、
+    クラスタ target_price・type・started_at、require_partition_filter、削除の保護。付与は表単位の dataEditor 1 件"""
+    tf = dict(all_tf())['prod/sq.tf']
+    table = re.search(r'resource "google_bigquery_table" "option_price_hourly" \{(.*?)\n\}', tf, re.S).group(1)
+    assert 'table_id                 = "option_price_hourly"' in table
+    assert 'schema/tokyo/option_price_hourly.json' in table
+    assert re.search(r'time_partitioning \{\n\s+type  = "MONTH"\n\s+field = "last_trading_day"', table)
+    assert 'require_partition_filter = true' in table
+    assert 'clustering               = ["target_price", "type", "started_at"]' in table
+    assert 'deletion_protection      = true' in table
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'tables.json'), encoding='utf-8') as f:
+        assert 'option_price_hourly' not in f.read()
+    # パーティション・クラスタの列は表にある
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'option_price_hourly.json'), encoding='utf-8') as f:
+        names = {c['name'] for c in json.load(f)}
+    assert {'last_trading_day', 'target_price', 'type', 'started_at'} <= names
+    grants = [g for g in re.findall(r'^resource "(google_bigquery_\w+_iam_\w+)" "(\w+)" \{(.*?)\n\}', tf, re.S | re.M)
+              if 'option_price_hourly' in g[2]]
+    assert [(k, n) for k, n, _ in grants] == [('google_bigquery_table_iam_member', 'sq_option_hourly_editor')]
+    assert 'role       = "roles/bigquery.dataEditor"' in grants[0][2]
+    assert 'member     = "serviceAccount:${local.sa_sq}"' in grants[0][2]

@@ -118,7 +118,7 @@ prod の Terraform（`infra/prod/`）は次のファイルを `file()`・`templa
 | ファイル | 読む所 | なるもの |
 |---|---|---|
 | `schema/tokyo/tables.json` | `infra/prod/data.tf` | データセットと取り込みの 4 表の設定（場所・パーティション・クラスタなど） |
-| `schema/tokyo/*.json`（表ごと） | `infra/prod/data.tf`・`infra/prod/sq.tf`・`infra/prod/calendar.tf`・`infra/prod/gaps.tf`・`infra/prod/datacube.tf` | 表の列（列名・型・説明） |
+| `schema/tokyo/*.json`（表ごと） | `infra/prod/data.tf`・`infra/prod/sq.tf`・`infra/prod/calendar.tf`・`infra/prod/gaps.tf`・`infra/prod/datacube.tf` | 表の列（列名・型・説明）。`option_price_hourly.json`（#161）は別のアプリが照合する公開の列 |
 | `schema/ohlc/atm_ohlc.json` | `infra/prod/sq.tf` | 1 時間足の表の列 |
 | `schema/cm/atm_cm_iv.json` | `infra/prod/sq.tf` | 30 日固定の ATM IV の表の列 |
 | `sql/latest/*.sql` | `infra/prod/data.tf` | テーブル関数（最新版の選択）の本文 |
@@ -127,9 +127,10 @@ prod の Terraform（`infra/prod/`）は次のファイルを `file()`・`templa
 | `sql/legacy/stage.sql`・`sql/legacy/compare.sql` | `infra/prod/sq.tf` | 定期クエリ `legacy-stage`・`legacy-compare`（旧系） |
 | `sql/ohlc/atm_hourly.sql` | `infra/prod/sq.tf` | 定期クエリ `atm-hourly` |
 | `sql/cm/atm_cm.sql` | `infra/prod/sq.tf` | 定期クエリ `atm-cm` |
+| `sql/hourly/option_price_hourly.sql` | `infra/prod/sq.tf` | 定期クエリ `option-hourly`（銘柄ごとの 1 時間足。#161） |
 | `monitoring/m1-liveness.json`・`monitoring/m2-errors.json`・`monitoring/ingest-m1-liveness.json`・`monitoring/ingest-m2-errors.json` | `infra/prod/monitoring.tf` | アラート（定義の正は JSON。`tests/test_monitoring.py` が検査） |
 
-`schema/tokyo/` は取り込みのイメージの入力でもあるので、直すとイメージのタグも変わる。ほかの `sql/` の下（`sql/gaps/`・`sql/legacy_import/`・`sql/price_time_fix/`・`sql/tick_fill/`・`sql/tick_build/`・`sql/cm_trade/`、`sql/ohlc/` と `sql/cm/` のほかのファイル）は runbook の手順で手で流すもので、Terraform は読まない。
+`schema/tokyo/` は取り込みのイメージの入力でもあるので、直すとイメージのタグも変わる。ほかの `sql/` の下（`sql/gaps/`・`sql/legacy_import/`・`sql/price_time_fix/`・`sql/tick_fill/`・`sql/tick_build/`・`sql/cm_trade/`、`sql/ohlc/`・`sql/cm/`・`sql/hourly/` のほかのファイル）は runbook の手順で手で流すもので、Terraform は読まない。
 
 ## 公開リポジトリの決まり
 

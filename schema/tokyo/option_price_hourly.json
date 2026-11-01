@@ -1,0 +1,128 @@
+[
+  {
+    "name": "started_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "足の始まり（UTC の正時 = JST の正時）。気配・数の列（mid_*・bid_*・ask_*・volume・positions・snapshots・last_at）は created_at の足、約定の列（trade_*・iv_close）は price_time の足で、同じキーの行に入る。クラスタの列"
+  },
+  {
+    "name": "last_trading_day",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "最終取引日（限月。option_price と同じ）。パーティション（月）の列。読むときは必ずこの列で絞る（require_partition_filter）"
+  },
+  {
+    "name": "target_price",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "行使価格。クラスタの列"
+  },
+  {
+    "name": "type",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "1 = call、2 = put（option_price と同じ）。クラスタの列"
+  },
+  {
+    "name": "mid_open",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "中値（(bid + ask) / 2）の始値: 足は created_at（UTC の正時に切り捨て）。連続売買の窓（created_at の JST、[始まり, 終わり)。取引の日 sd = JST − 7 時間の日付で 3 時代: sd < 2021-09-21 は日中 9:00〜15:10・夜間 16:30〜翌 5:25、2021-09-21 ≤ sd < 2024-11-05 は日中 8:45〜15:10・夜間 16:30〜翌 5:55、sd ≥ 2024-11-05 は日中 8:45〜15:40・夜間 17:00〜翌 5:55。引けの板寄せの前の 5 分は入れない）の中の、bid > 0・ask > 0・bid ≤ ask の行のうち created_at が最も早い行。該当する行が無ければ NULL"
+  },
+  {
+    "name": "mid_high",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "中値の高値（mid_open と同じ条件の行の最大）"
+  },
+  {
+    "name": "mid_low",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "中値の安値（mid_open と同じ条件の行の最小）"
+  },
+  {
+    "name": "mid_close",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "中値の終値（mid_open と同じ条件の行のうち created_at が最も遅い行）。該当する行が無ければ NULL"
+  },
+  {
+    "name": "bid_close",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "mid_close の行の bid"
+  },
+  {
+    "name": "ask_close",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "mid_close の行の ask"
+  },
+  {
+    "name": "bid_iv_close",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "mid_close の行の bid_iv"
+  },
+  {
+    "name": "ask_iv_close",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "mid_close の行の ask_iv"
+  },
+  {
+    "name": "trade_open",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "約定の始値（price）。足は price_time（JST の約定の分）を JST の正時に切り捨てたもので、created_at の足と違う（約定の持ち越しの行は約定の時刻の足に数える）。同じ立会（JST の 07:00・16:00 で切る）の行の約定だけを数える（前の立会の約定を持ち越した行は、どの足にも入れない）。price_time が最も早い行。約定が無ければ NULL"
+  },
+  {
+    "name": "trade_high",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "約定の高値（trade_open と同じ足・条件の price の最大）"
+  },
+  {
+    "name": "trade_low",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "約定の安値（trade_open と同じ足・条件の price の最小）"
+  },
+  {
+    "name": "trade_close",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "約定の終値: price_time が最も遅い分の、その分が終わった後の最初のスナップショットの行の price（無ければその分の最後のスナップショット）。約定が無ければ NULL"
+  },
+  {
+    "name": "iv_close",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "trade_close の行の iv"
+  },
+  {
+    "name": "volume",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "出来高（その取引日の累計）。足は created_at（UTC の正時に切り捨て）。足の中で created_at が最後の行の値（NULL もありうる）。約定だけの足は NULL"
+  },
+  {
+    "name": "positions",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "建玉。足は created_at（UTC の正時に切り捨て）。足の中の最後の NULL でない値"
+  },
+  {
+    "name": "snapshots",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "足に入ったスナップショット（created_at）の数。足は created_at（UTC の正時に切り捨て）。約定だけの足は 0"
+  },
+  {
+    "name": "last_at",
+    "type": "TIMESTAMP",
+    "mode": "NULLABLE",
+    "description": "足に入った行の created_at の最大。足は created_at（UTC の正時に切り捨て）。約定だけの足は NULL"
+  }
+]

@@ -8,7 +8,7 @@
 - JPX のページ自体が約 15 分遅れなので、蓄積したデータも実時刻から約 15 分遅れる
 - 生 HTML（2 ページを gzip した JSON）を GCS に、解析した行を東京（`asia-northeast1`）の BigQuery のデータセット `optionchan_tokyo`（Storage Write API）に書く
 - 同じ分を回収・再処理で書き直すことがあるので、データは最新版を選ぶテーブル関数（`option_price_latest` など）で読む。表・列・時刻の読み方は [docs/data.md](docs/data.md)
-- 最新版から定期クエリで 1 時間足（ATM の IV・プレミアム・行使価格）と 30 日固定の ATM IV を作り、日次で品質を検査する
+- 最新版から定期クエリで 1 時間足（ATM の IV・プレミアム・行使価格）・銘柄ごとの 1 時間足（全銘柄。#161）と 30 日固定の ATM IV を作り、日次で品質を検査する
 - 構築はすべて Terraform（`infra/`）。master へのマージで GitHub Actions が plan し、Environment `prod` の承認の後に apply する
 
 ## 全体の図
@@ -27,10 +27,10 @@ flowchart LR
     RAW[("spot_price・future_price・option_price・ingest_runs")]
     TVF["テーブル関数（最新版）"]
     TC[("trading_calendar・trading_calendar_latest")]
-    OHLC[("1 時間足 atm_iv など・atm_cm_iv")]
+    OHLC[("1 時間足 atm_iv など・option_price_hourly・atm_cm_iv")]
     QC[("quality_daily")]
   end
-  DTS["定期クエリ（DTS）atm-hourly・atm-cm・quality-daily"]
+  DTS["定期クエリ（DTS）atm-hourly・option-hourly・atm-cm・quality-daily"]
   VW["Cloud Run サービス viewer（IAP の後ろ）"]
   MON["Cloud Monitoring（アラート）"]
 
@@ -68,7 +68,7 @@ flowchart LR
 |---|---|
 | `apps/ingest` | 取り込み（Cloud Run の `ingest`・ジョブ `reprocess`・`calendar-sync`）。ジョブ `reprocess` は保存済みの生 HTML から期間を指定して作り直す（JPX にアクセスしない）。Python 3.13・uv |
 | `apps/viewer` | ビューアー（Cloud Run の `viewer`、IAP の後ろ）。Python 3.13・uv・Flask、ブラウザ用の JS。使い方は [docs/viewer.md](docs/viewer.md) |
-| `schema` | BigQuery の表の列の定義（`schema/tokyo/` は取り込みの表と日次チェックの結果、`schema/ohlc/`・`schema/cm/` は 1 時間足と 30 日固定）。旧系の表の定義も直下にある |
+| `schema` | BigQuery の表の列の定義（`schema/tokyo/` は取り込みの表と日次チェックの結果・銘柄ごとの 1 時間足、`schema/ohlc/`・`schema/cm/` は 1 時間足と 30 日固定）。旧系の表の定義も直下にある |
 | `sql` | BigQuery の SQL。テーブル関数・定期クエリの本文（Terraform が読む）と、移行・過去分の作り直しで手で流す SQL |
 | `infra` | Terraform。`infra/bootstrap`（権限の根元。所有者が手で apply）と `infra/prod`（CI が承認後に apply） |
 | `monitoring` | Cloud Monitoring のアラートポリシーの定義（JSON）とバックテスト |
@@ -85,7 +85,7 @@ flowchart LR
 - **(a) clone して自分の GCP で動かしたい人**
   - [docs/setup.md](docs/setup.md): 新しいプロジェクトで作る順番（tfstate と bootstrap → GitHub の設定 → prod（承認の前にビューアーの IAP の準備） → 取引カレンダー → 監視・予算）。各段は runbook の節へ案内する
 - **(b) データを読む人（別のアプリの作り手）**
-  - [docs/data.md](docs/data.md): データセット・テーブル関数・表の一覧・列・時刻・IV の種類・30 日固定の ATM IV の計算・クエリの例・権限
+  - [docs/data.md](docs/data.md): データセット・テーブル関数・表の一覧・列・時刻・IV の種類・30 日固定の ATM IV の計算・銘柄ごとの 1 時間足の計算・クエリの例・権限
   - [docs/data-gaps.md](docs/data-gaps.md): 過去データの欠けと作り直しの記録
   - [docs/viewer.md](docs/viewer.md): ビューアーの画面とデータの API
 - **(c) 開発する人**
