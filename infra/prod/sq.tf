@@ -332,7 +332,8 @@ resource "google_bigquery_table_iam_member" "sq_option_hourly_editor" {
 }
 
 # 毎時 :45。atm-cm と同じ時刻・窓の決め方だが、別の DTS にする（片方の ERROR がもう片方の更新を止めない。止める・消すのが 1 リソース）。
-# 07:45 JST の回が前日分の作り直しで、他の回は増分（窓は sql/hourly/option_price_hourly.sql）。start_time は過去の :45（分をそろえる）
+# 07:45 JST の回が前日分の作り直しで、他の回は増分（窓は sql/hourly/option_price_hourly.sql）。start_time は :45（分をそろえる）。
+# 作成の API は過去の start_time を拒む（400 "Schedule start time cannot be in the past"）ので、作った時点の近い未来の :45 にしてある（以後の更新は過去でよい）
 resource "google_bigquery_data_transfer_config" "option_hourly" {
   project              = var.project_id
   display_name         = "optionchan option-hourly"
@@ -341,7 +342,7 @@ resource "google_bigquery_data_transfer_config" "option_hourly" {
   schedule             = "every 1 hours"
   service_account_name = local.sa_sq
   schedule_options {
-    start_time = "2026-10-01T22:45:00Z"
+    start_time = "2026-11-01T03:45:00Z"
   }
   params = {
     query = templatefile("${path.module}/../../sql/hourly/option_price_hourly.sql", {
