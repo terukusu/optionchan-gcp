@@ -1,0 +1,110 @@
+[
+  {
+    "name": "business_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "営業日（ファイル名の YYYYMMDD。BPF の DATE レコードと同じ）。パーティション（日）の列"
+  },
+  {
+    "name": "file_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "ファイルの版（ファイル名の末尾。今は 1600 = 清算値段の確定後の版だけ）"
+  },
+  {
+    "name": "jscc_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "この行を書いた取り込みの ID（jscc_ingest_runs.jscc_run_id）"
+  },
+  {
+    "name": "instrument_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "銘柄コード（Instrument Code）。1 日 1 版で一意"
+  },
+  {
+    "name": "product_group_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Product Group Code（今は NK225 だけ）"
+  },
+  {
+    "name": "product_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Product Code（NK225E・NK225W1〜W4・NK225C1〜C4・NK225F・NK225MF・NK225MCF など）。クラスタの列"
+  },
+  {
+    "name": "contract_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Contract Type（FUT = 先物 / OOP = オプション）"
+  },
+  {
+    "name": "put_call_type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Put/Call Type（C / P）。先物は NULL。クラスタの列"
+  },
+  {
+    "name": "contract_period_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "限月（Contract Period Code。YYYYMM、週次は YYYYMMW の 7 桁）。クラスタの列"
+  },
+  {
+    "name": "underlying_period_code",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "原資産の限月（Underlying Period Code）。空欄は NULL"
+  },
+  {
+    "name": "strike_price",
+    "type": "NUMERIC",
+    "mode": "NULLABLE",
+    "description": "行使価格（Strike Price）。先物は NULL。クラスタの列"
+  },
+  {
+    "name": "contract_size",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "取引単位（Contract Size。1 枚あたりの倍率）"
+  },
+  {
+    "name": "aggregation_group",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Aggregation Group（VaRParameter の信頼水準・ストレスの本数を引く列）"
+  },
+  {
+    "name": "calculation_method_flag",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "計算方式（Calculation Method Flag。取り込むのは H = ヒストリカルだけ）"
+  },
+  {
+    "name": "price",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "清算値段（PRICE レコードの Price。1 単位あたり）"
+  },
+  {
+    "name": "pnl",
+    "type": "INTEGER",
+    "mode": "REPEATED",
+    "description": "シナリオごとの値（HSPL の Unit PnL。1 単位あたりの円）。並びは jscc_var_scenario_set.scenarios と同じ（添字 0 始まりが対応）。先物はシナリオの損益、オプションはシナリオ後の評価額"
+  },
+  {
+    "name": "margin_short_jscc",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "JSCC の All-Instruments-VaR の 1 枚の売りの証拠金（照合の基準）。All-Instruments-VaR に無い銘柄は NULL"
+  },
+  {
+    "name": "margin_long_jscc",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "JSCC の All-Instruments-VaR の 1 枚の買いの証拠金（照合の基準）。All-Instruments-VaR に無い銘柄は NULL"
+  }
+]

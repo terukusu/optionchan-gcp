@@ -16,7 +16,7 @@
 | 表の既定の有効期限 | なし | 同上 |
 
 - クエリはロケーション `asia-northeast1` で流す（`bq query --location=asia-northeast1`）
-- データを持つ表（取り込みの 4 表・`trading_calendar`・DataCube の 2 表）とデータセットは、Terraform の `prevent_destroy` と削除の保護で二重に止めてある（`infra/prod/data.tf`・`calendar.tf`・`datacube.tf`）
+- データを持つ表（取り込みの 4 表・`trading_calendar`・DataCube の 2 表・JSCC の 4 表）とデータセットは、Terraform の `prevent_destroy` と削除の保護で二重に止めてある（`infra/prod/data.tf`・`calendar.tf`・`datacube.tf`・`jscc.tf`）
 
 ## まず読むもの（テーブル関数）
 
@@ -61,8 +61,13 @@
 | `quality_daily` | 日次の品質チェックの結果（運用用） | 窓の日付 1 日 | なし | なし | 定期クエリ `quality-daily`（毎日 07:15 JST、`sql/quality/quality_daily.sql`） |
 | `legacy_compare_daily` | 新旧の突き合わせの結果（運用用。旧系の並行稼働の間だけ） | 窓の日付 1 日 | なし | なし | 定期クエリ `legacy-compare`（毎日 07:30 JST、`sql/legacy/compare.sql`） |
 | `dc_option_tick` | J-Quants DataCube の日経225オプションの歩み値（運用用。所有者が購入した非公開のデータ） | 約定 1 件 | 月（`trade_date`）。`require_partition_filter = true` | `contract_month`・`put_call_type`・`exercise_price` | 所有者が月ごとに `bq load --replace`（runbook の「DataCube の歩み値での穴埋め（#111）」） |
+| `jscc_var_scenario` | JSCC の VaR 証拠金計算用パラメータファイル（BPF_IDX 1600 版）の日経225（NK225）の銘柄ごとのシナリオの値（#164。非公開。シミュレーターが読む） | 営業日 × 版 × 銘柄 | 日（`business_date`。DATE）。**`require_partition_filter = true`** | `product_code`・`contract_period_code`・`put_call_type`・`strike_price` | ジョブ `jscc-sync`（Scheduler で平日 18:30 JST、手動も可）。営業日のパーティションごと置き換え |
+| `jscc_var_scenario_set` | 同じ日のシナリオの並び（`jscc_var_scenario.pnl` の添字の意味） | 営業日 × 版 | 日（`business_date`） | なし | 同上 |
+| `jscc_var_parameter` | 同じ日の VaRParameter の全行（Aggregation Group ごとの信頼水準・ストレスの本数・相殺の係数） | 営業日 × 版 × ファイルの 1 行 | 日（`business_date`） | なし | 同上 |
+| `jscc_ingest_runs` | JSCC の取り込みの記録（成功・失敗・行数・All-Instruments-VaR との照合の件数。追記のみ） | 取り込み 1 回 × 営業日 | 日（`business_date`） | なし | 同上 |
 | `dc_future_tick` | J-Quants DataCube の日経225先物（ラージ）の歩み値（同上） | 約定 1 件 | 月（`trade_date`）。`require_partition_filter = true` | `contract_month` | 所有者が月ごとに `bq load --replace`（runbook の「DataCube の歩み値での行の作成（#114）」） |
 
+- JSCC の 4 表のパーティションは DATE の列（`business_date`。JSCC の営業日）なので UTC の日ではない。JSCC のファイルの中身なので公開しない（JSCC のサイト利用案内は無断転用・複製・再配布を禁じている）。読み方は下の「JSCC の VaR パラメータの読み方（#164）」
 - 定期クエリの時刻・窓は `infra/prod/sq.tf` の冒頭のコメントと各 SQL の冒頭が正。スケジュールは UTC で書いてある（JST − 9 時間）
 - `quality_daily`・`legacy_compare_daily`・`dc_option_tick`・`dc_future_tick` はデータを読む人向けではない（品質・移行・穴埋めの記録）。DataCube の 2 表は自己使用のライセンスのデータで、値を第三者へ渡さない・公開しない。自分の環境で作った場合は空（`docs/setup.md` の手順では入れない）
 - 取り込みの 4 表には、新系の取り込みの行のほかに、旧系から移した過去の行（`ingest_run_id` が `legacy-` で始まり、`ingest_runs.trigger = legacy_import`。#12）と、DataCube の歩み値から作った行（`ingest_run_id` が `legacy-fill114-` で始まる。#114）がある。どちらも最新版のテーブル関数で同じように読める
@@ -250,6 +255,35 @@
 - #114 で DataCube の歩み値から作った行（気配が NULL）の時間は、中値・終値の気配の列が NULL で約定の列だけが入る
 - 窓は毎時 :45 の回が直近の増分、07:45 JST の回が前日 07:00〜当日 07:00 JST を置き換える（runbook の「銘柄ごとの 1 時間足（#161）」）
 
+### JSCC の VaR パラメータ（jscc_var_scenario・jscc_var_scenario_set・jscc_var_parameter・jscc_ingest_runs）
+
+列の正は `schema/tokyo/jscc_*.json`（#164）。どの表も先頭の 3 列は `business_date`（DATE REQUIRED。JSCC の営業日 = ファイル名の YYYYMMDD。パーティションの列）・`file_version`（STRING REQUIRED。今は `1600` だけ）・`jscc_run_id`（STRING REQUIRED。書いた取り込みの ID = `jscc_ingest_runs.jscc_run_id`）。
+
+`jscc_var_scenario`（1 行 = 営業日 × 版 × 銘柄。銘柄は BPF_IDX の Product Group Code = `NK225` の全銘柄）:
+
+| 列 | 型 | モード | 説明 |
+|---|---|---|---|
+| `instrument_code` | STRING | REQUIRED | 銘柄コード（Instrument Code）。1 日 1 版で一意 |
+| `product_group_code` | STRING | REQUIRED | `NK225` |
+| `product_code` | STRING | REQUIRED | `NK225E`（OP）・`NK225W1`〜`W4`・`NK225C1`〜`C4`（週次の OP）・`NK225F`・`NK225MF`・`NK225MCF`（先物）など。クラスタの列 |
+| `contract_type` | STRING | REQUIRED | `FUT`（先物）/ `OOP`（オプション） |
+| `put_call_type` | STRING | NULLABLE | `C` / `P`。先物は NULL。クラスタの列 |
+| `contract_period_code` | STRING | REQUIRED | 限月（`YYYYMM`、週次は `YYYYMMW` の 7 桁）。クラスタの列 |
+| `underlying_period_code` | STRING | NULLABLE | 原資産の限月 |
+| `strike_price` | NUMERIC | NULLABLE | 行使価格。先物は NULL。クラスタの列 |
+| `contract_size` | INTEGER | REQUIRED | 取引単位（1 枚あたりの倍率） |
+| `aggregation_group` | STRING | REQUIRED | `jscc_var_parameter` の信頼水準・ストレスの本数を引く列 |
+| `calculation_method_flag` | STRING | REQUIRED | `H`（ヒストリカル。NK225 はすべて H） |
+| `price` | FLOAT | NULLABLE | 清算値段（1 単位あたり） |
+| `pnl` | INTEGER | REPEATED | シナリオごとの値（1 単位あたりの円）。並びは同じ日の `jscc_var_scenario_set.scenarios` と同じ。**先物はシナリオの損益、オプションはシナリオ後の評価額** |
+| `margin_short_jscc` / `margin_long_jscc` | INTEGER | NULLABLE | JSCC の All-Instruments-VaR の 1 枚の売り / 買いの証拠金（照合の基準）。All-Instruments-VaR に無い銘柄は NULL |
+
+`jscc_var_scenario_set`（1 行 = 営業日 × 版）: `file_type`（STRING REQUIRED。`S`）、`scenarios`（RECORD REPEATED。`scenario_id` STRING REQUIRED・`scenario_type` STRING REQUIRED（`H` = ヒストリカル / `S` = ストレス））、`scenarios_h` / `scenarios_s`（INTEGER REQUIRED。本数）。`scenarios` の 0 始まりの添字（`UNNEST(scenarios) WITH OFFSET`）が `pnl` の添字。Scenario ID は H と S で同じものがあるので、`scenario_type` と組で使う。
+
+`jscc_var_parameter`（1 行 = VaRParameter の 1 行。他の商品の行も全部）: `line_no`（INTEGER REQUIRED。ファイルの中の順）、`record_id`（INTEGER REQUIRED。0 = VAR / 1 = HSRATIO / 2 = ASRATIO）、`record_name`・`level`・`aggregation_group`（STRING REQUIRED）、`parent_aggregation_group`・`type`（STRING NULLABLE。レコード 1・2）、`confidence_level`（FLOAT NULLABLE。% 表記の信頼水準、レコード 0）、`stress_scenario_number`（INTEGER NULLABLE。ストレスのうち損失の大きい方から使う本数、レコード 0）、`params`（RECORD REPEATED。`name` STRING REQUIRED・`value` FLOAT REQUIRED。レコード 1・2 の係数）。
+
+`jscc_ingest_runs`（1 行 = 取り込みの実行 × 営業日。追記のみ）: `jscc_run_id`（STRING REQUIRED）、`business_date`、`file_version`、`trigger`（STRING REQUIRED。`auto` = 引数なしの実行が選んだ日 / `manual` = `--date` の指定）、`execution`（STRING NULLABLE。Cloud Run ジョブの実行名）、`status`（STRING REQUIRED。`succeeded` / `failed`）、`stage`・`detail`（STRING NULLABLE。失敗の段階と理由）、`started_at`・`finished_at`（TIMESTAMP REQUIRED）、`rows_scenario`・`rows_parameter`・`scenarios`・`scenarios_h`・`scenarios_s`・`margin_matched`・`margin_mismatched`・`margin_ref_only`・`margin_bpf_only`・`bpf_bytes`（INTEGER NULLABLE。行数・シナリオの本数・照合の件数（売り・買いを別々に数える）・All-Instruments-VaR にだけある銘柄の数・BPF にだけある銘柄の数・zip の大きさ）。
+
 ## 時刻
 
 | 列 | 型 | 中身 |
@@ -363,6 +397,81 @@ ATM IV（その時点で `is_atm` の put の IV）は、原資産が動いて A
 - 2 つの足は 7 割ほどの行で違う（約定の持ち越し）。たとえば 11:00 のスナップショットが 10:59 の約定を出していれば、気配・数は 11 時台、約定は 10 時台の足に入る
 - 1 時間の中で ATM や限月の並びは関係しない（銘柄ごとに作る）
 
+## JSCC の VaR パラメータの読み方（#164）
+
+JSCC が公開する VaR 証拠金計算用パラメータファイル（1600 版 = 清算値段の確定後）のうち日経225 の分を、毎平日 18:30 JST に取り込む（runbook の「JSCC の VaR パラメータ（#164）」）。2026-11-16 の営業日から。
+
+- **`jscc_ingest_runs` が `status = 'succeeded'` の日だけを使う**。1 日の 3 表は別々のロード（パーティションの置き換え）なので、失敗した日は表の間で中身がずれていることがある。失敗した日は次の実行が取り直す
+- 1 日 1 版で銘柄は一意（置き換えなので、同じ日を取り直しても重複しない）
+- 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは清算値段 × `contract_size` を下回らない。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
+- ポートフォリオの証拠金は、銘柄ごとの v（向き × 枚数 × `contract_size` × `pnl`）をシナリオごとに足してから同じ計算をする（相殺の制限・Aggregation Group をまたぐ計算は `jscc_var_parameter` のレコード 1・2 の係数を使う。ここでは扱わない）
+- 1 銘柄の行は `pnl` が 1,422 個（2026-11 時点）で約 11KB。銘柄の属性（限月・行使価格・C/P）で絞ればクラスタで読む量が小さくなる。1 日分の全銘柄は約 140MB（論理）
+- 翌日に新しくできる銘柄は 1600 版の BPF に無い（All-Instruments-VaR には載るので、`jscc_ingest_runs.margin_ref_only` に数だけ出る）
+- 1100 版（日中）を将来足すときは、パーティション（営業日）の置き換えが版をまたぐので、表を分けるか書き方を変える
+
+1 銘柄の 1 枚の売り・買いの証拠金と JSCC の値（`bq query --parameter=d:DATE:2026-11-20 ...`）:
+
+```sql
+WITH done AS (
+  SELECT COUNT(*) > 0 AS succeeded FROM `<PROJECT_ID>.optionchan_tokyo.jscc_ingest_runs`
+  WHERE business_date = @d AND status = 'succeeded'
+),
+inst AS (
+  SELECT instrument_code, contract_type, price, contract_size, aggregation_group, pnl, margin_short_jscc, margin_long_jscc
+  FROM `<PROJECT_ID>.optionchan_tokyo.jscc_var_scenario`
+  WHERE business_date = @d AND product_code = 'NK225E' AND contract_period_code = '202612' AND put_call_type = 'P'
+    AND strike_price = 50000 AND (SELECT succeeded FROM done)
+),
+param AS (  -- q = (100 − 信頼水準) × 10^4（97.5 → 25000）、n_stress = ストレスの本数
+  SELECT aggregation_group, CAST(ROUND((100 - confidence_level) * 10000) AS INT64) AS q,
+    stress_scenario_number AS n_stress
+  FROM `<PROJECT_ID>.optionchan_tokyo.jscc_var_parameter`
+  WHERE business_date = @d AND record_id = 0
+),
+scen AS (
+  SELECT off, s.scenario_type
+  FROM `<PROJECT_ID>.optionchan_tokyo.jscc_var_scenario_set`, UNNEST(scenarios) AS s WITH OFFSET AS off
+  WHERE business_date = @d
+),
+vals AS (  -- side = -1（売り）/ 1（買い）。v = side × 値
+  SELECT i.instrument_code, i.aggregation_group, side, sc.scenario_type, side * p AS v
+  FROM inst AS i
+  CROSS JOIN UNNEST(i.pnl) AS p WITH OFFSET AS off
+  JOIN scen AS sc USING (off)
+  CROSS JOIN UNNEST([-1, 1]) AS side
+),
+x AS (  -- H の全部と、S の小さい方から n_stress 本
+  SELECT instrument_code, side, v, q
+  FROM vals JOIN param USING (aggregation_group)
+  WHERE TRUE
+  QUALIFY scenario_type = 'H'
+    OR ROW_NUMBER() OVER (PARTITION BY instrument_code, side, scenario_type ORDER BY v) <= n_stress
+),
+r AS (
+  SELECT *, DIV(n * q, 1000000) AS k
+  FROM (
+    SELECT *, ROW_NUMBER() OVER w AS rn, COUNT(*) OVER (PARTITION BY instrument_code, side) AS n
+    FROM x WINDOW w AS (PARTITION BY instrument_code, side ORDER BY v)
+  )
+),
+es AS (  -- t = n × q / 10^6、k = floor(t)。ES = −(10^6 × Σ_{rn ≤ k} v + (n × q − 10^6 × k) × v_{k+1}) / (n × q)
+  SELECT instrument_code, side,
+    -(1000000 * SUM(IF(rn <= k, v, 0)) + (ANY_VALUE(n) * ANY_VALUE(q) - 1000000 * ANY_VALUE(k)) * SUM(IF(rn = k + 1, v, 0)))
+      AS num,
+    ANY_VALUE(n) * ANY_VALUE(q) AS den
+  FROM r GROUP BY instrument_code, side
+)
+SELECT i.instrument_code,
+  -- 切り上げ（DIV は 0 の方へ切り捨てるので num + den − 1）、0 未満は 0。OP の売りは清算値段 × Contract Size が下限
+  GREATEST(0, DIV(s.num + s.den - 1, s.den),
+    IF(i.contract_type = 'OOP', CAST(CEIL(CAST(i.price AS NUMERIC) * i.contract_size) AS INT64), 0)) AS margin_short,
+  GREATEST(0, DIV(l.num + l.den - 1, l.den)) AS margin_long,
+  i.margin_short_jscc, i.margin_long_jscc
+FROM inst AS i
+JOIN es AS s ON s.instrument_code = i.instrument_code AND s.side = -1
+JOIN es AS l ON l.instrument_code = i.instrument_code AND l.side = 1
+```
+
 ## 過去データの欠け
 
 旧系（2018-10〜2026-10）の解析の不具合などで、過去のデータに欠けがある。欠けごとの原因・期間・今の状態は [data-gaps.md](data-gaps.md)。
@@ -445,6 +554,7 @@ ORDER BY started_at
 
 ## 費用の注意
 
+- JSCC の `jscc_var_scenario` は `require_partition_filter = true`（`business_date` の絞り込みが無いクエリはエラー）。1 日のパーティションは約 140MB（論理）なので、銘柄の属性（`product_code`・`contract_period_code`・`put_call_type`・`strike_price`）でも絞る
 - **パーティションの列で絞る**。取り込みの 3 表は `created_at`、`ingest_runs` は `snapshot_at`、1 時間足は `started_at`、`atm_cm_iv` は `created_at`、銘柄ごとの 1 時間足 `option_price_hourly` は `last_trading_day`（月。1 限月がほぼ 1 パーティション）。絞らないと全期間（2018-10〜）を読む
 - `option_price` は `require_partition_filter = true` で、`created_at` の絞り込みが無いクエリはエラーになる（`dc_option_tick`・`dc_future_tick` も `trade_date` で同じ。`option_price_hourly` は `last_trading_day` で同じ。ある時刻の全銘柄を読むときも `last_trading_day` の範囲を付ける）
 - `option_price_hourly` の 1 限月のパーティションは最大 約 70〜90 MiB（全列）。dry run の見積もりはパーティションの絞り込みだけを入れ、クラスタ（`target_price`・`type`・`started_at`）の絞り込みは入れない。実際の課金（`total_bytes_billed`）はクラスタで小さくなりうる（最低 10 MB）
@@ -458,6 +568,7 @@ ORDER BY started_at
 - 取り込みの 3 表（`spot_price`・`future_price`・`option_price`）は、旧系の列（`schema/*.json`）の名前・型・モードを変えない（`apps/ingest/tests/test_schema.py` の `test_existing_columns_unchanged`）。新系で足した列（`ingest_run_id`・`parser_version`・`source_object`・`page_updated_at`・`price_time_raw`）は NULLABLE
 - `atm_cm_iv` は #158 で最後に `basis`（NULLABLE）を足した。前の 11 列の名前・型・モードは変えない（`tests/test_cm.py` の `test_schema_basis`）。読み手（ビューアー・シミュレーター）は列の名前で読む
 - `option_price_hourly`（#161）の列・型・モードは公開のインターフェース（シミュレーターが固定コミットの `schema/tokyo/option_price_hourly.json` と照合する）。`tests/test_hourly.py` の `HOURLY_SCHEMA` が並びを固定する。足の切り方（気配・数は `created_at`、約定は `price_time`）・連続売買の窓・中値の条件も契約の一部（schema の `description` と上の「1 時間足の計算（銘柄ごと）」）。変えるときはシミュレーターに知らせてから。列の追加は NULLABLE で末尾に
+- JSCC の 4 表（#164）の列はシミュレーターが読む。列の追加は NULLABLE で末尾に。改名・削除・型の変更はしない（`apps/ingest/tests/test_schema.py` の `test_jscc_*`、ロード用の行が schema の列と 1 対 1 なことは `apps/ingest/tests/test_jscc.py`）
 - 列を変えるときは、読む側（ビューアー・別のアプリ）に知らせてから。`schema/` を変えると Terraform の差分になり、`schema/tokyo/` は取り込みのイメージにも入る（`docs/development.md`）
 
 ## 作業用のデータセット（旧系）

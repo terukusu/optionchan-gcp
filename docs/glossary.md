@@ -24,6 +24,10 @@
 - **取引日**: 土日と取引カレンダーの休業日（`is_trading_day = false`）を除いた日。夜間は次の取引日に属する（[data.md](data.md#時刻)）
 - **休業日**: 業務規程上の休業日に当たる平日（国民の祝日・休日と年末年始）。祝日取引を実施する日は休業日でも取引日になる（`trading_calendar.is_trading_day = true`）
 - **祝日取引**: 休業日の一部で行う取引。実施日は JPX「祝日取引」のページの表で公表される（runbook の「取引カレンダー（#63）」）
+- **JSCC（日本証券クリアリング機構）**: 大阪取引所の先物・オプションの清算機関。証拠金の計算方法と、その計算に使うパラメータのファイルを公開している（runbook の「JSCC の VaR パラメータ（#164）」）
+- **VaR 証拠金・HS-VaR**: JSCC の証拠金の計算方式。過去の値動き（ヒストリカル。H）とストレスのシナリオ（S）ごとの損益から、損失の大きい方から一定割合（信頼水準 97.5% なら 2.5%）の平均（期待ショートフォール）を所要額にする。1 枚の計算は [data.md](data.md#jscc-の-var-パラメータの読み方164)
+- **BPF（BPF_IDX）**: JSCC の VaR 証拠金計算用パラメータファイルのうち、指数の先物・オプションの銘柄ごとのシナリオの値（Unit PnL。先物は損益、オプションはシナリオ後の評価額）のファイル。このリポジトリは 1600 版（清算値段の確定後）の日経225（Product Group `NK225`）の分を `jscc_var_scenario` に取り込む。照合の基準は銘柄ごとの 1 枚の証拠金の `All-Instruments-VaR`、信頼水準・ストレスの本数は `VaRParameter`
+- **期待ショートフォール（ES）**: 損失の大きい方から一定割合のシナリオの損失の平均。VaR（その境目の値）より裾の損失を反映する
 - **歩み値**: 約定 1 件ずつの記録。このリポジトリでは所有者が購入した J-Quants DataCube のデータを過去の欠けの作り直しに使った（`dc_option_tick`・`dc_future_tick`、[data-gaps.md](data-gaps.md)）
 
 ## このリポジトリの用語
@@ -52,5 +56,5 @@
 - **IAP（Identity-Aware Proxy）**: Google アカウントで認証し、許可した人だけを通す仕組み。ビューアー（Cloud Run `viewer`）はアプリに認証が無いので IAP の後ろに置く。許可は bootstrap の変数 `viewer_iap_members`（[viewer.md](viewer.md)、[setup.md](setup.md)）
 - **WIF（Workload Identity Federation）**: 鍵を使わずに外部（GitHub Actions）から GCP の SA として認証する仕組み。CI の plan・apply が使う（`infra/bootstrap/wif.tf`、[development.md](development.md)）
 - **SA（サービスアカウント）**: プログラムが使う GCP のアカウント。`sa-ingest`（取り込み）・`sa-viewer`（ビューアー）・`sa-scheduler`（Scheduler の呼び出し）・`sa-sq-dts`（定期クエリ）・CI 用の plan と apply の SA など。形は `sa-xxx@<PROJECT_ID>.iam.gserviceaccount.com`
-- **Cloud Run サービス / ジョブ**: コンテナを動かす GCP のサービス。リクエストで動くサービス（`ingest`・`viewer`）と、手動で実行するジョブ（`reprocess`・`calendar-sync`）がある
-- **Cloud Scheduler**: 決まった時刻に HTTP を呼ぶ GCP のサービス。Scheduler `ingest` が毎分 Cloud Run `ingest` を起動する
+- **Cloud Run サービス / ジョブ**: コンテナを動かす GCP のサービス。リクエストで動くサービス（`ingest`・`viewer`）と、実行して終わるジョブ（手動の `reprocess`・`calendar-sync`、Scheduler が平日 18:30 に起動する `jscc-sync`）がある
+- **Cloud Scheduler**: 決まった時刻に HTTP を呼ぶ GCP のサービス。Scheduler `ingest` が毎分 Cloud Run `ingest` を起動し、Scheduler `jscc-sync` が平日 18:30 JST にジョブ `jscc-sync` を起動する（#164）

@@ -23,6 +23,7 @@
 - [銘柄ごとの 1 時間足（#161）](#銘柄ごとの-1-時間足161) — 全銘柄の 1 時間足の定期クエリの確認・失敗・再実行、過去分、突き合わせ、シミュレーターの読み方の量
 - [ビューアー（#13）](#ビューアー13) — ビューアーの初回のデプロイ（IAP）・確認・ユーザーの追加・撤去、費用の確認
 - [取引カレンダー（#63）](#取引カレンダー63) — 取引カレンダーの初回の版、ERROR を受けたとき、版・ビューが壊れたとき、過去年の追加
+- [JSCC の VaR パラメータ（#164）](#jscc-の-var-パラメータ164) — JSCC の VaR 証拠金計算用パラメータファイルの毎日の取り込みの確認、ERROR・照合の不一致を受けたとき、取り直し・停止
 
 一度きりの作業（過去データ）
 
@@ -1101,11 +1102,11 @@ gcloud scheduler jobs describe ingest --location $L --project $P --format='value
 | 表示名 | 条件 | 拾うもの | 定義 |
 |---|---|---|---|
 | `optionchan: M1 ingest 生存（2xx 応答が 15 分無い）` | Cloud Run `ingest` の `run.googleapis.com/request_count` のうち `response_code_class = "2xx"` の件数（リビジョン合算）が直近 15 分で 1 未満。データが無いときも発火（`EVALUATION_MISSING_DATA_ACTIVE`）。24 時間有効（時間外も Scheduler が毎分呼び 204 を返す）。`ingest_paused = true` の間は無効 | Scheduler `ingest`・サービスの停止、invoker の権限切れ（403）、5xx の連続 | `monitoring/ingest-m1-liveness.json` |
-| `optionchan: M2 ingest エラー（ERROR ログ）` | サービス `ingest`（`cloud_run_revision`）・ジョブ `reprocess`（`cloud_run_job`）・定期クエリ（`bigquery_dts_config`、#40）の `severity>=ERROR` のログ一致。`jsonPayload.event="recovery_failed"` だけ除く。通知は 1 時間に 1 回まで、インシデントは 30 分で自動で閉じる | アプリの ERROR（下の表）、リクエストログの 5xx、メモリ超過などのシステムログ、品質チェックの違反・新旧の説明できない差分・定期クエリの失敗 | `monitoring/ingest-m2-errors.json` |
+| `optionchan: M2 ingest エラー（ERROR ログ）` | サービス `ingest`（`cloud_run_revision`）・ジョブ `reprocess`・`calendar-sync`・`jscc-sync`（`cloud_run_job`）・Scheduler `jscc-sync`（`cloud_scheduler_job`、#164）・定期クエリ（`bigquery_dts_config`、#40）の `severity>=ERROR` のログ一致。`jsonPayload.event="recovery_failed"` だけ除く。通知は 1 時間に 1 回まで、インシデントは 30 分で自動で閉じる | アプリの ERROR（下の表）、リクエストログの 5xx、メモリ超過などのシステムログ、品質チェックの違反・新旧の説明できない差分・定期クエリの失敗 | `monitoring/ingest-m2-errors.json` |
 
 - M1 を欠落条件（旧系の M1 の方式）にしないのは、`request_count` が最後のリクエストの後も値 0 の点を出し続けるため（2026-10-13 の実データで、403 の系列が 2 件の後 40 分以上 0 の点を出した）。欠落条件はそれを「データあり」とみなすので、2xx が無くなっても鳴らないことがある。しきい値（15 分で 1 未満）なら 0 の点でも鳴る。停止から通知まで 15〜20 分
 - M2 から `recovery_failed`（毎時の回収の一覧・クエリの失敗）を除くのは、一時的な失敗で毎時単発に出て次の 0 分で回復するため。回収だけが続けて失敗しても、取り込み自体が成功していれば取りこぼしが残らないので通知は来ない。取りこぼしが実際に残っているか、照合のクエリも失敗したときに、07:00 の照合が `raw_unrecovered` か `reconcile_failed`（どちらも ERROR）を出して通知される
-- gunicorn の起動・終了の行は stderr のテキストで severity が付かない（DEFAULT）ので M2 に当たらない（2026-10-13 のデプロイ 3 回で確認）。デプロイ直後の IAM 伝播待ちの 403 はリクエストログが WARNING、Scheduler 側のログ（`cloud_scheduler_job`）が ERROR だが、M2 の対象外（続けば M1 が鳴る）
+- gunicorn の起動・終了の行は stderr のテキストで severity が付かない（DEFAULT）ので M2 に当たらない（2026-10-13 のデプロイ 3 回で確認）。デプロイ直後の IAM 伝播待ちの 403 はリクエストログが WARNING、Scheduler `ingest` 側のログ（`cloud_scheduler_job`）が ERROR だが、M2 の対象外（続けば M1 が鳴る。M2 が拾う Scheduler は `jscc-sync` だけ）
 - 定期クエリ（BigQuery Data Transfer Service、#40）の失敗は `resource.type="bigquery_dts_config"` で入れている（プロジェクトの DTS は「日次の品質チェックと新旧の突き合わせ（#40）」の 4 本だけ。DTS を足すと同じく通知される）
 - `jpx_unavailable`（WARNING。空ページ・接続断）は単発では通知しない（HTTP 5xx・接続エラー・タイムアウトは同じ分の中で最大 3 回取り直した後。#88・#130、「JPX の接続・取り直し・本文の凍結（#88）」。旧系の 2026-09-15〜10-12 のログで、空ページは 04:00 / 04:20 台を中心に 1 日 1〜2 回、すべて 1 分だけ）。取引時間中に続いたときは ERROR `jpx_unavailable_stale`（#42）で M2 に乗る。判定は `stale` と同じしきい値（日中 30 分 / 夜間 40 分）で、`jpx_unavailable` の分に生 HTML のバケットを直近のしきい値分だけ一覧し、最後に保存できたスナップショットがそれより古ければ出す。JPX の改版で更新時刻・行の要素が無くなった場合（空ページと区別できない）や、JPX からの拒否・障害の継続を、最大 30〜40 分遅れで拾う。このとき生 HTML は保存されないので、ページは通知を受けてから直接見る
 
@@ -1210,6 +1211,7 @@ gcloud logging read "$F" --project $P --freshness=2h --limit=200 \
 | `calendar_outdated` / `calendar_unavailable` / `calendar_load_rejected` | 取引カレンダーの期限切れ（09:00 に 1 回）・BigQuery の版を一度も読めていない（休業日なしで判定中）・ingest が版を使わなかった（壊れている・不自然） | 「取引カレンダー（#63）」の「ERROR を受けたとき」 |
 | `calendar_sync_failed` / `calendar_sync_rejected` / `calendar_sessions_changed`（サービス ingest の 06:40、ジョブ `calendar-sync`） | 取引カレンダーの取り込みの失敗・検証で拒否・取引時間の変更（前のカレンダーのまま） | 「取引カレンダー（#63）」の「ERROR を受けたとき」 |
 | `unexpected` | 想定外の例外（500） | ログの `detail` を見て Issue にする |
+| `jscc_sync_failed` / `jscc_margin_mismatch`（ジョブ `jscc-sync`）、Scheduler `jscc-sync` の失敗 | JSCC の VaR パラメータの取り込みの失敗・1 枚の証拠金の照合の不一致 | 「JSCC の VaR パラメータ（#164）」の「ERROR を受けたとき」 |
 | `reprocess_failed` / `reprocess_item_failed`（`cloud_run_job`） | 再処理ジョブの失敗 | 「再処理ジョブ（#34）」の終了コードの説明 |
 | `bigquery_dts_config`（`jsonPayload.message` が `quality:`・`legacy_compare:` など） | 定期クエリの失敗（品質チェックの違反・新旧の説明できない差分・コピーの遅れ・権限） | 「日次の品質チェックと新旧の突き合わせ（#40）」の「失敗を受けたとき（M2 の `bigquery_dts_config`）」 |
 | Cloud Run の監査ログの ERROR（`cloudaudit.googleapis.com`） | Terraform のデプロイ失敗など、サービス・ジョブの更新の失敗 | deploy workflow の apply のログを見る |
@@ -3684,3 +3686,120 @@ gh api $R/environments --jq '[.environments[].name] | index("calendar") == null'
 4. GitHub App を作っていたら、自分のアカウントの Settings → Developer settings → GitHub Apps で削除する（インストールも消える）。ブランチ `bot/trading-calendar` が残っていれば消す
 
 - `no_night_session_before`（直前の夜間セッションが無い取引日）は JPX の表に無いので、公表されたら `settings.py` の `NO_NIGHT_SESSION_BEFORE` に足す PR を出す（通常は空）
+
+## JSCC の VaR パラメータ（#164）
+
+JSCC（日本証券クリアリング機構）が公開する VaR 証拠金計算用パラメータファイルのうち、日経225（Product Group `NK225`。先物のラージ・ミニ・マイクロ、OP のラージ・ミニ・週次）の分を毎平日取り込む。読み手は option-simulator（必要証拠金を JSCC の VaR 方式と同じ計算で出す）。読み方・列は [data.md](data.md) の「JSCC の VaR パラメータの読み方（#164）」。
+
+| 資源・設定 | 値 | 定義 |
+|---|---|---|
+| Cloud Scheduler `jscc-sync` | 平日 18:30 JST（`30 18 * * 1-5`、`Asia/Tokyo`）。Cloud Run Admin API の `jobs/jscc-sync:run` を `sa-scheduler` の OAuth トークンで呼ぶ。リトライ 0 | `infra/prod/jscc.tf` |
+| Cloud Run ジョブ `jscc-sync` | ingest のイメージ、`python -m optionchan_ingest.jscc_sync`。SA `sa-ingest`、CPU 1・メモリ 1Gi、タスクのタイムアウト 3600 秒、リトライ 0 | 同上 |
+| 起動の権限 | `sa-scheduler` にジョブ `jscc-sync` の `roles/run.invoker`（ジョブ単位） | 同上 |
+| 表 | `optionchan_tokyo` の `jscc_var_scenario`・`jscc_var_scenario_set`・`jscc_var_parameter`・`jscc_ingest_runs`（営業日の日パーティション、削除の保護） | 同上・`schema/tokyo/jscc_*.json` |
+| 取得元 | `jscc-h.jpx.co.jp` の `listed-derivatives/weekday/`・`im/` の `index.html`（直近 5 営業日）と `archive.html`（それより前。2023-07-31〜） | `apps/ingest/src/optionchan_ingest/settings.py` の `JSCC_*` |
+| 取り込む日・量 | 自動は `JSCC_START_DATE`（2026-11-16）以降で `jscc_ingest_runs` に成功の行が無い日を古い順に 1 回最大 5 日。期限 3300 秒、残り 900 秒未満なら次の日に入らない | 同上 |
+
+- 1 日の処理（`apps/ingest/src/optionchan_ingest/jscc_sync.py`）: 1600 版の `VaRParameter`・`All-Instruments-VaR` を取得 → `BPF_IDX` の zip（約 120MB）を一時ファイルに落とし、展開せずに CSV を順に読んで NK225 の銘柄だけを残す → 1 枚の売り・買いの証拠金を計算して `All-Instruments-VaR` と照合 → `jscc_var_parameter` → `jscc_var_scenario_set` → `jscc_var_scenario` をロードジョブでパーティションごと置き換え → `jscc_ingest_runs` に `succeeded` を追記 → NOTICE `jscc_ingested`
+- 3 表は別々のロードなので、途中で失敗するとその日の表の中身がずれうる。読み手は `jscc_ingest_runs` が `succeeded` の日だけを使う。失敗した日は次の実行（翌平日、または手動）が取り直す（置き換えなので重複しない）
+- 祝日の平日は新しいファイルが無く、INFO `jscc_nothing_to_do` で終わる（行を作らない）
+- 表は JSCC のファイルの中身なので**公開しない**（JSCC のサイト利用案内は無断転用・複製・再配布を禁じている）。ファイルの中身・切り出しをリポジトリ・Issue・PR に置かない。GCS には生のファイルを保存しない（archive から取り直せる）
+
+### 変数
+
+```sh
+P=<PROJECT_ID>
+L=asia-northeast1
+```
+
+### デプロイ後（初回）
+
+apply の後、2026-11-16 以降の日を手動のジョブで入れる（Scheduler の最初の起動を待ってもよい。1 回最大 5 日）。先に 1 日だけで書き込みを確かめる:
+
+```sh
+# 1. dry-run（書かない。取得・解析・照合だけ）。ログの jscc_ingested の rows_scenario・margin_mismatched を見る
+gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--dry-run,--date=2026-11-16
+# 2. 1 日だけ書く → 下の「確認」の Q1・Q2
+gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--date=2026-11-16
+# 3. 残り（引数なし = 成功していない日を古い順に最大 5 日）。残りがあれば jscc_sync_finished の remaining に出るのでもう一度
+gcloud run jobs execute jscc-sync --region $L --project $P --wait
+```
+
+- 1 日の処理の時間は手元の実測で CPU 約 3 分（1 vCPU で 1 日 3〜5 分の見込み）。初回の実行のログの `elapsed_seconds` を見て、1 回の最大日数（`JSCC_MAX_DATES_PER_RUN`）・期限が足りるか確かめる
+- ロードは NDJSON の gzip（1 日 約 31MB）を送る。ロードが `stage=load` で失敗し、`detail` が圧縮の形式の誤りなら、まず `gcloud run jobs execute jscc-sync --region asia-northeast1 --project "$P" --wait --update-env-vars=JSCC_LOAD_GZIP=0 --args=--date=<YYYY-MM-DD>` で非圧縮（約 138MB/日）を 1 回試す。通れば `infra/prod/jscc.tf` のジョブに環境変数 `JSCC_LOAD_GZIP=0` を足す PR を出す。`detail` には BigQuery のエラー文（行の値を含みうる）を入れず、理由・位置・ジョブ ID だけを記録するので、詳しくは `bq show -j --location=asia-northeast1 <ジョブ ID>` で見る
+
+### 確認
+
+```sh
+# ログ（取り込んだ日・行数・照合の件数）
+gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="jscc-sync" AND jsonPayload.event:"jscc_"' \
+  --project $P --freshness=1d --limit 20 --format=json \
+  | jq -c '.[] | {t: .timestamp, s: .severity, e: .jsonPayload.event, d: .jsonPayload.business_date, stage: .jsonPayload.stage, rows: .jsonPayload.rows_scenario, ok: .jsonPayload.margin_matched, ng: .jsonPayload.margin_mismatched, ref_only: .jsonPayload.margin_ref_only, sec: .jsonPayload.elapsed_seconds}'
+# Q1: 日ごとの行数（= NK225 の銘柄数）・シナリオの本数がそろっているか・銘柄の重複が無いか
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT business_date, COUNT(*) n, COUNTIF(ARRAY_LENGTH(pnl) = 1422) full_len, COUNT(DISTINCT instrument_code) d
+FROM `optionchan_tokyo.jscc_var_scenario` WHERE business_date BETWEEN "2026-11-16" AND "2026-11-20" GROUP BY 1 ORDER BY 1'
+# Q2: 取り込みの記録（成功・失敗・照合）
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT business_date, trigger, status, stage, rows_scenario, scenarios, margin_matched, margin_mismatched, margin_ref_only, finished_at
+FROM `optionchan_tokyo.jscc_ingest_runs` WHERE business_date >= "2026-11-16" ORDER BY business_date, started_at'
+# Scheduler
+gcloud scheduler jobs describe jscc-sync --location $L --project $P --format='value(schedule,timeZone,state)'
+```
+
+- Q1: `full_len = n`・`d = n`。1,422 はシナリオの本数（H 1,250 + S 172。2026-11 時点。変われば Q2 の `scenarios` と同じなら正常）
+- Q2: `margin_mismatched = 0`、`margin_matched = 2 × (rows_scenario − margin_bpf_only)`。`margin_ref_only`（All-Instruments-VaR にだけある銘柄。翌日に新しくできる銘柄で 1600 版の BPF に入らない）は 0〜数件が普通
+- 手元の実測（2026-11-16〜20 の 1600 版）: 行数 12,055 / 12,105 / 12,025 / 12,087 / 11,967、照合の一致 24,110 / 24,210 / 24,050 / 24,174 / 23,934・不一致 0、`margin_ref_only` は 11-19・11-20 が 4
+
+### ERROR を受けたとき
+
+M2（「新しい取り込みの監視（#35）」）で届く。ジョブのログを上の「確認」で見る。
+
+| event | 対応 |
+|---|---|
+| `jscc_sync_failed`（`stage=list`） | 一覧のページが取れない（`url` に出る）か、4 ページとも形が違う。JSCC のサイトの障害なら翌平日に取り直される（取れたページの日は取り込まれる）。続くならページを開いて URL・リンクの形の変更を確かめ、`settings.JSCC_LIST_URLS`・`jscc.parse_listing` を直す PR |
+| `jscc_sync_failed`（`stage=query`） | 成功済みの日のクエリの失敗（権限・BigQuery の障害）。翌平日に再試行される |
+| `jscc_sync_failed`（`stage=fetch_*`） | ファイルの取得の失敗（HTTP・タイムアウト・大きさの上限）。翌平日に archive から取り直される。急ぐなら手動で `--date` |
+| `jscc_sync_failed`（`stage=parse_*`） | ファイルの形が想定と違う（`detail` に行番号と理由）。JSCC の仕様の変更を疑い、ファイルを手元に落として `jscc.py` の解析を直す PR（ファイルはリポジトリに置かない。テストは `apps/ingest/tests/jsccgen.py` の合成で書く）。直るまで毎日同じ日が失敗する |
+| `jscc_sync_failed`（`stage=load` / `record`） | ロード・取り込みの記録の失敗（`detail` にジョブのエラー）。翌平日に取り直される（置き換えなので重複しない） |
+| `jscc_sync_failed`（`stage=deadline` / `unexpected`） | 期限切れ・想定外の例外。`detail` を見る。期限なら 1 回の日数を減らして手動で流す |
+| `jscc_margin_mismatch` | 計算した 1 枚の証拠金が All-Instruments-VaR と合わない（`codes` に銘柄コードを最大 20 件）。データは書かれている（`status = succeeded`）。JSCC の計算方法の変更か、取り込みの誤り。下のクエリで銘柄の値と JSCC の値を見比べ、[data.md](data.md) の計算（`apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`）を見直す。読み手（simulator）に知らせる |
+| Scheduler の失敗（`cloud_scheduler_job` の `jscc-sync`） | ジョブを起動できない（`PERMISSION_DENIED` なら `infra/prod/jscc.tf` の起動の権限）。翌平日に取り直される |
+
+```sh
+# 不一致の銘柄の JSCC の値と属性（値は貼らない。件数・銘柄コードだけを Issue に書く）
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT instrument_code, product_code, contract_type, put_call_type, contract_period_code, strike_price, margin_short_jscc, margin_long_jscc
+FROM `optionchan_tokyo.jscc_var_scenario` WHERE business_date = "<日>" AND instrument_code IN ("<銘柄コード>")'
+```
+
+ジョブの終了コード: 0 = すべて成功・対象なし・dry-run、1 = 1 日でも失敗（一覧のページ・クエリを含む）、2 = 引数の誤り・`--date` の日が一覧に無い（3 つのファイルが揃っていない）。
+
+### 取りこぼし・取り直し
+
+- 取りこぼし（Scheduler・ジョブの停止、JSCC の障害）は、次の自動の実行が `JSCC_START_DATE` 以降の成功していない日をすべて対象にするので、archive に残っている限り自動で埋まる（1 回 5 日ずつ）。起動自体が無いことは検知しないので、止めた後は上の Q2 で日が続いているか見る
+- 特定の日を入れ直す: `gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--date=YYYY-MM-DD`（成功済みでも置き換える。`--date` は繰り返せる: `--args=--date=2026-11-19,--date=2026-11-20`）
+- 開始日（2026-11-16）より前の日（archive の 2023-07-31〜）は、`--date` で流せる仕組みだが、古いファイルの形・量・費用を確かめていない。過去分は別 Issue で確かめてから入れる
+
+### 停止・再開
+
+```sh
+gcloud scheduler jobs pause jscc-sync --location $L --project $P    # 止める（本番の変更。所有者が実行する）
+gcloud scheduler jobs resume jscc-sync --location $L --project $P   # 再開。止めていた日は次の実行が取り直す
+```
+
+- `pause` は Terraform の外の変更なので、長く止めるなら `infra/prod/jscc.tf` に `paused = true` を足す PR にする（apply で戻らないように）
+
+### 切り戻し
+
+- コード・ジョブ・Scheduler・起動の権限: #164 の PR を revert する PR（ジョブ・Scheduler・IAM は `deletion_protection = false` なので消える）。急ぐときは上の「停止・再開」で Scheduler を止める
+- 表: データを持つので Terraform では消えない（`prevent_destroy`）。revert の PR では `infra/prod/jscc.tf` の表の資源を残すか、`removed` ブロックで state から外す。中身が要らなければ所有者が `bq rm` で消す
+- 監視: M2 の条件は revert で元に戻る（ポリシーの置き換え）
+- ingest のイメージ: 新しいモジュールが足されただけで、毎分の取り込みの経路は変えていない（`io_bq` のクエリのパラメータに DATE・STRING を足しただけ）
+
+### 費用
+
+- ストレージ: `jscc_var_scenario` が論理 約 140MB/日（物理はこのデータセットの課金方式で圧縮後 約 30〜40MB/日の見込み）→ 1 年 約 8〜10GB
+- ジョブ: 1 日 1 回 数分（1 vCPU・1Gi）。Cloud Run の無料枠に月 約 5 千 vCPU 秒が加わる
+- Scheduler: 4 本目なので月 $0.10（無料枠は 3 本。旧系の 2 本が #24 で消えた後は枠に戻る）
+- ロードは無料。取り込みのクエリ（成功済みの日の一覧）は数 KB

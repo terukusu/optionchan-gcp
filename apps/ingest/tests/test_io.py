@@ -1,8 +1,9 @@
 """I/O 層（JPX・GCS・BigQuery）を偽物のクライアントで検査する。実際の通信はしない"""
 
 import http.server
+import io
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import google.auth.exceptions
 import pytest
@@ -11,7 +12,7 @@ from google.api_core import exceptions
 from google.cloud.storage.exceptions import DataCorruption, InvalidResponse
 
 from optionchan_ingest import io_bq, settings
-from optionchan_ingest.io_bq import BigQueryQuery, BigQueryWriter, QueryFailed, WriteFailed
+from optionchan_ingest.io_bq import BigQueryLoader, BigQueryQuery, BigQueryWriter, LoadFailed, QueryFailed, WriteFailed
 from optionchan_ingest.io_gcs import AlreadyExists, RawStore, StorageFailed
 from optionchan_ingest.io_jpx import fetch_page
 from optionchan_ingest.parser import JpxTransient, JpxUnavailable
@@ -614,3 +615,178 @@ def test_raw_store_read_corruption_is_storage_failed(error):
     store = RawStore("b", client=ListingClient(error=error))
     with pytest.raises(StorageFailed):
         store.read("raw/a", 1)
+
+
+# --- クエリのパラメータ（DATE・STRING。#164） ---
+
+
+def test_query_date_and_string_parameters():
+    client, session = query_client(QueryResponse(200, {"jobComplete": True, "totalRows": "0"}))
+    client.query("SELECT 1 WHERE @d >= @d AND @v = @v", {"d": date(2026, 11, 16), "v": "1600", "t": START})
+    params = session.calls[0]["json"]["queryParameters"]
+    assert params == [
+        {"name": "d", "parameterType": {"type": "DATE"}, "parameterValue": {"value": "2026-11-16"}},
+        {"name": "v", "parameterType": {"type": "STRING"}, "parameterValue": {"value": "1600"}},
+        {
+            "name": "t",
+            "parameterType": {"type": "TIMESTAMP"},
+            "parameterValue": {"value": "2026-10-11 19:59:20.000000+00:00"},
+        },
+    ]
+
+
+def test_query_rejects_other_parameter_types():
+    client, session = query_client(QueryResponse(200, OK_BODY))
+    with pytest.raises(TypeError):
+        client.query("SELECT @x", {"x": 1})
+    assert session.calls == []
+
+
+# --- ロードジョブ（#164） ---
+
+
+class LoadResponse(QueryResponse):
+    def __init__(self, status, body=None, headers=None):
+        super().__init__(status, body if body is not None else {})
+        self.headers = headers or {}
+
+
+class LoadSession:
+    def __init__(self, start, upload, polls=()):
+        self.start, self.upload, self.polls = start, upload, list(polls)
+        self.calls = []
+
+    def _result(self, result):
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def post(self, url, json, headers, timeout):
+        self.calls.append(("post", url, json, headers, timeout))
+        return self._result(self.start)
+
+    def put(self, url, data, headers, timeout):
+        self.calls.append(("put", url, data, headers, timeout))
+        return self._result(self.upload)
+
+    def get(self, url, params, timeout):
+        self.calls.append(("get", url, params, timeout))
+        return self._result(self.polls.pop(0))
+
+
+STARTED = LoadResponse(200, headers={"Location": "https://upload.test/session-1"})
+DONE = {"status": {"state": "DONE"}, "statistics": {"load": {"outputRows": "4"}}}
+RUNNING = {"status": {"state": "RUNNING"}}
+
+
+def loader(session, clock=None):
+    sleeps = []
+    t = iter(clock or [0.0] * 100)
+    client = BigQueryLoader(
+        "p", "optionchan_tokyo", "asia-northeast1", session=session, sleep=sleeps.append, monotonic=lambda: next(t)
+    )
+    return client, sleeps
+
+
+def test_load_replaces_partition_and_waits():
+    session = LoadSession(
+        STARTED, LoadResponse(200, RUNNING), polls=[LoadResponse(200, RUNNING), LoadResponse(200, DONE)]
+    )
+    client, sleeps = loader(session)
+    stats = client.load_ndjson(
+        "jscc_var_scenario", date(2026, 11, 20), io.BytesIO(b"gz"), "job-1", gzip=True, timeout=600
+    )
+    assert stats == {"outputRows": "4"}
+    post, put, get1, get2 = session.calls
+    assert post[1] == "https://bigquery.googleapis.com/upload/bigquery/v2/projects/p/jobs?uploadType=resumable"
+    job = post[2]
+    assert job["jobReference"] == {"projectId": "p", "jobId": "job-1", "location": "asia-northeast1"}
+    load = job["configuration"]["load"]
+    assert load["destinationTable"] == {
+        "projectId": "p",
+        "datasetId": "optionchan_tokyo",
+        "tableId": "jscc_var_scenario$20261120",
+    }
+    assert load["writeDisposition"] == "WRITE_TRUNCATE"
+    assert load["createDisposition"] == "CREATE_NEVER"
+    assert load["sourceFormat"] == "NEWLINE_DELIMITED_JSON"
+    assert load["maxBadRecords"] == 0 and load["ignoreUnknownValues"] is False
+    assert post[3] == {"X-Upload-Content-Type": "application/gzip"}
+    assert put[1] == "https://upload.test/session-1" and put[2] == b"gz"
+    assert get1[1] == "https://bigquery.googleapis.com/bigquery/v2/projects/p/jobs/job-1"
+    assert get1[2] == {"location": "asia-northeast1"}
+    assert sleeps == [settings.JSCC_LOAD_POLL_SECONDS] * 2
+
+
+def test_load_uncompressed_content_type():
+    session = LoadSession(STARTED, LoadResponse(200, DONE))
+    client, _ = loader(session)
+    client.load_ndjson("t", date(2026, 11, 20), io.BytesIO(b"{}"), "job-1", gzip=False)
+    assert session.calls[0][3] == {"X-Upload-Content-Type": "application/octet-stream"}
+    assert len(session.calls) == 2  # 完了済みなら jobs.get しない
+
+
+@pytest.mark.parametrize(
+    "start, upload, polls",
+    [
+        (LoadResponse(403, {"error": {"message": "denied"}}), None, []),
+        (LoadResponse(200), None, []),  # Location が無い
+        (requests.exceptions.ConnectionError("reset"), None, []),
+        (google.auth.exceptions.RefreshError("token"), None, []),
+        (STARTED, LoadResponse(400, {"error": {"message": "bad"}}), []),
+        (STARTED, requests.exceptions.ReadTimeout("slow"), []),
+        (STARTED, LoadResponse(200, ValueError("not json")), []),
+        (STARTED, LoadResponse(200, RUNNING), [LoadResponse(500, {})]),
+        (STARTED, LoadResponse(200, RUNNING), [requests.exceptions.ConnectionError("x")]),
+        (
+            STARTED,
+            LoadResponse(
+                200,
+                {
+                    "status": {
+                        "state": "DONE",
+                        "errorResult": {"reason": "invalid", "message": "JSON parsing error"},
+                        "errors": [{"reason": "invalid", "location": "row 1"}],
+                    }
+                },
+            ),
+            [],
+        ),
+    ],
+)
+def test_load_failures(start, upload, polls):
+    client, _ = loader(LoadSession(start, upload, polls))
+    with pytest.raises(LoadFailed):
+        client.load_ndjson("t", date(2026, 11, 20), io.BytesIO(b"x"), "job-1", gzip=True)
+
+
+def test_load_failure_message_has_no_row_values():
+    done = {
+        "status": {
+            "state": "DONE",
+            "errorResult": {"reason": "invalid", "message": 'JSON parsing error in row: {"pnl":[123456789]}'},
+            "errors": [{"reason": "invalid", "location": "row 1"}],
+        }
+    }
+    client, _ = loader(LoadSession(STARTED, LoadResponse(200, done), []))
+    with pytest.raises(LoadFailed) as e:
+        client.load_ndjson("t", date(2026, 11, 20), io.BytesIO(b"x"), "job-1", gzip=True)
+    assert "123456789" not in str(e.value)
+    assert "job-1" in str(e.value) and "row 1" in str(e.value)
+
+
+def test_load_timeout_while_running():
+    polls = [LoadResponse(200, RUNNING)] * 10
+    clock = [0.0, 0.0] + [float(i * 10) for i in range(1, 20)]
+    client, sleeps = loader(LoadSession(STARTED, LoadResponse(200, RUNNING), polls), clock=clock)
+    with pytest.raises(LoadFailed, match="期限"):
+        client.load_ndjson("t", date(2026, 11, 20), io.BytesIO(b"x"), "job-1", gzip=True, timeout=30)
+    assert len(sleeps) < 5
+
+
+def test_load_rejects_datetime_partition():
+    session = LoadSession(STARTED, LoadResponse(200, DONE))
+    client, _ = loader(session)
+    with pytest.raises(TypeError):
+        client.load_ndjson("t", datetime(2026, 11, 20, tzinfo=UTC), io.BytesIO(b"x"), "job-1", gzip=True)
+    assert session.calls == []
