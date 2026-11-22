@@ -1,0 +1,58 @@
+[
+  {
+    "name": "business_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "営業日（ファイル名の YYYYMMDD。BPF の DATE レコードと同じ）。パーティション（日）の列"
+  },
+  {
+    "name": "file_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "ファイルの版（ファイル名の末尾。今は 1600 = 清算値段の確定後の版だけ）"
+  },
+  {
+    "name": "jscc_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "この行を書いた取り込みの ID（jscc_ingest_runs.jscc_run_id）"
+  },
+  {
+    "name": "file_type",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "BPF の DATE レコードの File Type（S）"
+  },
+  {
+    "name": "scenarios",
+    "type": "RECORD",
+    "mode": "REPEATED",
+    "description": "シナリオの並び（jscc_var_scenario.pnl の添字と同じ順。0 始まりの添字は UNNEST ... WITH OFFSET で取る）",
+    "fields": [
+      {
+        "name": "scenario_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Scenario ID（日付の形。H と S で同じ ID があるので scenario_type と組で使う）"
+      },
+      {
+        "name": "scenario_type",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Scenario Type（H = ヒストリカル / S = ストレス）"
+      }
+    ]
+  },
+  {
+    "name": "scenarios_h",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "H（ヒストリカル）のシナリオの本数"
+  },
+  {
+    "name": "scenarios_s",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "S（ストレス）のシナリオの本数"
+  }
+]

@@ -87,7 +87,7 @@ PR を出す前にそろえるもの: 前提のメール通知チャネル、「
 2. 要約に意図しない delete・replace が無いことを見てマージする。CI が一度成功したので、ここで「2.」の 3（ブランチ保護）を入れる
 3. マージで `deploy` workflow の `plan` job が差分を見つけ、`apply` job が Environment `prod` の承認を待つ。承認は Actions の画面か runbook の「Terraform」の「流れ」のコマンド。承認すると `apply` job が取り込みとビューアーのイメージをビルド・検査・push してから、digest で apply する（[development.md の「デプロイ」](development.md#デプロイ)）。PR を経ずに試すなら `gh workflow run deploy.yml --ref master` でも同じ plan が動く
 
-apply で、Artifact Registry `optionchan`、データセット `optionchan_tokyo` と表・ビュー・テーブル関数、Cloud Run `ingest`・`viewer`、ジョブ `reprocess`・`calendar-sync`、Scheduler `ingest`、定期クエリ（`optionchan quality-daily`・`optionchan atm-hourly`・`optionchan atm-cm` と旧系向けの `optionchan legacy-*`）、アラートができる（名前は `infra/prod/` の各 .tf）。Scheduler `ingest` は `ingest_paused` が既定 false なので apply の直後から毎分動き、取引時間中は取り込みを始める。
+apply で、Artifact Registry `optionchan`、データセット `optionchan_tokyo` と表・ビュー・テーブル関数、Cloud Run `ingest`・`viewer`、ジョブ `reprocess`・`calendar-sync`・`jscc-sync`、Scheduler `ingest`・`jscc-sync`、定期クエリ（`optionchan quality-daily`・`optionchan atm-hourly`・`optionchan atm-cm` と旧系向けの `optionchan legacy-*`）、アラートができる（名前は `infra/prod/` の各 .tf）。Scheduler `ingest` は `ingest_paused` が既定 false なので apply の直後から毎分動き、取引時間中は取り込みを始める。
 
 ## 4. ビューアーの IAP
 
@@ -108,6 +108,8 @@ runbook の手順 4 と「代替」の説明にある旧ビューアー（App En
 runbook の「取引カレンダー（#63）」の「デプロイ後（初回）」で、ジョブ `calendar-sync` を `--dry-run` で流してから本番で流し、ビュー `trading_calendar_latest` の休業日が JPX「祝日取引」のページと一致することを見る。流さなくても毎日 06:40 JST の取り込みのリクエストが同じことをするが、それまでの間 ingest は休業日なし（土日以外はすべて取引日）として動き、読み直すたびに ERROR `calendar_unavailable` を出す（新系の M2 が鳴る）。
 
 過去の年の行（同じ節の「過去年の追加（#67）」）は、新しい環境の取り込みは今日からなので、過去のデータを入れないなら要らない。
+
+JSCC の VaR パラメータ（#164）は、apply の後の最初の平日 18:30 JST から Scheduler `jscc-sync` が取り込む。`apps/ingest/src/optionchan_ingest/settings.py` の `JSCC_START_DATE` 以降で取り込んでいない日を、JSCC の archive に残っている限り 1 回 5 日ずつ埋める。先に入れるなら runbook の「JSCC の VaR パラメータ（#164）」の「デプロイ後（初回）」。要らなければ同じ節の「停止・再開」で Scheduler を止める（表は JSCC のファイルの中身なので公開しない）。
 
 ## 6. 監視・予算・クエリ量の上限
 

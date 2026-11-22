@@ -207,6 +207,12 @@ def test_ingest_m2_errors(ingest_m2):
     assert 'resource.type="cloud_run_job" AND resource.labels.job_name="reprocess"' in f
     # 取引カレンダーの手動の取り込み（#63）
     assert 'resource.type="cloud_run_job" AND resource.labels.job_name="calendar-sync"' in f
+    # JSCC の VaR パラメータの取り込み（#164）。ジョブの ERROR（jscc_sync_failed・jscc_margin_mismatch）と、
+    # Scheduler からの起動の失敗（ジョブのログが出ない）
+    assert 'resource.type="cloud_run_job" AND resource.labels.job_name="jscc-sync"' in f
+    assert 'resource.type="cloud_scheduler_job" AND resource.labels.job_id="jscc-sync"' in f
+    assert 'jscc_sync_failed' in ingest_m2['documentation']['content']
+    assert 'jscc_margin_mismatch' in ingest_m2['documentation']['content']
     # 定期クエリ（BigQuery Data Transfer Service、#40）の失敗。プロジェクトの DTS は品質チェックと突き合わせの 4 本だけ
     assert 'OR resource.type="bigquery_dts_config")' in f
     assert 'severity>=ERROR' in f

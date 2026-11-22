@@ -41,6 +41,7 @@ def test_cloud_run_exists():
     assert any('google_cloud_run_v2_service.ingest' in name for name in names)
     assert any('google_cloud_run_v2_job.reprocess' in name for name in names)
     assert any('google_cloud_run_v2_job.calendar_sync' in name for name in names)  # #63
+    assert any('google_cloud_run_v2_job.jscc_sync' in name for name in names)  # #164
     assert any('google_cloud_run_v2_service.viewer' in name for name in names)
 
 
@@ -340,3 +341,75 @@ def test_option_price_hourly_table():
     assert [(k, n) for k, n, _ in grants] == [('google_bigquery_table_iam_member', 'sq_option_hourly_editor')]
     assert 'role       = "roles/bigquery.dataEditor"' in grants[0][2]
     assert 'member     = "serviceAccount:${local.sa_sq}"' in grants[0][2]
+
+
+# ---- JSCC の VaR パラメータ（#164） ----
+
+JSCC_TABLES = ('jscc_var_scenario', 'jscc_var_scenario_set', 'jscc_var_parameter', 'jscc_ingest_runs')
+
+
+def test_jscc_resources():
+    tf = dict(all_tf())['prod/jscc.tf']
+    resources = re.findall(r'^resource "([^"]+)" "([^"]+)"', tf, re.M)
+    assert sorted(resources) == sorted(
+        [('google_bigquery_table', t) for t in JSCC_TABLES]
+        + [('google_cloud_run_v2_job', 'jscc_sync'), ('google_cloud_run_v2_job_iam_member', 'jscc_sync_scheduler_invoker'),
+           ('google_cloud_scheduler_job', 'jscc_sync')])
+
+    # 表: データを持つので削除は二重に止める。日のパーティション（置き換えの単位）、列の正は schema/tokyo
+    with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', 'tables.json'), encoding='utf-8') as f:
+        tables_json = f.read()
+    for name in JSCC_TABLES:
+        table = re.search(rf'resource "google_bigquery_table" "{name}" \{{(.*?)\n\}}', tf, re.S).group(1)
+        assert re.search(rf'table_id\s+= "{name}"', table), name
+        assert f'schema/tokyo/{name}.json' in table, name
+        assert re.search(r'deletion_protection\s+= true', table), name
+        assert re.search(r'deletion_policy\s+= "PREVENT"', table), name
+        assert 'prevent_destroy = true' in table, name
+        assert re.search(r'time_partitioning \{\n\s+type  = "DAY"\n\s+field = "business_date"', table), name
+        assert name not in tables_json, name
+        with open(os.path.join(INFRA_DIR, '..', 'schema', 'tokyo', f'{name}.json'), encoding='utf-8') as f:
+            columns = {c['name']: c for c in json.load(f)}
+        assert columns['business_date']['type'] == 'DATE', name
+        clustering = re.search(r'clustering\s+= \[([^\]]*)\]', table)
+        if name == 'jscc_var_scenario':
+            assert 'require_partition_filter = true' in table
+            cols = re.findall(r'"([^"]+)"', clustering.group(1))
+            assert cols == ['product_code', 'contract_period_code', 'put_call_type', 'strike_price']
+            assert all(c in columns for c in cols)
+        else:
+            assert 'require_partition_filter' not in table and clustering is None, name
+
+    job = dict(RUN_BLOCKS)['prod/jscc.tf:google_cloud_run_v2_job.jscc_sync']
+    assert 'name                = "jscc-sync"' in job
+    assert 'command = ["python", "-m", "optionchan_ingest.jscc_sync"]' in job
+    assert 'service_account = local.sa_ingest' in job
+    assert 'image   = var.ingest_image' in job
+    assert 'max_retries     = 0' in job
+    assert 'timeout         = "3600s"' in job
+    assert 'memory = "1Gi"' in job and 'cpu    = "1"' in job
+    assert 'deletion_protection = false' in job
+    # 引数は付けない（引数なし = 未取り込みの日）
+    assert 'args' not in job
+
+    iam = re.search(r'resource "google_cloud_run_v2_job_iam_member" "jscc_sync_scheduler_invoker" \{(.*?)\n\}', tf, re.S)
+    body = iam.group(1)
+    assert 'name     = google_cloud_run_v2_job.jscc_sync.name' in body
+    assert 'role     = "roles/run.invoker"' in body
+    assert 'member   = "serviceAccount:${local.sa_scheduler}"' in body
+
+    sched = re.search(r'resource "google_cloud_scheduler_job" "jscc_sync" \{(.*?)\n\}', tf, re.S).group(1)
+    assert 'name             = "jscc-sync"' in sched
+    assert 'schedule         = "30 18 * * 1-5"' in sched
+    assert 'time_zone        = "Asia/Tokyo"' in sched
+    assert 'http_method = "POST"' in sched
+    assert ('uri         = "https://run.googleapis.com/v2/projects/${var.project_id}/locations/${var.region}/jobs/'
+            '${google_cloud_run_v2_job.jscc_sync.name}:run"') in sched
+    assert 'service_account_email = local.sa_scheduler' in sched
+    assert 'scope                 = "https://www.googleapis.com/auth/cloud-platform"' in sched
+    assert 'oidc_token' not in sched  # Google の API は OAuth のアクセストークン
+    assert 'retry_config' not in sched  # リトライ 0 は既定値（書くと毎回差分）
+    assert 'depends_on = [google_cloud_run_v2_job_iam_member.jscc_sync_scheduler_invoker]' in sched
+    # 取り込みのジョブ以外を起動しない・データの付与を足さない
+    assert not re.search(r'google_bigquery_(table|dataset)_iam', tf)
+    assert len(re.findall(r'^resource "google_cloud_scheduler_job"', tf, re.M)) == 1

@@ -5,7 +5,8 @@
 gRPC の deadline（timeout）で開始から応答までの全体を打ち切る。
 """
 
-from datetime import UTC, datetime
+import time
+from datetime import UTC, date, datetime
 
 import google.auth
 import google.auth.exceptions
@@ -95,6 +96,17 @@ def _timestamp_param(name: str, value: datetime) -> dict:
     return {"name": name, "parameterType": {"type": "TIMESTAMP"}, "parameterValue": {"value": text}}
 
 
+def _query_param(name: str, value) -> dict:
+    """TIMESTAMP（datetime。timezone 付き）/ DATE（date で datetime でないもの）/ STRING（str）"""
+    if isinstance(value, datetime):
+        return _timestamp_param(name, value)
+    if isinstance(value, date):
+        return {"name": name, "parameterType": {"type": "DATE"}, "parameterValue": {"value": value.isoformat()}}
+    if isinstance(value, str):
+        return {"name": name, "parameterType": {"type": "STRING"}, "parameterValue": {"value": value}}
+    raise TypeError(f"{name}: unsupported parameter type {type(value).__name__}")
+
+
 class BigQueryQuery:
     """jobs.query（REST）で 1 ページに収まる SELECT を実行する。リトライ・ページ送りはしない
 
@@ -115,7 +127,9 @@ class BigQueryQuery:
         self._dataset = dataset
         self._location = location
 
-    def query(self, sql: str, params: dict[str, datetime], timeout: float = settings.BQ_QUERY_TIMEOUT_SECONDS):
+    def query(
+        self, sql: str, params: dict[str, datetime | date | str], timeout: float = settings.BQ_QUERY_TIMEOUT_SECONDS
+    ):
         """行（列の値の list）の list を返す。値は REST の文字列のまま。失敗は QueryFailed"""
         connect, read = split_timeout(timeout, settings.BQ_CONNECT_TIMEOUT_SECONDS)
         body = {
@@ -123,7 +137,7 @@ class BigQueryQuery:
             "useLegacySql": False,
             "location": self._location,
             "parameterMode": "NAMED",
-            "queryParameters": [_timestamp_param(k, v) for k, v in params.items()],
+            "queryParameters": [_query_param(k, v) for k, v in params.items()],
             # サーバの待ちは読み取りタイムアウトより 1 秒短く（jobComplete=false で返してもらう）
             "timeoutMs": max(1000, int((read - 1) * 1000)),
             "maxResults": QUERY_MAX_RESULTS,
@@ -158,6 +172,127 @@ class BigQueryQuery:
             "WHERE snapshot_at >= @start_at AND snapshot_at < @end_at AND source_object IS NOT NULL"
         )
         return [row[0] for row in self.query(sql, {"start_at": start_at, "end_at": end_at}, timeout=timeout)]
+
+
+class LoadFailed(Exception):
+    """BigQuery のロードジョブに失敗した（通信・HTTP エラー・ジョブのエラー・期限内に終わらない）"""
+
+
+BQ_UPLOAD_API = "https://bigquery.googleapis.com/upload/bigquery/v2"
+
+
+class BigQueryLoader:
+    """ロードジョブ（REST）で NDJSON をパーティションごと置き換える（#164 の JSCC の表）。
+
+    resumable upload（jobs.insert のメタデータ → 本体を 1 回の PUT）で送り、jobs.get で DONE まで待つ。
+    google-cloud-bigquery を依存に足さないため、BigQueryQuery と同じく AuthorizedSession で直接呼ぶ。
+    リトライしない（失敗は LoadFailed。次の実行が同じ日を取り直す。置き換えなので重複しない）
+    """
+
+    def __init__(self, project: str, dataset: str, location: str, session=None, sleep=time.sleep, monotonic=None):
+        if not project:
+            raise RuntimeError("GCP_PROJECT が未設定")
+        if session is None:
+            from google.auth.transport.requests import AuthorizedSession
+
+            credentials, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/bigquery"])
+            session = AuthorizedSession(credentials)
+        self._session = session
+        self._project = project
+        self._dataset = dataset
+        self._location = location
+        self._sleep = sleep
+        self._monotonic = monotonic or time.monotonic
+
+    def load_ndjson(
+        self,
+        table: str,
+        partition: date,
+        fileobj,
+        job_id: str,
+        *,
+        gzip: bool,
+        timeout: float = settings.JSCC_LOAD_TIMEOUT_SECONDS,
+    ) -> dict:
+        """table のパーティション partition を fileobj（NDJSON。gzip なら gzip）で置き換える（WRITE_TRUNCATE）。
+
+        ジョブの統計（outputRows など）を返す。失敗は LoadFailed
+        """
+        if isinstance(partition, datetime) or not isinstance(partition, date):
+            raise TypeError("partition は date")
+        end = self._monotonic() + timeout
+        connect, read = split_timeout(timeout, settings.BQ_CONNECT_TIMEOUT_SECONDS)
+        job = {
+            "jobReference": {"projectId": self._project, "jobId": job_id, "location": self._location},
+            "configuration": {
+                "load": {
+                    "destinationTable": {
+                        "projectId": self._project,
+                        "datasetId": self._dataset,
+                        "tableId": f"{table}${partition:%Y%m%d}",
+                    },
+                    "sourceFormat": "NEWLINE_DELIMITED_JSON",
+                    "writeDisposition": "WRITE_TRUNCATE",
+                    "createDisposition": "CREATE_NEVER",
+                    "ignoreUnknownValues": False,
+                    "maxBadRecords": 0,
+                }
+            },
+        }
+        url = f"{BQ_UPLOAD_API}/projects/{self._project}/jobs?uploadType=resumable"
+        content_type = "application/gzip" if gzip else "application/octet-stream"
+        try:
+            response = self._session.post(
+                url, json=job, headers={"X-Upload-Content-Type": content_type}, timeout=(connect, read)
+            )
+        except (requests.RequestException, google.auth.exceptions.GoogleAuthError) as e:
+            raise LoadFailed(f"{table}: start: {type(e).__name__}") from e
+        if response.status_code != 200:
+            raise LoadFailed(f"{table}: start: HTTP {response.status_code}: {_error_message(response)}")
+        upload_url = response.headers.get("Location") or response.headers.get("location")
+        if not upload_url:
+            raise LoadFailed(f"{table}: start: Location が無い")
+        # 本体はバイト列で渡す（認証の更新で AuthorizedSession が送り直すとき、読み終えたファイルだと空になるため）
+        fileobj.seek(0)
+        body = fileobj.read()
+        try:
+            response = self._session.put(
+                upload_url, data=body, headers={"Content-Type": content_type}, timeout=(connect, read)
+            )
+        except (requests.RequestException, google.auth.exceptions.GoogleAuthError) as e:
+            raise LoadFailed(f"{table}: upload: {type(e).__name__}") from e
+        if response.status_code not in (200, 201):
+            raise LoadFailed(f"{table}: upload: HTTP {response.status_code}: {_error_message(response)}")
+        try:
+            doc = response.json()
+        except ValueError as e:
+            raise LoadFailed(f"{table}: upload: 応答が JSON でない") from e
+        status_url = f"{BQ_API}/projects/{self._project}/jobs/{job_id}"
+        while (doc.get("status") or {}).get("state") != "DONE":
+            remaining = end - self._monotonic()
+            if remaining <= settings.JSCC_LOAD_POLL_SECONDS:
+                raise LoadFailed(f"{table}: 期限内に終わらなかった（job {job_id}）")
+            self._sleep(settings.JSCC_LOAD_POLL_SECONDS)
+            try:
+                response = self._session.get(
+                    status_url, params={"location": self._location}, timeout=(connect, min(read, remaining))
+                )
+            except (requests.RequestException, google.auth.exceptions.GoogleAuthError) as e:
+                raise LoadFailed(f"{table}: jobs.get: {type(e).__name__}") from e
+            if response.status_code != 200:
+                raise LoadFailed(f"{table}: jobs.get: HTTP {response.status_code}: {_error_message(response)}")
+            try:
+                doc = response.json()
+            except ValueError as e:
+                raise LoadFailed(f"{table}: jobs.get: 応答が JSON でない") from e
+        error = doc["status"].get("errorResult")
+        if error:
+            first = (doc["status"].get("errors") or [{}])[0]
+            # message は行の断片（値）を含むことがあるので記録しない。詳しくは bq show -j <job_id> で見る
+            raise LoadFailed(
+                f"{table}: {error.get('reason')} (first: {first.get('reason')} {first.get('location')}; job {job_id})"
+            )
+        return (doc.get("statistics") or {}).get("load") or {}
 
 
 def _error_message(response) -> str:

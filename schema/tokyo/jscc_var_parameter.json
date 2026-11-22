@@ -1,0 +1,94 @@
+[
+  {
+    "name": "business_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "営業日（ファイル名の YYYYMMDD。BPF の DATE レコードと同じ）。パーティション（日）の列"
+  },
+  {
+    "name": "file_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "ファイルの版（ファイル名の末尾。今は 1600 = 清算値段の確定後の版だけ）"
+  },
+  {
+    "name": "jscc_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "この行を書いた取り込みの ID（jscc_ingest_runs.jscc_run_id）"
+  },
+  {
+    "name": "line_no",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "ファイルの中の順（# の見出し行と空行を除いて 1 始まり）"
+  },
+  {
+    "name": "record_id",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "Record ID（0 = VAR / 1 = HSRATIO / 2 = ASRATIO）"
+  },
+  {
+    "name": "record_name",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Record Name"
+  },
+  {
+    "name": "level",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Level（L01〜）"
+  },
+  {
+    "name": "aggregation_group",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "Aggregation Group"
+  },
+  {
+    "name": "parent_aggregation_group",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Parent Aggregation Group（レコード 1・2。空欄・レコード 0 は NULL）"
+  },
+  {
+    "name": "type",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Type（レコード 1・2 の OFFSET_LIMIT / GROUP など。レコード 0 は NULL）"
+  },
+  {
+    "name": "confidence_level",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "Confidence Level（% 表記。97.5 など。レコード 0 だけ）"
+  },
+  {
+    "name": "stress_scenario_number",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "Stress Scenario Number（ストレスのシナリオのうち損失の大きい方から使う本数。レコード 0 だけ）"
+  },
+  {
+    "name": "params",
+    "type": "RECORD",
+    "mode": "REPEATED",
+    "description": "パラメータ（レコード 1・2 の Param Name / Param Value の組。ファイルの順）",
+    "fields": [
+      {
+        "name": "name",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Param Name"
+      },
+      {
+        "name": "value",
+        "type": "FLOAT",
+        "mode": "REQUIRED",
+        "description": "Param Value"
+      }
+    ]
+  }
+]

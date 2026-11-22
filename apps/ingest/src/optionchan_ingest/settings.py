@@ -7,7 +7,7 @@ schema/tokyo/*.json だけを直せば差し替えられるようにする。
 import json
 import os
 from dataclasses import dataclass
-from datetime import time
+from datetime import date, time
 from pathlib import Path
 
 # イメージ内ではリポジトリ直下の構成を /app に置く（apps/ingest/Dockerfile）。
@@ -175,6 +175,61 @@ CALENDAR_RETRY_SECONDS = 300
 CALENDAR_WRITE_TIMEOUT_SECONDS = 10
 # 手動のジョブ（calendar-sync）の期限
 CALENDAR_JOB_DEADLINE_SECONDS = 300
+
+
+# --- JSCC の VaR 証拠金計算用パラメータファイル（#164。jscc_sync.py、runbook「JSCC の VaR パラメータ（#164）」） ---
+# 一覧のページ（index = 直近 5 営業日、archive = それより前）。同じ日・同じ種類が 2 ページにあれば前の方を使う。
+# BPF_IDX・VaRParameter は weekday/、All-Instruments-VaR は im/ にある
+JSCC_LIST_URLS = (
+    "https://jscc-h.jpx.co.jp/jscc/listed-derivatives/weekday/index.html",
+    "https://jscc-h.jpx.co.jp/jscc/listed-derivatives/im/index.html",
+    "https://jscc-h.jpx.co.jp/jscc/listed-derivatives/weekday/archive.html",
+    "https://jscc-h.jpx.co.jp/jscc/listed-derivatives/im/archive.html",
+)
+# jpx.co.jp は User-Agent の無い取得に 403 を返すことがある
+JSCC_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; optionchan-ingest)"}
+# ファイルの版（清算値段の確定後の 1600 版だけ。1100 版・1800 版は取らない）と、取り込む Product Group Code
+JSCC_FILE_VERSION = "1600"
+JSCC_PRODUCT_GROUP = "NK225"
+# 自動の実行（引数なし）が対象にする最初の営業日。これ以降で jscc_ingest_runs に succeeded の行が無い日を古い順に
+# 1 回最大 JSCC_MAX_DATES_PER_RUN 日（1 日 約 3 分。手元の実測は CPU 約 130 秒）
+JSCC_START_DATE = date(2026, 11, 16)
+JSCC_MAX_DATES_PER_RUN = 5
+# ジョブの期限（タスクのタイムアウト 3600 秒より前に止める）と、1 日を始める残り時間の下限
+JSCC_JOB_DEADLINE_SECONDS = 3300
+JSCC_MIN_REMAINING_SECONDS = 900
+# HTTP: 接続・読み取り（バイトが届かない時間）の上限。一覧・CSV の取得 1 回の上限と、
+# BPF の zip（約 120MB）の取得の上限。
+# リトライなし（翌平日の実行が archive から取り直す）
+JSCC_CONNECT_TIMEOUT_SECONDS = 10
+JSCC_READ_TIMEOUT_SECONDS = 60
+JSCC_FETCH_TIMEOUT_SECONDS = 120
+JSCC_DOWNLOAD_TIMEOUT_SECONDS = 900
+# 大きさの上限（信頼しない入力なので、想定の数倍で打ち切る）: 一覧・CSV、BPF の zip、zip の中の CSV（展開後 約 835MB）
+JSCC_MAX_TEXT_BYTES = 50 * 1024 * 1024
+JSCC_MAX_ZIP_BYTES = 500 * 1024 * 1024
+JSCC_MAX_MEMBER_BYTES = 4 * 1024 * 1024 * 1024
+# ロード（BigQuery のロードジョブ。NDJSON を resumable upload で送り、完了まで待つ）。1 表の上限と完了の確かめの間隔。
+# JSCC_LOAD_GZIP: gzip で送る（約 31MB/日）。受け付けられないときは環境変数 JSCC_LOAD_GZIP=0 で非圧縮（約 138MB/日）に
+# 切り替える（コードの変更なしに `gcloud run jobs execute ... --update-env-vars=JSCC_LOAD_GZIP=0` で 1 回だけ試せる）
+JSCC_LOAD_TIMEOUT_SECONDS = 600
+JSCC_LOAD_POLL_SECONDS = 5
+
+
+def env_off(name: str, environ=os.environ) -> bool:
+    """環境変数 name が "0" なら True（既定は有効のまま）"""
+    return environ.get(name, "1") == "0"
+
+
+JSCC_LOAD_GZIP = not env_off("JSCC_LOAD_GZIP")
+# 取り込みの記録（jscc_ingest_runs への追記、Storage Write API）と、成功済みの日のクエリの上限
+JSCC_RECORD_TIMEOUT_SECONDS = 15
+JSCC_QUERY_TIMEOUT_SECONDS = 30
+# 表（optionchan_tokyo。列は schema/tokyo/<表>.json）。ロードはこの順（銘柄の行が最後）、最後に取り込みの記録
+JSCC_SCENARIO_TABLE = "jscc_var_scenario"
+JSCC_SCENARIO_SET_TABLE = "jscc_var_scenario_set"
+JSCC_PARAMETER_TABLE = "jscc_var_parameter"
+JSCC_RUNS_TABLE = "jscc_ingest_runs"
 
 
 @dataclass(frozen=True)

@@ -84,3 +84,42 @@ def test_trading_calendar_contract():
         assert c["description"], c["name"]
     # 取り込みのテーブルではない（Terraform は infra/prod/calendar.tf で作る）
     assert "trading_calendar" not in load(NEW / "tables.json")["tables"]
+
+
+# JSCC の VaR パラメータ（#164）。tables.json には入れない（Terraform は infra/prod/jscc.tf）
+JSCC_TABLES = {
+    "jscc_var_scenario": "business_date",
+    "jscc_var_scenario_set": "business_date",
+    "jscc_var_parameter": "business_date",
+    "jscc_ingest_runs": "business_date",
+}
+
+
+def _all_columns(schema):
+    for c in schema:
+        yield c
+        yield from _all_columns(c.get("fields", []))
+
+
+@pytest.mark.parametrize("table", sorted(JSCC_TABLES))
+def test_jscc_tables(table):
+    schema = load(NEW / f"{table}.json")
+    for c in _all_columns(schema):
+        assert c["description"], c["name"]
+        assert c["mode"] in ("NULLABLE", "REQUIRED", "REPEATED"), c["name"]
+    # パーティションの列は DATE REQUIRED
+    assert cols(schema)[JSCC_TABLES[table]] == ("DATE", "REQUIRED")
+    assert table not in load(NEW / "tables.json")["tables"]
+
+
+def test_jscc_scenario_columns():
+    c = cols(load(NEW / "jscc_var_scenario.json"))
+    assert c["pnl"] == ("INTEGER", "REPEATED")
+    assert c["strike_price"] == ("NUMERIC", "NULLABLE")
+    assert c["contract_period_code"] == ("STRING", "REQUIRED")  # 週次は 7 桁（YYYYMMW）
+    # クラスタの列（infra/prod/jscc.tf）
+    for name in ("product_code", "contract_period_code", "put_call_type", "strike_price"):
+        assert name in c
+    scenario_set = {s["name"]: s for s in load(NEW / "jscc_var_scenario_set.json")}
+    assert scenario_set["scenarios"]["type"] == "RECORD" and scenario_set["scenarios"]["mode"] == "REPEATED"
+    assert [f["name"] for f in scenario_set["scenarios"]["fields"]] == ["scenario_id", "scenario_type"]

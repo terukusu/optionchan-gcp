@@ -1,0 +1,122 @@
+[
+  {
+    "name": "jscc_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "取り込みの ID（UUID4。1 回の実行の 1 営業日ごとに 1 つ）"
+  },
+  {
+    "name": "business_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "取り込んだ営業日。パーティション（日）の列"
+  },
+  {
+    "name": "file_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "ファイルの版（1600）"
+  },
+  {
+    "name": "trigger",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "対象の選び方（auto = 引数なしの実行が未取り込みの日を選んだ / manual = --date の指定）"
+  },
+  {
+    "name": "execution",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "Cloud Run ジョブの実行名（環境変数 CLOUD_RUN_EXECUTION）。手元の実行は NULL"
+  },
+  {
+    "name": "status",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "succeeded（3 表のロードがすべて終わった）/ failed。読み手は succeeded の日だけを使う"
+  },
+  {
+    "name": "stage",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "失敗した段階（fetch_parameter・fetch_margin・fetch_bpf・parse_parameter・parse_margin・parse_bpf・load・deadline など）。成功は NULL"
+  },
+  {
+    "name": "detail",
+    "type": "STRING",
+    "mode": "NULLABLE",
+    "description": "失敗の理由（例外の種類と要約。値は入れない）。成功は NULL"
+  },
+  {
+    "name": "started_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "この日の取り込みを始めた時刻"
+  },
+  {
+    "name": "finished_at",
+    "type": "TIMESTAMP",
+    "mode": "REQUIRED",
+    "description": "この日の取り込みを終えた時刻（成功は 3 表のロードの後）"
+  },
+  {
+    "name": "rows_scenario",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "jscc_var_scenario の行数（= NK225 の銘柄数）"
+  },
+  {
+    "name": "rows_parameter",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "jscc_var_parameter の行数（VaRParameter の全行）"
+  },
+  {
+    "name": "scenarios",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "シナリオの本数（H + S）"
+  },
+  {
+    "name": "scenarios_h",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "H のシナリオの本数"
+  },
+  {
+    "name": "scenarios_s",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "S のシナリオの本数"
+  },
+  {
+    "name": "margin_matched",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "1 枚の証拠金の照合で All-Instruments-VaR と一致した件数（売り・買いを別々に数える）"
+  },
+  {
+    "name": "margin_mismatched",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "照合で一致しなかった件数（1 件以上なら ERROR jscc_margin_mismatch）"
+  },
+  {
+    "name": "margin_ref_only",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "All-Instruments-VaR にだけある銘柄の数（翌日に新しくできる銘柄。不一致に数えない）"
+  },
+  {
+    "name": "margin_bpf_only",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "BPF にだけある銘柄の数（不一致に数えない）"
+  },
+  {
+    "name": "bpf_bytes",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "BPF の zip の大きさ（バイト）"
+  }
+]

@@ -8,6 +8,7 @@
 - JPX のページ自体が約 15 分遅れなので、蓄積したデータも実時刻から約 15 分遅れる
 - 生 HTML（2 ページを gzip した JSON）を GCS に、解析した行を東京（`asia-northeast1`）の BigQuery のデータセット `optionchan_tokyo`（Storage Write API）に書く
 - 同じ分を回収・再処理で書き直すことがあるので、データは最新版を選ぶテーブル関数（`option_price_latest` など）で読む。表・列・時刻の読み方は [docs/data.md](docs/data.md)
+- 平日 18:30 JST に JSCC の VaR 証拠金計算用パラメータファイル（日経225 分のシナリオの値。#164）を取り込む（ジョブ `jscc-sync`。表は非公開）
 - 最新版から定期クエリで 1 時間足（ATM の IV・プレミアム・行使価格）・銘柄ごとの 1 時間足（全銘柄。#161）と 30 日固定の ATM IV を作り、日次で品質を検査する
 - 構築はすべて Terraform（`infra/`）。master へのマージで GitHub Actions が plan し、Environment `prod` の承認の後に apply する
 
@@ -22,6 +23,9 @@ flowchart LR
   ING["Cloud Run サービス ingest"]
   REP["Cloud Run ジョブ reprocess（手動）"]
   CAL["Cloud Run ジョブ calendar-sync（手動）"]
+  JSCC["JSCC の VaR パラメータファイル"]
+  JSCH["Cloud Scheduler jscc-sync（平日 18:30）"]
+  JSJ["Cloud Run ジョブ jscc-sync"]
   GCS[("GCS（生 HTML）")]
   subgraph BQ["BigQuery optionchan_tokyo（asia-northeast1）"]
     RAW[("spot_price・future_price・option_price・ingest_runs")]
@@ -29,6 +33,7 @@ flowchart LR
     TC[("trading_calendar・trading_calendar_latest")]
     OHLC[("1 時間足 atm_iv など・option_price_hourly・atm_cm_iv")]
     QC[("quality_daily")]
+    JT[("jscc_var_scenario・jscc_var_scenario_set・jscc_var_parameter・jscc_ingest_runs")]
   end
   DTS["定期クエリ（DTS）atm-hourly・option-hourly・atm-cm・quality-daily"]
   VW["Cloud Run サービス viewer（IAP の後ろ）"]
@@ -49,7 +54,11 @@ flowchart LR
   TVF --> VW
   OHLC --> VW
   TC --> VW
+  JSCH --> JSJ
+  JSJ -->|取得| JSCC
+  JSJ --> JT
   ING -.ログ.-> MON
+  JSJ -.ログ.-> MON
 ```
 
 - 取り込みは毎時 0 分（JST）に取りこぼし（生 HTML はあるが完了記録 `ingest_runs` が無いもの）を回収し、07:00 に前日分を照合する。取引カレンダーは 06:40 JST の取り込みのリクエストが JPX から取り込む（ジョブ `calendar-sync` は手動の取り込み用）
@@ -66,9 +75,9 @@ flowchart LR
 
 | パス | 中身 |
 |---|---|
-| `apps/ingest` | 取り込み（Cloud Run の `ingest`・ジョブ `reprocess`・`calendar-sync`）。ジョブ `reprocess` は保存済みの生 HTML から期間を指定して作り直す（JPX にアクセスしない）。Python 3.13・uv |
+| `apps/ingest` | 取り込み（Cloud Run の `ingest`・ジョブ `reprocess`・`calendar-sync`・`jscc-sync`）。ジョブ `reprocess` は保存済みの生 HTML から期間を指定して作り直す（JPX にアクセスしない）。`jscc-sync` は JSCC の VaR パラメータの取り込み（#164）。Python 3.13・uv |
 | `apps/viewer` | ビューアー（Cloud Run の `viewer`、IAP の後ろ）。Python 3.13・uv・Flask、ブラウザ用の JS。使い方は [docs/viewer.md](docs/viewer.md) |
-| `schema` | BigQuery の表の列の定義（`schema/tokyo/` は取り込みの表と日次チェックの結果・銘柄ごとの 1 時間足、`schema/ohlc/`・`schema/cm/` は 1 時間足と 30 日固定）。旧系の表の定義も直下にある |
+| `schema` | BigQuery の表の列の定義（`schema/tokyo/` は取り込みの表と日次チェックの結果・銘柄ごとの 1 時間足・JSCC の VaR パラメータの表、`schema/ohlc/`・`schema/cm/` は 1 時間足と 30 日固定）。旧系の表の定義も直下にある |
 | `sql` | BigQuery の SQL。テーブル関数・定期クエリの本文（Terraform が読む）と、移行・過去分の作り直しで手で流す SQL |
 | `infra` | Terraform。`infra/bootstrap`（権限の根元。所有者が手で apply）と `infra/prod`（CI が承認後に apply） |
 | `monitoring` | Cloud Monitoring のアラートポリシーの定義（JSON）とバックテスト |
