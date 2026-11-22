@@ -275,7 +275,7 @@
 | `aggregation_group` | STRING | REQUIRED | `jscc_var_parameter` の信頼水準・ストレスの本数を引く列 |
 | `calculation_method_flag` | STRING | REQUIRED | `H`（ヒストリカル。NK225 はすべて H） |
 | `price` | FLOAT | NULLABLE | 清算値段（1 単位あたり） |
-| `pnl` | INTEGER | REPEATED | シナリオごとの値（1 単位あたりの円）。並びは同じ日の `jscc_var_scenario_set.scenarios` と同じ。**先物はシナリオの損益、オプションはシナリオ後の評価額** |
+| `pnl` | INTEGER | REPEATED | シナリオごとの値（**1 枚あたりの円**。取引単位を掛けた後の値なので `contract_size` は掛けない）。並びは同じ日の `jscc_var_scenario_set.scenarios` と同じ。**先物はシナリオの損益、オプションはシナリオ後の評価額** |
 | `margin_short_jscc` / `margin_long_jscc` | INTEGER | NULLABLE | JSCC の All-Instruments-VaR の 1 枚の売り / 買いの証拠金（照合の基準）。All-Instruments-VaR に無い銘柄は NULL |
 
 `jscc_var_scenario_set`（1 行 = 営業日 × 版）: `file_type`（STRING REQUIRED。`S`）、`scenarios`（RECORD REPEATED。`scenario_id` STRING REQUIRED・`scenario_type` STRING REQUIRED（`H` = ヒストリカル / `S` = ストレス））、`scenarios_h` / `scenarios_s`（INTEGER REQUIRED。本数）。`scenarios` の 0 始まりの添字（`UNNEST(scenarios) WITH OFFSET`）が `pnl` の添字。Scenario ID は H と S で同じものがあるので、`scenario_type` と組で使う。
@@ -404,8 +404,8 @@ JSCC が公開する VaR 証拠金計算用パラメータファイル（1600 �
 - **`jscc_ingest_runs` が `status = 'succeeded'` の日だけを使う**。1 日の 3 表は別々のロード（パーティションの置き換え）なので、失敗した日は表の間で中身がずれていることがある。失敗した日は次の実行が取り直す
 - 1 日 1 版で銘柄は一意（置き換えなので、同じ日を取り直しても重複しない）
 - 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは清算値段 × `contract_size` を下回らない。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
-- ポートフォリオの証拠金は、銘柄ごとの v（向き × 枚数 × `contract_size` × `pnl`）をシナリオごとに足してから同じ計算をする（相殺の制限・Aggregation Group をまたぐ計算は `jscc_var_parameter` のレコード 1・2 の係数を使う。ここでは扱わない）
-- 1 銘柄の行は `pnl` が 1,422 個（2026-11 時点）で約 11KB。銘柄の属性（限月・行使価格・C/P）で絞ればクラスタで読む量が小さくなる。1 日分の全銘柄は約 140MB（論理）
+- ポートフォリオの証拠金は、銘柄ごとの v（向き × 枚数 × `pnl`。`pnl` は 1 枚あたりなので `contract_size` は掛けない）をシナリオごとに足してから同じ計算をする（相殺の制限・Aggregation Group をまたぐ計算は `jscc_var_parameter` のレコード 1・2 の係数を使う。ここでは扱わない）
+- 1 銘柄の行は `pnl` が 1,422 個（2026-11 時点）で約 11KB。1 日分の全銘柄は約 131MiB（論理）。1 日のパーティションはクラスタの絞り込みが効くほど大きくないので、銘柄で絞っても課金されるバイト数は 1 日分の全部（`pnl` を読む場合）になる。何度も読むなら 1 日・1 限月ごとに手元に持つ
 - 翌日に新しくできる銘柄は 1600 版の BPF に無い（All-Instruments-VaR には載るので、`jscc_ingest_runs.margin_ref_only` に数だけ出る）
 - 1100 版（日中）を将来足すときは、パーティション（営業日）の置き換えが版をまたぐので、表を分けるか書き方を変える
 
