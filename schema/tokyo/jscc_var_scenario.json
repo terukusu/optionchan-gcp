@@ -93,7 +93,7 @@
     "name": "pnl",
     "type": "INTEGER",
     "mode": "REPEATED",
-    "description": "シナリオごとの値（HSPL の Unit PnL。1 単位あたりの円）。並びは jscc_var_scenario_set.scenarios と同じ（添字 0 始まりが対応）。先物はシナリオの損益、オプションはシナリオ後の評価額"
+    "description": "シナリオごとの値（HSPL の Unit PnL。1 枚あたりの円で、contract_size は掛けない）。並びは jscc_var_scenario_set.scenarios と同じ（添字 0 始まりが対応）。先物はシナリオの損益、オプションはシナリオ後の評価額"
   },
   {
     "name": "margin_short_jscc",

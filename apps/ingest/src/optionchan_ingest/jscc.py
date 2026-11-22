@@ -2,7 +2,7 @@
 
 ファイル（JSCC の「VaR 証拠金計算用パラメータファイル」。仕様は JSCC の GUI アプリケーション仕様書）:
 - BPF_IDX_YYYYMMDD_<版>.zip: 1 メンバーの CSV。レコード 0 DATE → 1 INSTRUMENT → 2 PRICE → 3 HSPL（銘柄 × シナリオの
-  1 単位あたりの値）→ 6 SFR → 7 ASPL の順で、ブロックの前に # の見出し行。展開すると 800MB 超なので行を順に読む
+  1 枚あたりの値）→ 6 SFR → 7 ASPL の順で、ブロックの前に # の見出し行。展開すると 800MB 超なので行を順に読む
 - VaRParameter_YYYYMMDD_<版>.csv: Aggregation Group ごとの信頼水準・ストレスのシナリオの本数（レコード 0）と
   相殺の係数（レコード 1・2）
 - All-Instruments-VaR_YYYYMMDD_<版>.csv: 銘柄ごとの 1 枚の売り・買いの証拠金（照合の基準）
