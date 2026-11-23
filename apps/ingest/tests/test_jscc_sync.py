@@ -10,10 +10,11 @@ from urllib.parse import urljoin
 import pytest
 import requests
 from conftest import REPO_ROOT
-from jsccgen import Bpf, Inst, all_instruments_var, default_instruments, listing_html, var_parameter
+from jsccgen import Bpf, Inst, all_instruments_var, default_instruments, factor_month, listing_html, var_parameter
 
-from optionchan_ingest import bq_proto, jscc, jscc_sync, settings
+from optionchan_ingest import bq_proto, jscc, jscc_factor, jscc_sync, settings
 from optionchan_ingest.io_bq import LoadFailed, QueryFailed, WriteFailed
+from optionchan_ingest.jpx_calendar import CalendarDataError
 from optionchan_ingest.jscc_sync import JsccFetchFailed, SyncDeps, run_sync
 from optionchan_ingest.parser import jst
 from optionchan_ingest.pipeline import Deadline
@@ -58,6 +59,9 @@ class FakeJscc:
         self.load_error = None
         self.append_errors: list[Exception] = []
         self.query_error = None
+        self.holidays = frozenset()
+        self.covered_until = date(2027, 6, 30)
+        self.calendar_error = None
         weekday, im = [], []
         for day in days:
             bpf = (bpfs or {}).get(day) or Bpf(business_date=day)
@@ -111,6 +115,12 @@ class FakeJscc:
             raise self.append_errors.pop(0)
         self.appended.append((table, rows))
 
+    def load_holidays(self, timeout):
+        self.calls.append(("calendar",))
+        if self.calendar_error:
+            raise self.calendar_error
+        return self.holidays, self.covered_until
+
     def deps(self):
         times = iter(datetime(2026, 11, 20, 9, 30, s % 60, tzinfo=UTC) for s in range(1000))
         return SyncDeps(
@@ -119,6 +129,7 @@ class FakeJscc:
             self.query_succeeded,
             self.load,
             self.append_run,
+            self.load_holidays,
             clock=lambda: next(times),
             new_id=lambda: next(self._ids),
         )
@@ -148,10 +159,17 @@ def test_auto_ingests_pending_days_in_order(capsys):
     assert result.outcome == "ok"
     assert [(d.business_date, d.status) for d in result.days] == [(D2, "succeeded"), (D3, "succeeded")]
     loads = [(c[1], c[2]) for c in fake.calls if c[0] == "load"]
-    order = [settings.JSCC_PARAMETER_TABLE, settings.JSCC_SCENARIO_SET_TABLE, settings.JSCC_SCENARIO_TABLE]
+    order = [
+        settings.JSCC_PARAMETER_TABLE,
+        settings.JSCC_SCENARIO_SET_TABLE,
+        settings.JSCC_SCENARIO_TABLE,
+        settings.JSCC_FACTOR_TABLE,
+    ]
     assert loads == [(t, D2) for t in order] + [(t, D3) for t in order]
-    # 各日の最後に取り込みの記録
-    assert [c[0] for c in fake.calls if c[0] in ("load", "append")] == (["load"] * 3 + ["append"]) * 2
+    # 各日の最後に取り込みの記録。カレンダーは日の前に 1 回
+    assert [c[0] for c in fake.calls if c[0] in ("load", "append", "calendar")] == ["calendar"] + (
+        ["load"] * 4 + ["append"]
+    ) * 2
     runs = fake.runs()
     assert [(r["business_date"], r["status"], r["trigger"]) for r in runs] == [
         (D2, "succeeded", "auto"),
@@ -163,9 +181,15 @@ def test_auto_ingests_pending_days_in_order(capsys):
     assert runs[0]["rows_parameter"] == 6
     assert runs[0]["execution"] == "exec-1"
     assert runs[0]["bpf_bytes"] > 0
+    # 合成の既定の銘柄: NK225E 202612 は先物があり r だけ（使う OP が足りず g 空）、週次 W2 は C だけでパリティ不可
+    assert (runs[0]["rows_factor"], runs[0]["rows_factor_fitted"]) == (1, 0)
     records = logs(capsys)
     assert ("NOTICE", "jscc_ingested") in events(records)
-    assert not [r for r in records if r["severity"] in ("ERROR", "WARNING")]
+    warnings = [r for r in records if r["severity"] in ("ERROR", "WARNING")]
+    assert [r["event"] for r in warnings] == ["jscc_factor_incomplete"] * 2
+    assert warnings[0]["periods"] == ["NK225E:202612"] and warnings[0]["reasons"] == {"few_options": 1}
+    [notice, _] = [r for r in records if r["event"] == "jscc_ingested"]
+    assert notice["factor_skipped_weekly"] == 1 and notice["max_rss_mb"] > 0 and notice["factor_seconds"] >= 0
 
 
 def test_scenario_rows_only_nk225_and_match_schema():
@@ -613,3 +637,202 @@ def test_succeeded_dates_query():
 def test_succeeded_dates_bad_value():
     with pytest.raises(QueryFailed):
         jscc_sync.succeeded_dates(FakeQuery([["x"]]), "p", "d", date(2026, 11, 16), 30)
+
+
+# ---- シナリオの r・g の当てはめ（#168） ----
+
+
+def factor_bpf(day=D3, **kw):
+    """当てはめられる限月（合成。先物あり）を含む BPF"""
+    month = factor_month(business_date=day, **kw)
+    return month, Bpf(business_date=day, instruments=month.instruments + default_instruments()[4:])
+
+
+def test_factor_rows_are_loaded_last(capsys):
+    month, bpf = factor_bpf()
+    fake = FakeJscc(days=(D3,), bpfs={D3: bpf})
+    fake.holidays = frozenset({date(2026, 11, 23)})
+    result = sync(fake)
+    assert result.outcome == "ok"
+    assert [(c[1], c[2]) for c in fake.calls if c[0] == "load"][-1] == (settings.JSCC_FACTOR_TABLE, D3)
+    [x] = [x for x in fake.loads if x["table"] == settings.JSCC_FACTOR_TABLE]
+    assert x["job_id"] == "jscc_jscc_var_scenario_factor_20261120_00000000000040008000000000000001"
+    [row] = x["rows"]
+    assert list(row) == [c["name"] for c in schema(settings.JSCC_FACTOR_TABLE)]
+    assert row["jscc_run_id"] == "00000000-0000-4000-8000-000000000001"
+    assert (row["business_date"], row["product_code"], row["contract_period_code"]) == (
+        "2026-11-20",
+        "NK225E",
+        "202612",
+    )
+    assert row["forward_source"] == "NK225F" and row["horizon_days"] == 5  # 11-23 の休業がカレンダーから効く
+    assert row["r"] == pytest.approx(month.r, abs=1e-9)
+    assert len(row["g"]) == 13 * 7 and row["check_n"] == len(month.used)
+    [run] = fake.runs()
+    assert (run["rows_factor"], run["rows_factor_fitted"]) == (1, 1)
+    # 同じ run_id が 4 表に
+    assert {r["jscc_run_id"] for x in fake.loads for r in x["rows"]} == {run["jscc_run_id"]}
+    records = logs(capsys)
+    assert not [r for r in records if r["severity"] in ("ERROR", "WARNING")]
+    [notice] = [r for r in records if r["event"] == "jscc_ingested"]
+    assert (notice["rows_factor"], notice["rows_factor_fitted"]) == (1, 1)
+
+
+def test_factor_uses_calendar_holidays():
+    _, bpf = factor_bpf()
+    fake = FakeJscc(days=(D3,), bpfs={D3: bpf})  # 休業なし → 11-20(金) の 2 営業日後は 11-24(火)
+    sync(fake)
+    [x] = [x for x in fake.loads if x["table"] == settings.JSCC_FACTOR_TABLE]
+    assert x["rows"][0]["horizon_days"] == 4
+
+
+def test_factor_failure_writes_nothing(monkeypatch, capsys):
+    """当てはめの失敗はロードの前: どの表も置き換えず failed（stage = factor）、次の日へ進む"""
+    calls = []
+
+    def boom(*args, **kwargs):
+        calls.append(kwargs["business_date"])
+        if len(calls) == 1:
+            raise ZeroDivisionError("float division by zero")
+        return jscc_factor.FactorResult(rows=[], fitted=0)
+
+    monkeypatch.setattr(jscc_factor, "factor_rows", boom)
+    fake = FakeJscc()
+    result = sync(fake)
+    assert result.outcome == "failed"
+    assert [(d.business_date, d.status, d.stage) for d in result.days] == [
+        (D2, "failed", "factor"),
+        (D3, "succeeded", None),
+    ]
+    assert not [x for x in fake.loads if x["partition"] == D2]
+    [err] = failures(logs(capsys))
+    assert err["stage"] == "factor" and err["detail"].startswith("ZeroDivisionError")
+    assert [(r["business_date"], r["status"], r["stage"]) for r in fake.runs()] == [
+        (D2, "failed", "factor"),
+        (D3, "succeeded", None),
+    ]
+
+
+def test_factor_nan_is_failure(monkeypatch, capsys):
+    def nan_rows(*args, **kwargs):
+        return jscc_factor.FactorResult(rows=[{"forward": float("nan")}], fitted=0)
+
+    monkeypatch.setattr(jscc_factor, "factor_rows", nan_rows)
+    fake = FakeJscc(days=(D3,))
+    result = sync(fake)
+    assert [(d.status, d.stage) for d in result.days] == [("failed", "factor")]
+    assert fake.loads == []
+
+
+def test_factor_deadline(monkeypatch, capsys):
+    real = jscc_factor.factor_rows
+
+    def late(*args, **kwargs):
+        monkeypatch.setattr(settings, "MIN_REMAINING_SECONDS", 10**9)  # 当てはめの途中で期限
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(jscc_factor, "factor_rows", late)
+    fake = FakeJscc(days=(D3,))
+    result = sync(fake)
+    assert [(d.status, d.stage) for d in result.days] == [("failed", "deadline")]
+    [err] = failures(logs(capsys))
+    assert err["detail"] == "deadline_exceeded at jscc_factor"
+    assert fake.loads == []
+
+
+@pytest.mark.parametrize(
+    "error", [QueryFailed("HTTP 403"), CalendarDataError("取引カレンダーの版が無い"), CalendarDataError("x")]
+)
+def test_calendar_failure_stops(error, capsys):
+    fake = FakeJscc()
+    fake.calendar_error = error
+    result = sync(fake)
+    assert result.outcome == "failed" and result.days == []
+    assert not [c for c in fake.calls if c[0] in ("download", "load", "append")]
+    [err] = failures(logs(capsys))
+    assert err["stage"] == "calendar"
+    assert jscc_sync.main([], deps=fake.deps()) == 1
+
+
+def test_calendar_not_read_when_nothing_to_do(capsys):
+    fake = FakeJscc(succeeded={D2, D3})
+    assert sync(fake).outcome == "nothing"
+    assert ("calendar",) not in fake.calls
+
+
+def test_calendar_outdated_warning(capsys):
+    fake = FakeJscc()
+    fake.covered_until = date(2026, 11, 26)  # D3 + 7 日より前
+    result = sync(fake)
+    assert result.outcome == "ok"
+    [warn] = [r for r in logs(capsys) if r["event"] == "jscc_calendar_outdated"]
+    assert warn["severity"] == "WARNING" and warn["covered_until"] == "2026-11-26"
+
+
+def test_dry_run_fits_but_does_not_write(capsys):
+    _, bpf = factor_bpf()
+    fake = FakeJscc(days=(D3,), bpfs={D3: bpf})
+    result = sync(fake, dry_run=True)
+    assert [d.status for d in result.days] == ["dry_run"]
+    assert result.days[0].stats["rows_factor_fitted"] == 1
+    assert not [c for c in fake.calls if c[0] in ("load", "append")]
+    assert ("calendar",) in fake.calls  # 読み取りは dry-run でも
+
+
+def test_manual_rerun_replaces_same_partitions():
+    """--date の再実行: 4 表とも同じ営業日のパーティションへ（置き換え。ロードは WRITE_TRUNCATE）"""
+    _, bpf = factor_bpf()
+    fake = FakeJscc(days=(D3,), bpfs={D3: bpf}, succeeded={D3})
+    sync(fake, dates=[D3])
+    sync(fake, dates=[D3])
+    loads = [(x["table"], x["partition"]) for x in fake.loads]
+    assert loads[:4] == loads[4:] and {p for _, p in loads} == {D3} and len(set(loads)) == 4
+    first, second = fake.loads[3]["rows"], fake.loads[7]["rows"]
+    assert first[0]["jscc_run_id"] != second[0]["jscc_run_id"]
+    assert [r["g"] for r in first] == [r["g"] for r in second]  # 同じファイルなら同じ値（冪等）
+
+
+def test_factor_logs_have_no_values(capsys):
+    month, bpf = factor_bpf(F0=48765.0)
+    fake = FakeJscc(days=(D3,), bpfs={D3: bpf})
+    sync(fake)
+    out = capsys.readouterr().out
+    assert "48765" not in out
+    for inst in month.instruments:
+        assert inst.price not in out
+
+
+def test_ndjson_rejects_nan():
+    out = jscc_sync._Ndjson()
+    with pytest.raises(ValueError):
+        out.write({"x": float("inf")})
+    out.close()
+
+
+class FakeCalendarQuery:
+    def __init__(self, values):
+        self.values = values
+
+    def query(self, sql, params, timeout):
+        return self.values
+
+
+def test_load_calendar_without_version():
+    with pytest.raises(CalendarDataError):
+        jscc_sync.load_calendar(FakeCalendarQuery([]), "p", "d", 30)
+
+
+def test_load_calendar_uses_all_rows(monkeypatch):
+    """休業日も祝日取引の日（is_trading_day = true）も営業日でない（#149 の現物の営業日と同じ）"""
+    from optionchan_ingest import jpx_calendar as jc
+
+    rows = (
+        jc.DayRow(date(2026, 11, 23), False, "CONFIRMED", "holiday", "勤労感謝の日", None, "jpx"),
+        jc.DayRow(date(2027, 1, 11), True, "CONFIRMED", "holiday", "成人の日", None, "jpx"),
+    )
+    version = jc.Version(rows, date(2027, 6, 30), date(2027, 12, 31))
+    loaded = jc.LoadedVersion(datetime(2026, 11, 1, tzinfo=UTC), version, "auto")
+    monkeypatch.setattr(jscc_sync.calendar_sync, "load_latest", lambda *args: loaded)
+    holidays, covered = jscc_sync.load_calendar(FakeCalendarQuery([]), "p", "d", 30)
+    assert holidays == frozenset({date(2026, 11, 23), date(2027, 1, 11)})
+    assert covered == date(2027, 6, 30)

@@ -36,13 +36,14 @@ NEW_DOCS = ('README.md', 'docs/setup.md', 'docs/data.md', 'docs/viewer.md', 'doc
 PATH_PREFIXES = ('apps/', 'sql/', 'infra/', 'schema/', 'monitoring/', 'docs/', 'tests/', '.github/', '.claude/')
 # data.md の表の拾い方が壊れて 0 件で通らないように、拾った名前に含まれるべきもの
 KNOWN_TABLES = {'option_price', 'atm_cm_iv', 'latest_runs', 'trading_calendar_latest', 'atm_mid_iv', 'option_price_hourly',
-                'jscc_var_scenario'}
+                'jscc_var_scenario', 'jscc_var_scenario_factor'}
 SCHEMAS = (
     'schema/tokyo/option_price.json', 'schema/tokyo/future_price.json', 'schema/tokyo/spot_price.json',
     'schema/tokyo/ingest_runs.json', 'schema/tokyo/trading_calendar.json', 'schema/ohlc/atm_ohlc.json',
     'schema/cm/atm_cm_iv.json', 'schema/tokyo/option_price_hourly.json',
     'schema/tokyo/jscc_var_scenario.json', 'schema/tokyo/jscc_var_scenario_set.json',
     'schema/tokyo/jscc_var_parameter.json', 'schema/tokyo/jscc_ingest_runs.json',
+    'schema/tokyo/jscc_var_scenario_factor.json',
 )
 RUNBOOK_MIN_SECTIONS = 18
 EMAIL_RE = re.compile(r'[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}')

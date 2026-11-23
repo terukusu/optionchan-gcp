@@ -92,6 +92,7 @@ JSCC_TABLES = {
     "jscc_var_scenario_set": "business_date",
     "jscc_var_parameter": "business_date",
     "jscc_ingest_runs": "business_date",
+    "jscc_var_scenario_factor": "business_date",
 }
 
 
@@ -123,3 +124,54 @@ def test_jscc_scenario_columns():
     scenario_set = {s["name"]: s for s in load(NEW / "jscc_var_scenario_set.json")}
     assert scenario_set["scenarios"]["type"] == "RECORD" and scenario_set["scenarios"]["mode"] == "REPEATED"
     assert [f["name"] for f in scenario_set["scenarios"]["fields"]] == ["scenario_id", "scenario_type"]
+
+
+# シナリオの r・g（#168）。列・型・モードは依頼元（option-simulator #387）と合意した公開インターフェース。
+# 変えるときは読み手と合意してから（列の追加は NULLABLE で末尾に）
+JSCC_FACTOR = [
+    ("business_date", "DATE", "REQUIRED"),
+    ("file_version", "STRING", "REQUIRED"),
+    ("jscc_run_id", "STRING", "REQUIRED"),
+    ("product_code", "STRING", "REQUIRED"),
+    ("contract_period_code", "STRING", "REQUIRED"),
+    ("forward_source", "STRING", "REQUIRED"),
+    ("forward", "FLOAT", "REQUIRED"),
+    ("t_years", "FLOAT", "REQUIRED"),
+    ("horizon_days", "INTEGER", "REQUIRED"),
+    ("rate", "FLOAT", "REQUIRED"),
+    ("atm_iv", "FLOAT", "NULLABLE"),
+    ("nodes", "FLOAT", "REPEATED"),
+    ("r", "FLOAT", "REPEATED"),
+    ("g", "FLOAT", "REPEATED"),
+    ("n_fit", "INTEGER", "NULLABLE"),
+    ("fit_rmse", "FLOAT", "NULLABLE"),
+    ("check_n", "INTEGER", "NULLABLE"),
+    ("check_median_rel", "FLOAT", "NULLABLE"),
+    ("check_p90_rel", "FLOAT", "NULLABLE"),
+]
+
+
+def test_jscc_factor_contract():
+    schema = load(NEW / "jscc_var_scenario_factor.json")
+    assert [(c["name"], c["type"], c["mode"]) for c in schema] == JSCC_FACTOR
+
+
+def test_jscc_ingest_runs_factor_columns_appended():
+    """#168 の 2 列は末尾に NULLABLE で（既存の列の順・型は変えない）"""
+    schema = load(NEW / "jscc_ingest_runs.json")
+    assert [(c["name"], c["type"], c["mode"]) for c in schema[-2:]] == [
+        ("rows_factor", "INTEGER", "NULLABLE"),
+        ("rows_factor_fitted", "INTEGER", "NULLABLE"),
+    ]
+    assert [c["name"] for c in schema[:10]] == [
+        "jscc_run_id",
+        "business_date",
+        "file_version",
+        "trigger",
+        "execution",
+        "status",
+        "stage",
+        "detail",
+        "started_at",
+        "finished_at",
+    ]

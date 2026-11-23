@@ -345,7 +345,13 @@ def test_option_price_hourly_table():
 
 # ---- JSCC の VaR パラメータ（#164） ----
 
-JSCC_TABLES = ('jscc_var_scenario', 'jscc_var_scenario_set', 'jscc_var_parameter', 'jscc_ingest_runs')
+JSCC_TABLES = ('jscc_var_scenario', 'jscc_var_scenario_set', 'jscc_var_parameter', 'jscc_ingest_runs',
+               'jscc_var_scenario_factor')
+# require_partition_filter とクラスタの列（それ以外の表はどちらも無し）
+JSCC_CLUSTERED = {
+    'jscc_var_scenario': ['product_code', 'contract_period_code', 'put_call_type', 'strike_price'],
+    'jscc_var_scenario_factor': ['contract_period_code'],
+}
 
 
 def test_jscc_resources():
@@ -372,10 +378,10 @@ def test_jscc_resources():
             columns = {c['name']: c for c in json.load(f)}
         assert columns['business_date']['type'] == 'DATE', name
         clustering = re.search(r'clustering\s+= \[([^\]]*)\]', table)
-        if name == 'jscc_var_scenario':
+        if name in JSCC_CLUSTERED:
             assert 'require_partition_filter = true' in table
             cols = re.findall(r'"([^"]+)"', clustering.group(1))
-            assert cols == ['product_code', 'contract_period_code', 'put_call_type', 'strike_price']
+            assert cols == JSCC_CLUSTERED[name]
             assert all(c in columns for c in cols)
         else:
             assert 'require_partition_filter' not in table and clustering is None, name
@@ -391,6 +397,9 @@ def test_jscc_resources():
     assert 'deletion_protection = false' in job
     # 引数は付けない（引数なし = 未取り込みの日）
     assert 'args' not in job
+    # 表（列の追加を含む）をイメージの更新より先に
+    depends = re.search(r'resource "google_cloud_run_v2_job" "jscc_sync" \{.*?depends_on = \[(.*?)\]', tf, re.S).group(1)
+    assert sorted(re.findall(r'google_bigquery_table\.(\w+)', depends)) == sorted(JSCC_TABLES)
 
     iam = re.search(r'resource "google_cloud_run_v2_job_iam_member" "jscc_sync_scheduler_invoker" \{(.*?)\n\}', tf, re.S)
     body = iam.group(1)

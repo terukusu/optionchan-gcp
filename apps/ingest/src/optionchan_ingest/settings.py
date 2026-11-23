@@ -192,7 +192,7 @@ JSCC_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; optionchan-ingest)"}
 JSCC_FILE_VERSION = "1600"
 JSCC_PRODUCT_GROUP = "NK225"
 # 自動の実行（引数なし）が対象にする最初の営業日。これ以降で jscc_ingest_runs に succeeded の行が無い日を古い順に
-# 1 回最大 JSCC_MAX_DATES_PER_RUN 日（1 日 約 3 分。手元の実測は CPU 約 130 秒）
+# 1 回最大 JSCC_MAX_DATES_PER_RUN 日（1 日 約 6〜8 分。#168 の当てはめを含む）
 JSCC_START_DATE = date(2026, 11, 16)
 JSCC_MAX_DATES_PER_RUN = 5
 # ジョブの期限（タスクのタイムアウト 3600 秒より前に止める）と、1 日を始める残り時間の下限
@@ -230,6 +230,23 @@ JSCC_SCENARIO_TABLE = "jscc_var_scenario"
 JSCC_SCENARIO_SET_TABLE = "jscc_var_scenario_set"
 JSCC_PARAMETER_TABLE = "jscc_var_parameter"
 JSCC_RUNS_TABLE = "jscc_ingest_runs"
+# シナリオの r・g の当てはめ（#168。jscc_factor.py、data.md「JSCC のシナリオの r・g の当てはめ（#168）」）。
+# ロードは上の 3 表の後（取り込みの記録の前）
+JSCC_FACTOR_TABLE = "jscc_var_scenario_factor"
+# 当てはめる OP の商品（月次の大型 + 週次の金曜 W1〜W4・水曜 C1〜C4）と、F₀ を取る先物（前ほど優先）
+JSCC_FACTOR_MONTHLY_PRODUCT = "NK225E"
+JSCC_FACTOR_PRODUCTS = frozenset(
+    {JSCC_FACTOR_MONTHLY_PRODUCT, *(f"NK225W{n}" for n in range(1, 5)), *(f"NK225C{n}" for n in range(1, 5))}
+)
+JSCC_FACTOR_FUTURES = ("NK225F", "NK225MF", "NK225MCF")
+# 割引の金利（rate の列に記録）、h（営業日から何営業日後までの暦日）、使う OP の清算値段の下限（円）と最少の本数
+JSCC_FACTOR_RATE = 0.005
+JSCC_FACTOR_HORIZON_BUSINESS_DAYS = 2
+JSCC_FACTOR_MIN_PRICE = 5.0
+JSCC_FACTOR_MIN_OPTIONS = 5
+# g の折れ線の節点（z）とリッジの係数
+JSCC_FACTOR_NODES = (-5.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0)
+JSCC_FACTOR_RIDGE = 1e-4
 
 
 @dataclass(frozen=True)

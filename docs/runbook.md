@@ -3696,12 +3696,13 @@ JSCC（日本証券クリアリング機構）が公開する VaR 証拠金計�
 | Cloud Scheduler `jscc-sync` | 平日 18:30 JST（`30 18 * * 1-5`、`Asia/Tokyo`）。Cloud Run Admin API の `jobs/jscc-sync:run` を `sa-scheduler` の OAuth トークンで呼ぶ。リトライ 0 | `infra/prod/jscc.tf` |
 | Cloud Run ジョブ `jscc-sync` | ingest のイメージ、`python -m optionchan_ingest.jscc_sync`。SA `sa-ingest`、CPU 1・メモリ 1Gi、タスクのタイムアウト 3600 秒、リトライ 0 | 同上 |
 | 起動の権限 | `sa-scheduler` にジョブ `jscc-sync` の `roles/run.invoker`（ジョブ単位） | 同上 |
-| 表 | `optionchan_tokyo` の `jscc_var_scenario`・`jscc_var_scenario_set`・`jscc_var_parameter`・`jscc_ingest_runs`（営業日の日パーティション、削除の保護） | 同上・`schema/tokyo/jscc_*.json` |
+| 表 | `optionchan_tokyo` の `jscc_var_scenario`・`jscc_var_scenario_set`・`jscc_var_parameter`・`jscc_var_scenario_factor`（#168）・`jscc_ingest_runs`（営業日の日パーティション、削除の保護） | 同上・`schema/tokyo/jscc_*.json` |
+| 取引カレンダー | 日の処理の前に `trading_calendar_latest` を 1 回読む（#168 の SQ・h の営業日。休業日・祝日取引の日は営業日でない） | `jscc_sync.load_calendar` |
 | 取得元 | `jscc-h.jpx.co.jp` の `listed-derivatives/weekday/`・`im/` の `index.html`（直近 5 営業日）と `archive.html`（それより前。2023-07-31〜） | `apps/ingest/src/optionchan_ingest/settings.py` の `JSCC_*` |
 | 取り込む日・量 | 自動は `JSCC_START_DATE`（2026-11-16）以降で `jscc_ingest_runs` に成功の行が無い日を古い順に 1 回最大 5 日。期限 3300 秒、残り 900 秒未満なら次の日に入らない | 同上 |
 
-- 1 日の処理（`apps/ingest/src/optionchan_ingest/jscc_sync.py`）: 1600 版の `VaRParameter`・`All-Instruments-VaR` を取得 → `BPF_IDX` の zip（約 120MB）を一時ファイルに落とし、展開せずに CSV を順に読んで NK225 の銘柄だけを残す → 1 枚の売り・買いの証拠金を計算して `All-Instruments-VaR` と照合 → `jscc_var_parameter` → `jscc_var_scenario_set` → `jscc_var_scenario` をロードジョブでパーティションごと置き換え → `jscc_ingest_runs` に `succeeded` を追記 → NOTICE `jscc_ingested`
-- 3 表は別々のロードなので、途中で失敗するとその日の表の中身がずれうる。読み手は `jscc_ingest_runs` が `succeeded` の日だけを使う。失敗した日は次の実行（翌平日、または手動）が取り直す（置き換えなので重複しない）
+- 1 日の処理（`apps/ingest/src/optionchan_ingest/jscc_sync.py`）: 1600 版の `VaRParameter`・`All-Instruments-VaR` を取得 → `BPF_IDX` の zip（約 120MB）を一時ファイルに落とし、展開せずに CSV を順に読んで NK225 の銘柄だけを残す → 1 枚の売り・買いの証拠金を計算して `All-Instruments-VaR` と照合（当てはめに要る銘柄 = 先物と対象の OP の清算値段 1 円超を残す）→ 限月ごとのシナリオの r・g を当てはめる（#168。[data.md](data.md) の「JSCC のシナリオの r・g の当てはめ（#168）」。ロードの前なので、ここで失敗した日はどの表も置き換えない）→ `jscc_var_parameter` → `jscc_var_scenario_set` → `jscc_var_scenario` → `jscc_var_scenario_factor` をロードジョブでパーティションごと置き換え → `jscc_ingest_runs` に `succeeded` を追記 → NOTICE `jscc_ingested`（`rows_factor`・`rows_factor_fitted`・`factor_seconds`・`max_rss_mb`・`factor_skipped_weekly`・`factor_empty_scenarios` を含む）
+- 4 表は別々のロードなので、途中で失敗するとその日の表の中身がずれうる。読み手は `jscc_ingest_runs` が `succeeded` の日だけを使う。失敗した日は次の実行（翌平日、または手動）が取り直す（置き換えなので重複しない）
 - 祝日の平日は新しいファイルが無く、INFO `jscc_nothing_to_do` で終わる（行を作らない）
 - 表は JSCC のファイルの中身なので**公開しない**（JSCC のサイト利用案内は無断転用・複製・再配布を禁じている）。ファイルの中身・切り出しをリポジトリ・Issue・PR に置かない。GCS には生のファイルを保存しない（archive から取り直せる）
 
@@ -3725,8 +3726,24 @@ gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--date=
 gcloud run jobs execute jscc-sync --region $L --project $P --wait
 ```
 
-- 1 日の処理の時間は手元の実測で CPU 約 3 分（1 vCPU で 1 日 3〜5 分の見込み）。初回の実行のログの `elapsed_seconds` を見て、1 回の最大日数（`JSCC_MAX_DATES_PER_RUN`）・期限が足りるか確かめる
+- 1 日の処理の時間は手元の実測で CPU 約 3 分（1 vCPU で 1 日 3〜5 分の見込み）。#168 の当てはめで 1 日 数分増える（下の「#168 のデプロイ後」）。初回の実行のログの `elapsed_seconds` を見て、1 回の最大日数（`JSCC_MAX_DATES_PER_RUN`）・期限が足りるか確かめる
 - ロードは NDJSON の gzip（1 日 約 31MB）を送る。ロードが `stage=load` で失敗し、`detail` が圧縮の形式の誤りなら、まず `gcloud run jobs execute jscc-sync --region asia-northeast1 --project "$P" --wait --update-env-vars=JSCC_LOAD_GZIP=0 --args=--date=<YYYY-MM-DD>` で非圧縮（約 138MB/日）を 1 回試す。通れば `infra/prod/jscc.tf` のジョブに環境変数 `JSCC_LOAD_GZIP=0` を足す PR を出す。`detail` には BigQuery のエラー文（行の値を含みうる）を入れず、理由・位置・ジョブ ID だけを記録するので、詳しくは `bq show -j --location=asia-northeast1 <ジョブ ID>` で見る
+
+### #168 のデプロイ後
+
+apply（表 `jscc_var_scenario_factor` の作成・`jscc_ingest_runs` の列 2 つの追加 → ジョブの更新の順。`depends_on`）の後、取り込み済みの日を `--date` で取り直す（4 表とも同じ新しい `jscc_run_id` で置き換わる。中身は同じ 1600 版なので既存の 3 表は同じ値。置き換えの数分はシミュレーターが run_id の不一致を見うるので取引時間の外に流す）:
+
+```sh
+# 1. 書かずに 1 日。ログの jscc_ingested の rows_factor・rows_factor_fitted・factor_seconds・max_rss_mb・elapsed_seconds
+gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--dry-run,--date=2026-11-20
+# 2. 1 日だけ書く → 下の「確認」の Q3
+gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--date=2026-11-20
+# 3. 残りの取り込み済みの日（1 回最大 5 日の目安）
+gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--date=2026-11-16,--date=2026-11-17,--date=2026-11-18,--date=2026-11-19
+```
+
+- 当てはめは 1 日 約 4 万 × 1,422 回の IV の逆算などで、手元の見積もりは 1 vCPU で 1 日 約 4〜5 分（取り込みと合わせて 1 日 約 6 分）。1 回 5 日で期限 3300 秒に収まる見込み。手順 1 の `factor_seconds` が大きければ `JSCC_MAX_DATES_PER_RUN` を下げる
+- メモリは残す銘柄の分（最大 約 130MiB）が増える。`max_rss_mb` が 1Gi に近ければジョブのメモリを上げる
 
 ### 確認
 
@@ -3743,12 +3760,25 @@ FROM `optionchan_tokyo.jscc_var_scenario` WHERE business_date BETWEEN "2026-11-1
 bq query --location=$L --use_legacy_sql=false --format=pretty '
 SELECT business_date, trigger, status, stage, rows_scenario, scenarios, margin_matched, margin_mismatched, margin_ref_only, finished_at
 FROM `optionchan_tokyo.jscc_ingest_runs` WHERE business_date >= "2026-11-16" ORDER BY business_date, started_at'
+# Q3: r・g の表（#168）が最新の succeeded と同じ run_id で、限月がそろっているか（値は貼らない）
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+WITH latest AS (
+  SELECT business_date, ARRAY_AGG(jscc_run_id ORDER BY finished_at DESC LIMIT 1)[OFFSET(0)] AS rid
+  FROM `optionchan_tokyo.jscc_ingest_runs`
+  WHERE business_date >= "2026-11-16" AND status = "succeeded" AND file_version = "1600" GROUP BY 1
+),
+f AS (SELECT * FROM `optionchan_tokyo.jscc_var_scenario_factor` WHERE business_date >= "2026-11-16")
+SELECT l.business_date, COUNT(f.jscc_run_id) AS n_rows, COUNTIF(f.jscc_run_id = l.rid) AS same_run,
+  COUNTIF(ARRAY_LENGTH(f.g) > 0) AS fitted, COUNTIF(f.check_median_rel IS NOT NULL) AS has_check,
+  COUNTIF(f.product_code = "NK225E") AS nk225e
+FROM latest AS l LEFT JOIN f USING (business_date) GROUP BY 1 ORDER BY 1'
 # Scheduler
 gcloud scheduler jobs describe jscc-sync --location $L --project $P --format='value(schedule,timeZone,state)'
 ```
 
 - Q1: `full_len = n`・`d = n`。1,422 はシナリオの本数（H 1,250 + S 172。2026-11 時点。変われば Q2 の `scenarios` と同じなら正常）
 - Q2: `margin_mismatched = 0`、`margin_matched = 2 × (rows_scenario − margin_bpf_only)`。`margin_ref_only`（All-Instruments-VaR にだけある銘柄。翌日に新しくできる銘柄で 1600 版の BPF に入らない）は 0〜数件が普通
+- Q3: 各日 `n_rows > 0`・`same_run = n_rows`・`nk225e` = その日の `NK225E` の限月数（Q1 を `product_code = "NK225E"` で限月ごとに数える）・`has_check > 0`。`fitted` が `nk225e` より少ないのは SQ が 2 営業日以内の限月（g 空）。質（`check_median_rel`・`check_p90_rel` の分布）は手元で見るだけ
 - 手元の実測（2026-11-16〜20 の 1600 版）: 行数 12,055 / 12,105 / 12,025 / 12,087 / 11,967、照合の一致 24,110 / 24,210 / 24,050 / 24,174 / 23,934・不一致 0、`margin_ref_only` は 11-19・11-20 が 4
 
 ### ERROR を受けたとき
@@ -3759,10 +3789,14 @@ M2（「新しい取り込みの監視（#35）」）で届く。ジョブのロ
 |---|---|
 | `jscc_sync_failed`（`stage=list`） | 一覧のページが取れない（`url` に出る）か、4 ページとも形が違う。JSCC のサイトの障害なら翌平日に取り直される（取れたページの日は取り込まれる）。続くならページを開いて URL・リンクの形の変更を確かめ、`settings.JSCC_LIST_URLS`・`jscc.parse_listing` を直す PR |
 | `jscc_sync_failed`（`stage=query`） | 成功済みの日のクエリの失敗（権限・BigQuery の障害）。翌平日に再試行される |
+| `jscc_sync_failed`（`stage=calendar`） | 取引カレンダー（`trading_calendar_latest`）が読めない・版が無い・検査に通らない（#168）。日の処理に入らない。翌平日に再試行される。続くなら「取引カレンダー（#63）」の節でカレンダーの版を確かめる |
+| `jscc_sync_failed`（`stage=factor`） | r・g の当てはめの失敗（`detail` に例外の型。値は入れない）。その日はどの表も置き換えない（前の run のまま）。`jscc_factor.py` の想定外の入力を疑い、手元で `--dry-run --date` を流して直す PR（テストは合成で）。直るまで毎日同じ日が失敗する |
 | `jscc_sync_failed`（`stage=fetch_*`） | ファイルの取得の失敗（HTTP・タイムアウト・大きさの上限）。翌平日に archive から取り直される。急ぐなら手動で `--date` |
 | `jscc_sync_failed`（`stage=parse_*`） | ファイルの形が想定と違う（`detail` に行番号と理由）。JSCC の仕様の変更を疑い、ファイルを手元に落として `jscc.py` の解析を直す PR（ファイルはリポジトリに置かない。テストは `apps/ingest/tests/jsccgen.py` の合成で書く）。直るまで毎日同じ日が失敗する |
 | `jscc_sync_failed`（`stage=load` / `record`） | ロード・取り込みの記録の失敗（`detail` にジョブのエラー）。翌平日に取り直される（置き換えなので重複しない） |
 | `jscc_sync_failed`（`stage=deadline` / `unexpected`） | 期限切れ・想定外の例外。`detail` を見る。期限なら 1 回の日数を減らして手動で流す |
+| WARNING `jscc_factor_incomplete` | 月次の `NK225E`・先物の限月で行が無い・T₁ ≤ 0 以外の理由で g が空（`periods` に限月、`reasons` に理由ごとの件数: `no_parity`・`few_options`・`no_sq`・`nonfinite_*` など）。データは書かれている。続くなら [data.md](data.md) の当てはめの条件と BPF の銘柄を見比べ、シミュレーターに知らせる |
+| WARNING `jscc_calendar_outdated` | 取引カレンダーの確定の範囲（`covered_until`）が営業日 + 7 日より前。SQ・h が土日だけで決まりうる。「取引カレンダー（#63）」の節の版の更新を確かめる（止めない） |
 | `jscc_margin_mismatch` | 計算した 1 枚の証拠金が All-Instruments-VaR と合わない（`codes` に銘柄コードを最大 20 件）。データは書かれている（`status = succeeded`）。JSCC の計算方法の変更か、取り込みの誤り。下のクエリで銘柄の値と JSCC の値を見比べ、[data.md](data.md) の計算（`apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`）を見直す。読み手（simulator）に知らせる |
 | Scheduler の失敗（`cloud_scheduler_job` の `jscc-sync`） | ジョブを起動できない（`PERMISSION_DENIED` なら `infra/prod/jscc.tf` の起動の権限）。翌平日に取り直される |
 
@@ -3799,7 +3833,7 @@ gcloud scheduler jobs resume jscc-sync --location $L --project $P   # 再開。�
 
 ### 費用
 
-- ストレージ: `jscc_var_scenario` が論理 約 140MB/日（物理はこのデータセットの課金方式で圧縮後 約 30〜40MB/日の見込み）→ 1 年 約 8〜10GB
+- ストレージ: `jscc_var_scenario_factor` が論理 約 6MB/日（#168）。`jscc_var_scenario` が論理 約 140MB/日（物理はこのデータセットの課金方式で圧縮後 約 30〜40MB/日の見込み）→ 1 年 約 8〜10GB
 - ジョブ: 1 日 1 回 数分（1 vCPU・1Gi）。Cloud Run の無料枠に月 約 5 千 vCPU 秒が加わる
 - Scheduler: 4 本目なので月 $0.10（無料枠は 3 本。旧系の 2 本が #24 で消えた後は枠に戻る）
 - ロードは無料。取り込みのクエリ（成功済みの日の一覧）は数 KB

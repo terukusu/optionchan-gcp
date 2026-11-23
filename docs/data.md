@@ -64,10 +64,11 @@
 | `jscc_var_scenario` | JSCC の VaR 証拠金計算用パラメータファイル（BPF_IDX 1600 版）の日経225（NK225）の銘柄ごとのシナリオの値（#164。非公開。シミュレーターが読む） | 営業日 × 版 × 銘柄 | 日（`business_date`。DATE）。**`require_partition_filter = true`** | `product_code`・`contract_period_code`・`put_call_type`・`strike_price` | ジョブ `jscc-sync`（Scheduler で平日 18:30 JST、手動も可）。営業日のパーティションごと置き換え |
 | `jscc_var_scenario_set` | 同じ日のシナリオの並び（`jscc_var_scenario.pnl` の添字の意味） | 営業日 × 版 | 日（`business_date`） | なし | 同上 |
 | `jscc_var_parameter` | 同じ日の VaRParameter の全行（Aggregation Group ごとの信頼水準・ストレスの本数・相殺の係数） | 営業日 × 版 × ファイルの 1 行 | 日（`business_date`） | なし | 同上 |
+| `jscc_var_scenario_factor` | 同じ日のシナリオから当てはめた限月ごとの先物のリターン r と IV の対数変化 g(z)（#168。非公開。シミュレーターが読む） | 営業日 × 版 × 商品 × 限月 | 日（`business_date`）。**`require_partition_filter = true`** | `contract_period_code` | 同上（同じ取り込みで BPF から作る） |
 | `jscc_ingest_runs` | JSCC の取り込みの記録（成功・失敗・行数・All-Instruments-VaR との照合の件数。追記のみ） | 取り込み 1 回 × 営業日 | 日（`business_date`） | なし | 同上 |
 | `dc_future_tick` | J-Quants DataCube の日経225先物（ラージ）の歩み値（同上） | 約定 1 件 | 月（`trade_date`）。`require_partition_filter = true` | `contract_month` | 所有者が月ごとに `bq load --replace`（runbook の「DataCube の歩み値での行の作成（#114）」） |
 
-- JSCC の 4 表のパーティションは DATE の列（`business_date`。JSCC の営業日）なので UTC の日ではない。JSCC のファイルの中身なので公開しない（JSCC のサイト利用案内は無断転用・複製・再配布を禁じている）。読み方は下の「JSCC の VaR パラメータの読み方（#164）」
+- JSCC の 5 表のパーティションは DATE の列（`business_date`。JSCC の営業日）なので UTC の日ではない。JSCC のファイルの中身なので公開しない（JSCC のサイト利用案内は無断転用・複製・再配布を禁じている）。読み方は下の「JSCC の VaR パラメータの読み方（#164）」
 - 定期クエリの時刻・窓は `infra/prod/sq.tf` の冒頭のコメントと各 SQL の冒頭が正。スケジュールは UTC で書いてある（JST − 9 時間）
 - `quality_daily`・`legacy_compare_daily`・`dc_option_tick`・`dc_future_tick` はデータを読む人向けではない（品質・移行・穴埋めの記録）。DataCube の 2 表は自己使用のライセンスのデータで、値を第三者へ渡さない・公開しない。自分の環境で作った場合は空（`docs/setup.md` の手順では入れない）
 - 取り込みの 4 表には、新系の取り込みの行のほかに、旧系から移した過去の行（`ingest_run_id` が `legacy-` で始まり、`ingest_runs.trigger = legacy_import`。#12）と、DataCube の歩み値から作った行（`ingest_run_id` が `legacy-fill114-` で始まる。#114）がある。どちらも最新版のテーブル関数で同じように読める
@@ -255,7 +256,7 @@
 - #114 で DataCube の歩み値から作った行（気配が NULL）の時間は、中値・終値の気配の列が NULL で約定の列だけが入る
 - 窓は毎時 :45 の回が直近の増分、07:45 JST の回が前日 07:00〜当日 07:00 JST を置き換える（runbook の「銘柄ごとの 1 時間足（#161）」）
 
-### JSCC の VaR パラメータ（jscc_var_scenario・jscc_var_scenario_set・jscc_var_parameter・jscc_ingest_runs）
+### JSCC の VaR パラメータ（jscc_var_scenario・jscc_var_scenario_set・jscc_var_parameter・jscc_var_scenario_factor・jscc_ingest_runs）
 
 列の正は `schema/tokyo/jscc_*.json`（#164）。どの表も先頭の 3 列は `business_date`（DATE REQUIRED。JSCC の営業日 = ファイル名の YYYYMMDD。パーティションの列）・`file_version`（STRING REQUIRED。今は `1600` だけ）・`jscc_run_id`（STRING REQUIRED。書いた取り込みの ID = `jscc_ingest_runs.jscc_run_id`）。
 
@@ -282,7 +283,27 @@
 
 `jscc_var_parameter`（1 行 = VaRParameter の 1 行。他の商品の行も全部）: `line_no`（INTEGER REQUIRED。ファイルの中の順）、`record_id`（INTEGER REQUIRED。0 = VAR / 1 = HSRATIO / 2 = ASRATIO）、`record_name`・`level`・`aggregation_group`（STRING REQUIRED）、`parent_aggregation_group`・`type`（STRING NULLABLE。レコード 1・2）、`confidence_level`（FLOAT NULLABLE。% 表記の信頼水準、レコード 0）、`stress_scenario_number`（INTEGER NULLABLE。ストレスのうち損失の大きい方から使う本数、レコード 0）、`params`（RECORD REPEATED。`name` STRING REQUIRED・`value` FLOAT REQUIRED。レコード 1・2 の係数）。
 
-`jscc_ingest_runs`（1 行 = 取り込みの実行 × 営業日。追記のみ）: `jscc_run_id`（STRING REQUIRED）、`business_date`、`file_version`、`trigger`（STRING REQUIRED。`auto` = 引数なしの実行が選んだ日 / `manual` = `--date` の指定）、`execution`（STRING NULLABLE。Cloud Run ジョブの実行名）、`status`（STRING REQUIRED。`succeeded` / `failed`）、`stage`・`detail`（STRING NULLABLE。失敗の段階と理由）、`started_at`・`finished_at`（TIMESTAMP REQUIRED）、`rows_scenario`・`rows_parameter`・`scenarios`・`scenarios_h`・`scenarios_s`・`margin_matched`・`margin_mismatched`・`margin_ref_only`・`margin_bpf_only`・`bpf_bytes`（INTEGER NULLABLE。行数・シナリオの本数・照合の件数（売り・買いを別々に数える）・All-Instruments-VaR にだけある銘柄の数・BPF にだけある銘柄の数・zip の大きさ）。
+`jscc_var_scenario_factor`（1 行 = 営業日 × 版 × 商品 × 限月。(`product_code`, `contract_period_code`) は 1 日 1 版で一意。作り方は下の「JSCC のシナリオの r・g の当てはめ（#168）」）:
+
+| 列 | 型 | モード | 説明 |
+|---|---|---|---|
+| `product_code` | STRING | REQUIRED | `NK225E`（月次の OP の限月）・`NK225W1`〜`W4`（金曜の週次）・`NK225C1`〜`C4`（水曜の週次）。OP の無い先物だけの限月はその先物の商品（`NK225F` など） |
+| `contract_period_code` | STRING | REQUIRED | 限月（月次・先物は `YYYYMM`、週次は `YYYYMMn` の 7 桁）。クラスタの列 |
+| `forward_source` | STRING | REQUIRED | F₀・F′ の出どころ。`NK225F` / `NK225MF` / `NK225MCF`（同じ限月の先物。この順に優先）/ `parity`（プットコール・パリティ。先物の無い月次の限月と週次） |
+| `forward` | FLOAT | REQUIRED | F₀（基準の先物の値段。円） |
+| `t_years` | FLOAT | REQUIRED | T₀ =（SQ の 09:00 − 営業日の 15:45）/ 365 日 |
+| `horizon_days` | INTEGER | REQUIRED | h（営業日から 2 営業日後までの暦日）。シナリオ後の残存 T₁ = T₀ − h / 365 |
+| `rate` | FLOAT | REQUIRED | Black-76 の割引の金利（今は 0.005） |
+| `atm_iv` | FLOAT | NULLABLE | σ_ATM,0（z の尺度）。使う OP が無い・先物だけの限月は NULL |
+| `nodes` | FLOAT | REPEATED | g の折れ線の z の節点（13 個の昇順）。g が空なら空 |
+| `r` | FLOAT | REPEATED | 先物のリターン r_j = ln(F′_j / F₀)。長さ = シナリオの本数、添字は `jscc_var_scenario.pnl` と同じ |
+| `g` | FLOAT | REPEATED | IV の対数変化の折れ線の節点の値。シナリオ j・節点 m が `g[j*13 + m]`（長さ = 13 × シナリオの本数）。当てはめられない限月は空 |
+| `n_fit` | INTEGER | NULLABLE | 当てはめに使った OP の数。g が空なら NULL |
+| `fit_rmse` | FLOAT | NULLABLE | 当てはめに使った全点の ln σ の残差の RMS。g が空なら NULL |
+| `check_n` | INTEGER | NULLABLE | 照合した OP の数（使う OP のうち `margin_short_jscc` があるもの）。g が空なら NULL |
+| `check_median_rel` / `check_p90_rel` | FLOAT | NULLABLE | 基準の状態で当て直した 1 枚の売りの ES と `margin_short_jscc` の相対誤差の中央値・90 パーセンタイル（線形補間）。`check_n` が 0・NULL なら NULL |
+
+`jscc_ingest_runs`（1 行 = 取り込みの実行 × 営業日。追記のみ）: `jscc_run_id`（STRING REQUIRED）、`business_date`、`file_version`、`trigger`（STRING REQUIRED。`auto` = 引数なしの実行が選んだ日 / `manual` = `--date` の指定）、`execution`（STRING NULLABLE。Cloud Run ジョブの実行名）、`status`（STRING REQUIRED。`succeeded` / `failed`）、`stage`・`detail`（STRING NULLABLE。失敗の段階と理由）、`started_at`・`finished_at`（TIMESTAMP REQUIRED）、`rows_scenario`・`rows_parameter`・`scenarios`・`scenarios_h`・`scenarios_s`・`margin_matched`・`margin_mismatched`・`margin_ref_only`・`margin_bpf_only`・`bpf_bytes`（INTEGER NULLABLE。行数・シナリオの本数・照合の件数（売り・買いを別々に数える）・All-Instruments-VaR にだけある銘柄の数・BPF にだけある銘柄の数・zip の大きさ）、`rows_factor`・`rows_factor_fitted`（INTEGER NULLABLE。#168。`jscc_var_scenario_factor` に書いた行数とそのうち g が空でない行の数。それより前の行は NULL）。
 
 ## 時刻
 
@@ -401,7 +422,7 @@ ATM IV（その時点で `is_atm` の put の IV）は、原資産が動いて A
 
 JSCC が公開する VaR 証拠金計算用パラメータファイル（1600 版 = 清算値段の確定後）のうち日経225 の分を、毎平日 18:30 JST に取り込む（runbook の「JSCC の VaR パラメータ（#164）」）。2026-11-16 の営業日から。
 
-- **`jscc_ingest_runs` が `status = 'succeeded'` の日だけを使う**。1 日の 3 表は別々のロード（パーティションの置き換え）なので、失敗した日は表の間で中身がずれていることがある。失敗した日は次の実行が取り直す
+- **`jscc_ingest_runs` が `status = 'succeeded'` の日だけを使う**。1 日の 4 表は別々のロード（パーティションの置き換え）なので、失敗した日は表の間で中身がずれていることがある。失敗した日は次の実行が取り直す
 - 1 日 1 版で銘柄は一意（置き換えなので、同じ日を取り直しても重複しない）
 - 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは清算値段 × `contract_size` を下回らない。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
 - ポートフォリオの証拠金は、銘柄ごとの v（向き × 枚数 × `pnl`。`pnl` は 1 枚あたりなので `contract_size` は掛けない）をシナリオごとに足してから同じ計算をする（相殺の制限・Aggregation Group をまたぐ計算は `jscc_var_parameter` のレコード 1・2 の係数を使う。ここでは扱わない）
@@ -470,6 +491,37 @@ SELECT i.instrument_code,
 FROM inst AS i
 JOIN es AS s ON s.instrument_code = i.instrument_code AND s.side = -1
 JOIN es AS l ON l.instrument_code = i.instrument_code AND l.side = 1
+```
+
+## JSCC のシナリオの r・g の当てはめ（#168）
+
+シミュレーターが JSCC のシナリオを「動かした先の状態」に当て直せるように、jscc-sync が同じ取り込みで BPF から限月ごとの先物のリターン r と IV の対数変化 g(z) を当てはめて `jscc_var_scenario_factor` に書く（ロードは他の 3 表の後、`jscc_ingest_runs` の `succeeded` の前。当てはめで失敗した日はどの表も置き換えない）。実装は `apps/ingest/src/optionchan_ingest/jscc_factor.py`（純 Python）。
+
+- **読み方**: `jscc_ingest_runs` の最新の `succeeded` の `jscc_run_id` と同じ行だけを使う（他の 3 表と同じ）。r・g の添字 j は同じ日の `jscc_var_scenario_set.scenarios` の添字
+- **対象**: 月次の `NK225E` の限月（同じ限月の先物 `NK225F` > `NK225MF` > `NK225MCF` があればその清算値段が F₀、無ければパリティ）、週次の `NK225W1`〜`W4`・`NK225C1`〜`C4`（いつもパリティ）、OP の無い先物だけの限月（r だけ。`product_code` = `forward_source` = その先物の商品で 1 行）
+- **値の意味**（`pnl` の説明と同じ。上の `jscc_var_scenario`）: 先物 F′_j = F₀ + `pnl_j` / `contract_size`（`pnl` は 1 枚の損益）、OP のシナリオ後の 1 単位の値 V′_ij = `pnl_ij` / `contract_size`（`pnl` は 1 枚の評価額）。r_j = ln(F′_j / F₀)
+- **パリティ**: 状態（基準と各シナリオ）ごとに、C・P がそろい両方の 1 単位の値が 1 円より大きい行使価格のうち |C − P| の小さい 3 本で F = K + (C − P) / e^{−rate·T} を求めた中央値（2 本・1 本ならその中央値・その値）。基準は清算値段と T₀、シナリオは V′ と max(T₁, 0)。基準か 1 本のシナリオでも組が無い限月は**行なし**（週次で T₁ ≤ 0 の限月は片側が 1 円の下限に張り付くので多くは行なし）
+- **時間**: 営業日 = 土日でなく `trading_calendar_latest` の行（休業日・祝日取引の日の両方）に無い日（上の「30 日固定の ATM IV の計算」の満期 T と同じ）。月次・先物の SQ = 第 2 金曜、週次は `YYYYMMn` の n 番目の金曜（W）/ 水曜（C）。営業日でなければ前の営業日。n 番目が月に無い・商品の数字と n が違う限月は行なし。T₀ =（SQ − 営業日の暦日 − 6.75/24）/ 365、h = 営業日から 2 営業日後までの暦日、T₁ = T₀ − h / 365。カレンダーの `listed_until` より後の SQ は土日だけで決まる（T₀ の誤差は数日 / 365）
+- **使う OP**: OTM（P は K ≤ F₀、C は K > F₀）・清算値段 5 円以上・清算値段から (F₀, T₀) で IV σ₀ が逆算できるもの。σ_ATM,0 = 使う OP の ln σ₀ を k = ln(K/F₀) の順に線形補間した k = 0 の値の exp（範囲の外は端の値）。z_i = k_i / (σ_ATM,0 √T₀)
+- **点**: y_ij = ln σ′_ij − ln σ₀_i。σ′_ij は V′_ij を (F′_j, K, T₁) で逆算した IV。V′ が 1 円以下（下限）か逆算できない（σ = 1e-4 の値 + 1e-9 以下・σ = 5 の値以上）点はそのシナリオの当てはめから除く
+- **当てはめ**: 節点 −5, −4, −3, −2, −1.5, −1, −0.5, 0, 0.5, 1, 1.5, 2, 3 の折れ線（hat の基底。z は端で切る）を y にリッジ 1e-4 の最小二乗で（シナリオごと。正規方程式は 3 重対角）。点が 0 個のシナリオは g_j = 0（件数はログの `factor_empty_scenarios`）。Black-76 の割引は e^{−rate·T}、IV の逆算は区間 [1e-4, 5] の Newton と二分法
+- **g が空**: T₁ ≤ 0（h の間に SQ）、使う OP が 5 本未満、非有限の値が出た限月。r は入る。`atm_iv` は σ₀ が求まれば入る
+- **質の列**: 使う OP のうち `margin_short_jscc` があるものを、基準の状態に r・g を当てて値を作り直し（V̂_ij = max(1, round(Black-76(F₀ e^{r_j}, K, T₁, σ₀_i e^{g_j(z_i)})))、四捨五入は .5 を上へ）、1 枚の売りの ES（上の「JSCC の VaR パラメータの読み方（#164）」と同じ計算・同じ下限）と `margin_short_jscc` の相対誤差を見る
+- 1 行は最大 約 160KB（`g` が 13 × 1,422 個）、1 日 約 40 行・約 6MB。シミュレーターは 1 日分を 1 回で読む
+
+1 日の限月ごとの長さと質（`bq query --parameter=d:DATE:2026-11-20 ...`。値は貼らず件数・有無を見る）:
+
+```sql
+WITH run AS (
+  SELECT ARRAY_AGG(jscc_run_id ORDER BY finished_at DESC LIMIT 1)[OFFSET(0)] AS rid
+  FROM `<PROJECT_ID>.optionchan_tokyo.jscc_ingest_runs`
+  WHERE business_date = @d AND status = 'succeeded' AND file_version = '1600'
+)
+SELECT product_code, contract_period_code, forward_source, horizon_days, ARRAY_LENGTH(r) AS n_r, ARRAY_LENGTH(g) AS n_g,
+  n_fit, check_n, jscc_run_id = (SELECT rid FROM run) AS same_run
+FROM `<PROJECT_ID>.optionchan_tokyo.jscc_var_scenario_factor`
+WHERE business_date = @d
+ORDER BY product_code, contract_period_code
 ```
 
 ## 過去データの欠け
@@ -554,7 +606,7 @@ ORDER BY started_at
 
 ## 費用の注意
 
-- JSCC の `jscc_var_scenario` は `require_partition_filter = true`（`business_date` の絞り込みが無いクエリはエラー）。1 日のパーティションは約 140MB（論理）なので、銘柄の属性（`product_code`・`contract_period_code`・`put_call_type`・`strike_price`）でも絞る
+- JSCC の `jscc_var_scenario`・`jscc_var_scenario_factor` は `require_partition_filter = true`（`business_date` の絞り込みが無いクエリはエラー。`jscc_var_scenario_factor` は 1 日 約 6MB）。1 日のパーティションは約 140MB（論理）なので、銘柄の属性（`product_code`・`contract_period_code`・`put_call_type`・`strike_price`）でも絞る
 - **パーティションの列で絞る**。取り込みの 3 表は `created_at`、`ingest_runs` は `snapshot_at`、1 時間足は `started_at`、`atm_cm_iv` は `created_at`、銘柄ごとの 1 時間足 `option_price_hourly` は `last_trading_day`（月。1 限月がほぼ 1 パーティション）。絞らないと全期間（2018-10〜）を読む
 - `option_price` は `require_partition_filter = true` で、`created_at` の絞り込みが無いクエリはエラーになる（`dc_option_tick`・`dc_future_tick` も `trade_date` で同じ。`option_price_hourly` は `last_trading_day` で同じ。ある時刻の全銘柄を読むときも `last_trading_day` の範囲を付ける）
 - `option_price_hourly` の 1 限月のパーティションは最大 約 70〜90 MiB（全列）。dry run の見積もりはパーティションの絞り込みだけを入れ、クラスタ（`target_price`・`type`・`started_at`）の絞り込みは入れない。実際の課金（`total_bytes_billed`）はクラスタで小さくなりうる（最低 10 MB）
@@ -568,7 +620,7 @@ ORDER BY started_at
 - 取り込みの 3 表（`spot_price`・`future_price`・`option_price`）は、旧系の列（`schema/*.json`）の名前・型・モードを変えない（`apps/ingest/tests/test_schema.py` の `test_existing_columns_unchanged`）。新系で足した列（`ingest_run_id`・`parser_version`・`source_object`・`page_updated_at`・`price_time_raw`）は NULLABLE
 - `atm_cm_iv` は #158 で最後に `basis`（NULLABLE）を足した。前の 11 列の名前・型・モードは変えない（`tests/test_cm.py` の `test_schema_basis`）。読み手（ビューアー・シミュレーター）は列の名前で読む
 - `option_price_hourly`（#161）の列・型・モードは公開のインターフェース（シミュレーターが固定コミットの `schema/tokyo/option_price_hourly.json` と照合する）。`tests/test_hourly.py` の `HOURLY_SCHEMA` が並びを固定する。足の切り方（気配・数は `created_at`、約定は `price_time`）・連続売買の窓・中値の条件も契約の一部（schema の `description` と上の「1 時間足の計算（銘柄ごと）」）。変えるときはシミュレーターに知らせてから。列の追加は NULLABLE で末尾に
-- JSCC の 4 表（#164）の列はシミュレーターが読む。列の追加は NULLABLE で末尾に。改名・削除・型の変更はしない（`apps/ingest/tests/test_schema.py` の `test_jscc_*`、ロード用の行が schema の列と 1 対 1 なことは `apps/ingest/tests/test_jscc.py`）
+- JSCC の 5 表（#164・#168）の列はシミュレーターが読む。列の追加は NULLABLE で末尾に。改名・削除・型の変更はしない（`apps/ingest/tests/test_schema.py` の `test_jscc_*`、ロード用の行が schema の列と 1 対 1 なことは `apps/ingest/tests/test_jscc.py`・`test_jscc_factor.py`）。`jscc_var_scenario_factor` の列・型・モードは依頼元（シミュレーター #387）と合意した並び（`test_jscc_factor_contract`）。当てはめの手順（上の節）を変えるときもシミュレーターに知らせてから
 - 列を変えるときは、読む側（ビューアー・別のアプリ）に知らせてから。`schema/` を変えると Terraform の差分になり、`schema/tokyo/` は取り込みのイメージにも入る（`docs/development.md`）
 
 ## 作業用のデータセット（旧系）
