@@ -9,14 +9,17 @@ JSCC の一覧のページから 1600 版の BPF_IDX（zip）・VaRParameter・A
   引数なし: settings.JSCC_START_DATE 以降で jscc_ingest_runs に succeeded の行が無い日（3 つのファイルが揃った日）を
       古い順に最大 settings.JSCC_MAX_DATES_PER_RUN 日（trigger = auto）。対象が無ければ何もしない（祝日など）
   --date: 指定の日を取り直す（成功済みでも。パーティションの置き換えなので重複しない。trigger = manual）
-  --dry-run: 取得・解析・照合までしてログに出すだけ（BigQuery に書かない）
+  --dry-run: 取得・解析・照合・当てはめまでしてログに出すだけ（BigQuery に書かない。取引カレンダーは読む）
   終了コード: 0 = すべて成功・対象なし・dry-run、1 = 1 日でも失敗（一覧・クエリを含む）、2 = 引数の誤り・一覧に無い日
 
+日の処理の前に取引カレンダー（trading_calendar_latest）を 1 回読む（SQ・h の営業日。失敗は stage=calendar で止める）。
 1 日の処理: VaRParameter・All-Instruments-VaR を取得・解析 → BPF の zip を一時ファイルに落とし、展開せずに行を順に読んで
-NK225 の銘柄を NDJSON に書きながら照合 → ロード（jscc_var_parameter → jscc_var_scenario_set → jscc_var_scenario、
-どれも WRITE_TRUNCATE で <表>$YYYYMMDD）→ jscc_ingest_runs に succeeded を追記 → NOTICE jscc_ingested。
+NK225 の銘柄を NDJSON に書きながら照合し、当てはめに要る銘柄を残す → 限月ごとのシナリオの r・g を当てはめる（#168。
+jscc_factor.py。ロードの前なので、当てはめの失敗ではどの表も書かない）→ ロード（jscc_var_parameter →
+jscc_var_scenario_set → jscc_var_scenario → jscc_var_scenario_factor、どれも WRITE_TRUNCATE で <表>$YYYYMMDD）→
+jscc_ingest_runs に succeeded を追記 → NOTICE jscc_ingested。
 照合の不一致は ERROR jscc_margin_mismatch（書き込みは行う）。失敗は ERROR jscc_sync_failed（stage 付き）と
-jscc_ingest_runs の failed の行で、次の日へ進む。3 表は別々のロードなので、読み手は succeeded の日だけを使う。
+jscc_ingest_runs の failed の行で、次の日へ進む。4 表は別々のロードなので、読み手は succeeded の日だけを使う。
 ダウンロードしたファイルは信頼しない: 大きさの上限、zip は期待する 1 メンバーだけを読む、一覧の href は同じ
 ディレクトリのファイル名だけ。ログには件数・銘柄コードまでを出し、価格・損益の値を出さない
 """
@@ -26,6 +29,7 @@ import gzip
 import io
 import json
 import os
+import resource
 import sys
 import tempfile
 import time
@@ -33,12 +37,13 @@ import uuid
 import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 
 import requests
 
-from . import jscc, settings
+from . import calendar_sync, jscc, jscc_factor, settings
 from .io_bq import QueryFailed
+from .jpx_calendar import CalendarDataError
 from .log import log
 from .parser import JST
 from .pipeline import Deadline, DeadlineExceeded, bounded
@@ -123,6 +128,20 @@ def succeeded_dates(query, project: str, dataset: str, start: date, timeout: flo
         raise QueryFailed(f"成功済みの日が読めない: {type(e).__name__}") from None
 
 
+# ---- 取引カレンダー（SQ・h の営業日。#168） ----
+
+CALENDAR_LOOKAHEAD_DAYS = 7  # 営業日 + 7 日が covered_until を超えたら WARNING jscc_calendar_outdated
+
+
+def load_calendar(query, project: str, dataset: str, timeout: float) -> tuple[frozenset[date], date]:
+    """(営業日でない平日 = 最新版の全行の日付, covered_until)。祝日取引の日も行なので営業日でない（#149 の現物の
+    営業日と同じ）。版が無ければ CalendarDataError、読めなければ QueryFailed"""
+    loaded = calendar_sync.load_latest(query, project, dataset, timeout)
+    if loaded is None:
+        raise CalendarDataError("取引カレンダーの版が無い")
+    return frozenset(r.calendar_date for r in loaded.version.rows), loaded.version.covered_until
+
+
 # ---- 取り込み ----
 
 
@@ -133,6 +152,7 @@ class SyncDeps:
     query_succeeded: Callable[..., set]  # (start, timeout=) succeeded の行がある営業日
     load: Callable[..., object]  # (table, partition, fileobj, job_id, timeout=) パーティションの置き換え
     append_run: Callable[..., None]  # (table, rows, timeout=) jscc_ingest_runs への追記
+    load_holidays: Callable[..., tuple]  # (timeout=) → (営業日でない平日, covered_until)。取引カレンダーの最新版
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(UTC))
     new_id: Callable[[], str] = field(default=lambda: str(uuid.uuid4()))
 
@@ -161,7 +181,8 @@ class _Ndjson:
         self.rows = 0
 
     def write(self, row: dict) -> None:
-        self._out.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        # NaN・inf は送らない（ValueError で段の失敗にする）
+        self._out.write(json.dumps(row, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
         self._out.write(b"\n")
         self.rows += 1
 
@@ -224,11 +245,22 @@ RUN_STATS = (
     "margin_ref_only",
     "margin_bpf_only",
     "bpf_bytes",
+    "rows_factor",
+    "rows_factor_fitted",
 )
 
 
-def read_bpf(zfile, business_date: date, records, reference: dict, run_id: str, out: _Ndjson) -> tuple:
-    """zip の中の CSV を読み、NK225 の銘柄の行を out に書く。(BpfSummary, 計算した 1 枚の証拠金) を返す"""
+def read_bpf(
+    zfile,
+    business_date: date,
+    records,
+    reference: dict,
+    run_id: str,
+    out: _Ndjson,
+    collector: jscc_factor.FactorCollector | None = None,
+) -> tuple:
+    """zip の中の CSV を読み、NK225 の銘柄の行を out に書く。(BpfSummary, 計算した 1 枚の証拠金) を返す。
+    collector があれば各銘柄を渡す（当てはめに要るものだけを残す）"""
     expected = f"BPF_IDX_{business_date:%Y%m%d}_{settings.JSCC_FILE_VERSION}.csv"
     with zipfile.ZipFile(zfile) as z:
         infos = z.infolist()
@@ -259,6 +291,8 @@ def read_bpf(zfile, business_date: date, records, reference: dict, run_id: str, 
                         reference=reference.get(inst.instrument_code),
                     )
                 )
+                if collector is not None:
+                    collector.add(inst)
     return reader.summary, computed
 
 
@@ -272,12 +306,15 @@ def process_day(
     trigger: str,
     execution: str | None,
     dry_run: bool,
+    holidays: frozenset[date] = frozenset(),
 ) -> DayResult:
-    """1 営業日を取り込む。想定した失敗も想定外の例外もログ（と jscc_ingest_runs の failed の行）にして返す"""
+    """1 営業日を取り込む。想定した失敗も想定外の例外もログ（と jscc_ingest_runs の failed の行）にして返す。
+    holidays は取引カレンダーの営業日でない平日（当てはめの SQ・h）"""
     run_id = deps.new_id()
     started_at = deps.clock()
     ctx = {"business_date": business_date, "jscc_run_id": run_id, "dry_run": dry_run or None, **common}
     stats: dict = {}
+    extra: dict = {}  # NOTICE にだけ出す（jscc_ingest_runs には書かない）
     stage = "fetch_parameter"
     files = []
     version, group = settings.JSCC_FILE_VERSION, settings.JSCC_PRODUCT_GROUP
@@ -302,7 +339,8 @@ def process_day(
         stage = "parse_bpf"
         scenario_out = _Ndjson()
         files.append(scenario_out)
-        summary, computed = read_bpf(zfile, business_date, records, reference, run_id, scenario_out)
+        collector = jscc_factor.FactorCollector()
+        summary, computed = read_bpf(zfile, business_date, records, reference, run_id, scenario_out, collector)
         files.remove(zfile)
         zfile.close()  # メモリ（Cloud Run の /tmp）を先に空ける
         check = jscc.compare_margins(computed, reference)
@@ -325,6 +363,15 @@ def process_day(
             margin_bpf_only=check.bpf_only,
         )
 
+        stage = "factor"
+        factor_out, factor, seconds = _factor(
+            collector, summary, records, reference, business_date, holidays, run_id, deadline
+        )
+        files.append(factor_out)
+        del collector  # 残した銘柄（pnl の参照）を空ける
+        stats.update(rows_factor=factor_out.rows, rows_factor_fitted=factor.fitted)
+        extra.update(_factor_log(factor, seconds, ctx))
+
         if not dry_run:
             stage = "load"
             ymd = f"{business_date:%Y%m%d}"
@@ -332,6 +379,7 @@ def process_day(
                 (settings.JSCC_PARAMETER_TABLE, param_out),
                 (settings.JSCC_SCENARIO_SET_TABLE, set_out),
                 (settings.JSCC_SCENARIO_TABLE, scenario_out),
+                (settings.JSCC_FACTOR_TABLE, factor_out),
             ):
                 job_id = f"jscc_{table}_{ymd}_{run_id.replace('-', '')}"
                 bounded(
@@ -387,6 +435,7 @@ def process_day(
         product_group=group,
         elapsed_seconds=round((deps.clock() - started_at).total_seconds(), 1),
         **stats,
+        **extra,
         **ctx,
     )
     if check.mismatched:
@@ -400,6 +449,65 @@ def process_day(
             **ctx,
         )
     return DayResult(business_date, "dry_run" if dry_run else "succeeded", None, stats)
+
+
+def _factor(collector, summary, records, reference, business_date, holidays, run_id, deadline):
+    """限月ごとの r・g を当てはめて NDJSON に書く。(NDJSON, FactorResult, 秒)。期限は限月ごとに見る"""
+    started = time.monotonic()
+
+    def check() -> None:
+        if deadline.remaining() < settings.MIN_REMAINING_SECONDS:
+            raise DeadlineExceeded("jscc_factor")
+
+    stress = {group: jscc.stress_params(records, group) for group in sorted(collector.groups)}
+    result = jscc_factor.factor_rows(
+        collector,
+        scenarios=summary.scenarios,
+        stress=stress,
+        reference=reference,
+        business_date=business_date,
+        holidays=holidays,
+        file_version=settings.JSCC_FILE_VERSION,
+        run_id=run_id,
+        rate=settings.JSCC_FACTOR_RATE,
+        check=check,
+    )
+    out = _Ndjson()
+    try:
+        for row in result.rows:
+            out.write(row)
+    except BaseException:
+        out.close()
+        raise
+    return out, result, round(time.monotonic() - started, 1)
+
+
+def _factor_log(result, seconds: float, ctx: dict) -> dict:
+    """当てはめの件数（NOTICE に足す分）。月次・先物の限月で行が無い・T₁ ≤ 0 以外で g が空なら WARNING
+    jscc_factor_incomplete（限月コードと理由ごとの件数だけ）"""
+    weekly = 0
+    incomplete: dict[str, list[str]] = {}
+    for reason, keys in result.skipped.items():
+        for key in keys:
+            product, period = key.split(":", 1)
+            if product in settings.JSCC_FACTOR_PRODUCTS and product != settings.JSCC_FACTOR_MONTHLY_PRODUCT:
+                weekly += 1
+            elif reason != jscc_factor.T1_EXPIRED:
+                incomplete.setdefault(reason, []).append(key)
+    if incomplete:
+        log(
+            "WARNING",
+            "jscc_factor_incomplete",
+            periods=sorted({k for keys in incomplete.values() for k in keys}),
+            reasons={reason: len(keys) for reason, keys in sorted(incomplete.items())},
+            **ctx,
+        )
+    return {
+        "factor_seconds": seconds,
+        "factor_skipped_weekly": weekly,
+        "factor_empty_scenarios": result.empty_scenarios,
+        "max_rss_mb": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss // 1024,
+    }
 
 
 def _record_failure(deps, deadline, ctx, run_id, business_date, trigger, execution, stage, detail, started_at, stats):
@@ -520,6 +628,24 @@ def run_sync(
             log("INFO", "jscc_nothing_to_do", incomplete=len(incomplete), **common)
             return SyncResult("failed" if failed else "nothing")
 
+    try:
+        holidays, covered_until = bounded(
+            deadline, "jscc_calendar", settings.JSCC_QUERY_TIMEOUT_SECONDS, deps.load_holidays
+        )
+    except (QueryFailed, CalendarDataError, DeadlineExceeded) as e:
+        detail = "deadline_exceeded" if isinstance(e, DeadlineExceeded) else f"{type(e).__name__}: {e}"
+        log(
+            "ERROR",
+            "jscc_sync_failed",
+            failure="jscc_sync_failed",
+            stage="calendar",
+            detail=detail[:DETAIL_MAX],
+            **common,
+        )
+        return SyncResult("failed")
+    if max(targets) + timedelta(days=CALENDAR_LOOKAHEAD_DAYS) > covered_until:
+        log("WARNING", "jscc_calendar_outdated", covered_until=covered_until, dates=targets, **common)
+
     results = []
     for i, day in enumerate(targets):
         if deadline.remaining() < settings.JSCC_MIN_REMAINING_SECONDS:
@@ -537,6 +663,7 @@ def run_sync(
                 trigger=trigger,
                 execution=execution,
                 dry_run=dry_run,
+                holidays=holidays,
             )
         )
     failed = failed or any(r.status == "failed" for r in results)
@@ -571,6 +698,7 @@ def make_real_deps(cfg: settings.Settings) -> SyncDeps:
             table, partition, fileobj, job_id, gzip=settings.JSCC_LOAD_GZIP, timeout=timeout
         ),
         append_run=writer.append,
+        load_holidays=lambda timeout: load_calendar(query, cfg.project, cfg.dataset, timeout),
     )
 
 
@@ -583,7 +711,7 @@ def _date_arg(text: str) -> date:
 
 def main(argv: list[str] | None = None, deps: SyncDeps | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m optionchan_ingest.jscc_sync")
-    parser.add_argument("--dry-run", action="store_true", help="取得・解析・照合だけ（BigQuery に書かない）")
+    parser.add_argument("--dry-run", action="store_true", help="取得・解析・照合・当てはめだけ（BigQuery に書かない）")
     parser.add_argument(
         "--date",
         dest="dates",

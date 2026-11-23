@@ -1,0 +1,116 @@
+[
+  {
+    "name": "business_date",
+    "type": "DATE",
+    "mode": "REQUIRED",
+    "description": "JSCC の営業日（ファイル名の YYYYMMDD）。パーティション（日）の列"
+  },
+  {
+    "name": "file_version",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "ファイルの版（1600）"
+  },
+  {
+    "name": "jscc_run_id",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "書いた取り込みの ID（jscc_ingest_runs.jscc_run_id。同じ日の jscc_var_scenario と同じ）"
+  },
+  {
+    "name": "product_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "商品（NK225E = 月次、NK225W1〜W4・NK225C1〜C4 = 週次、先物だけの限月はその先物の商品）"
+  },
+  {
+    "name": "contract_period_code",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "限月（月次・先物は YYYYMM、週次は YYYYMMn）"
+  },
+  {
+    "name": "forward_source",
+    "type": "STRING",
+    "mode": "REQUIRED",
+    "description": "F₀・F′ の出どころ（NK225F / NK225MF / NK225MCF = 同じ限月の先物、parity = プットコール・パリティ）"
+  },
+  {
+    "name": "forward",
+    "type": "FLOAT",
+    "mode": "REQUIRED",
+    "description": "F₀（基準の先物の値段。円）"
+  },
+  {
+    "name": "t_years",
+    "type": "FLOAT",
+    "mode": "REQUIRED",
+    "description": "T₀ =（SQ の 09:00 − 営業日の 15:45）/ 365 日"
+  },
+  {
+    "name": "horizon_days",
+    "type": "INTEGER",
+    "mode": "REQUIRED",
+    "description": "h（営業日から 2 営業日後までの暦日）。シナリオ後の残存は T₁ = T₀ − h / 365"
+  },
+  {
+    "name": "rate",
+    "type": "FLOAT",
+    "mode": "REQUIRED",
+    "description": "Black-76 の割引の金利"
+  },
+  {
+    "name": "atm_iv",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "σ_ATM,0（使う OP の ln σ₀ を k = ln(K/F₀) で線形補間した k = 0 の値の exp。z の尺度）。求まらない・先物だけの限月は NULL"
+  },
+  {
+    "name": "nodes",
+    "type": "FLOAT",
+    "mode": "REPEATED",
+    "description": "g の折れ線の z の節点（13 個の昇順）。g が空なら空"
+  },
+  {
+    "name": "r",
+    "type": "FLOAT",
+    "mode": "REPEATED",
+    "description": "先物のリターン r_j = ln(F′_j / F₀)。長さ = シナリオの本数（添字は jscc_var_scenario.pnl と同じ）"
+  },
+  {
+    "name": "g",
+    "type": "FLOAT",
+    "mode": "REPEATED",
+    "description": "IV の対数変化の折れ線の節点の値。シナリオ j・節点 m が g[j*13 + m]（長さ = 13 × シナリオの本数）。当てはめられない限月は空"
+  },
+  {
+    "name": "n_fit",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "当てはめに使った OP の数（OTM・清算値段 5 円以上・σ₀ が求まる）。g が空なら NULL"
+  },
+  {
+    "name": "fit_rmse",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "当てはめに使った全点の ln σ の残差の RMS。g が空なら NULL"
+  },
+  {
+    "name": "check_n",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "照合した OP の数（使う OP のうち All-Instruments-VaR の 1 枚の売りがあるもの）。g が空なら NULL"
+  },
+  {
+    "name": "check_median_rel",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "基準の状態で当て直した 1 枚の売りの ES と All-Instruments-VaR の 1 枚の売りの相対誤差の中央値。check_n が 0・NULL なら NULL"
+  },
+  {
+    "name": "check_p90_rel",
+    "type": "FLOAT",
+    "mode": "NULLABLE",
+    "description": "同じ相対誤差の 90 パーセンタイル（線形補間）。check_n が 0・NULL なら NULL"
+  }
+]

@@ -5,7 +5,7 @@
 # データの付与の追加は無い。足す付与は sa-scheduler がこのジョブだけを起動できる run.invoker 1 件。
 # 表は JSCC のファイルの中身なので非公開のデータセットに置くだけ（サイト利用案内は再配布を禁じる）。
 # 列の正は schema/tokyo/jscc_*.json（取り込みのテーブルではないので tables.json には入れない）。
-# データを持つ 4 表は削除を二重に止める（取り込みは置き換えなので、壊れた日は流し直しで直る）
+# データを持つ 5 表は削除を二重に止める（取り込みは置き換えなので、壊れた日は流し直しで直る）
 
 # 銘柄ごとのシナリオの値（1 行 = 営業日 × 版 × 銘柄。1 日 約 1.2 万行・論理 約 140MB）。
 # 読み手（option-simulator）は営業日と限月・行使価格・C/P で銘柄を選ぶので、銘柄の属性でクラスタする
@@ -70,7 +70,30 @@ resource "google_bigquery_table" "jscc_var_parameter" {
   }
 }
 
-# 取り込みの記録（追記のみ）。読み手は status = succeeded の日だけを使う（3 表は別々のロード）
+# 限月ごとのシナリオの先物のリターン r と IV の対数変化 g(z)（#168。1 行 = 営業日 × 版 × 商品 × 限月。1 日 約 40 行・
+# 論理 約 6MB）。同じ取り込みで BPF から当てはめる（jscc_factor.py）。読み手（option-simulator）は営業日と限月で選ぶ
+resource "google_bigquery_table" "jscc_var_scenario_factor" {
+  project                  = var.project_id
+  dataset_id               = google_bigquery_dataset.tokyo.dataset_id
+  table_id                 = "jscc_var_scenario_factor"
+  description              = "JSCC の BPF_IDX のシナリオから当てはめた限月ごとの先物のリターン r と IV の対数変化 g(z)（#168。非公開）"
+  schema                   = file("${path.module}/../../schema/tokyo/jscc_var_scenario_factor.json")
+  clustering               = ["contract_period_code"]
+  require_partition_filter = true
+  deletion_protection      = true
+  deletion_policy          = "PREVENT"
+
+  time_partitioning {
+    type  = "DAY"
+    field = "business_date"
+  }
+
+  lifecycle {
+    prevent_destroy = true
+  }
+}
+
+# 取り込みの記録（追記のみ）。読み手は status = succeeded の日だけを使う（4 表は別々のロード）
 resource "google_bigquery_table" "jscc_ingest_runs" {
   project             = var.project_id
   dataset_id          = google_bigquery_dataset.tokyo.dataset_id
@@ -94,6 +117,8 @@ resource "google_bigquery_table" "jscc_ingest_runs" {
 # --date=YYYY-MM-DD = 指定の日を取り直す、--dry-run = 書かない。権限は sa-ingest と共用。
 # タスクのタイムアウト 3600 秒（アプリは settings.JSCC_JOB_DEADLINE_SECONDS = 3300 秒で止める）、リトライ 0（翌平日の実行が
 # archive から取り直す）。zip（約 120MB）と NDJSON の一時ファイルがメモリ（/tmp）に乗るので 1Gi。
+# depends_on: 表（jscc_ingest_runs の列の追加を含む）をイメージの更新より先に（Storage Write の行はイメージの中の
+# schema から作るので、列が先に無いと記録が失敗する）
 # deletion_protection = false: データを持たない
 resource "google_cloud_run_v2_job" "jscc_sync" {
   project             = var.project_id
@@ -138,6 +163,7 @@ resource "google_cloud_run_v2_job" "jscc_sync" {
     google_bigquery_table.jscc_var_scenario_set,
     google_bigquery_table.jscc_var_parameter,
     google_bigquery_table.jscc_ingest_runs,
+    google_bigquery_table.jscc_var_scenario_factor,
   ]
 }
 

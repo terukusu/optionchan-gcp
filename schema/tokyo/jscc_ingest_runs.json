@@ -118,5 +118,17 @@
     "type": "INTEGER",
     "mode": "NULLABLE",
     "description": "BPF の zip の大きさ（バイト）"
+  },
+  {
+    "name": "rows_factor",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "jscc_var_scenario_factor に書いた行数（#168。それより前の行は NULL）"
+  },
+  {
+    "name": "rows_factor_fitted",
+    "type": "INTEGER",
+    "mode": "NULLABLE",
+    "description": "そのうち g が空でない行の数（#168。それより前の行は NULL）"
   }
 ]

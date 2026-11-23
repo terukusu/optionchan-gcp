@@ -118,7 +118,7 @@ prod の Terraform（`infra/prod/`）は次のファイルを `file()`・`templa
 | ファイル | 読む所 | なるもの |
 |---|---|---|
 | `schema/tokyo/tables.json` | `infra/prod/data.tf` | データセットと取り込みの 4 表の設定（場所・パーティション・クラスタなど） |
-| `schema/tokyo/*.json`（表ごと） | `infra/prod/data.tf`・`infra/prod/sq.tf`・`infra/prod/calendar.tf`・`infra/prod/gaps.tf`・`infra/prod/datacube.tf`・`infra/prod/jscc.tf` | 表の列（列名・型・説明）。`option_price_hourly.json`（#161）は別のアプリが照合する公開の列。`jscc_*.json`（#164）はロード用の行（`apps/ingest/src/optionchan_ingest/jscc.py`）と 1 対 1 |
+| `schema/tokyo/*.json`（表ごと） | `infra/prod/data.tf`・`infra/prod/sq.tf`・`infra/prod/calendar.tf`・`infra/prod/gaps.tf`・`infra/prod/datacube.tf`・`infra/prod/jscc.tf` | 表の列（列名・型・説明）。`option_price_hourly.json`（#161）は別のアプリが照合する公開の列。`jscc_*.json`（#164）はロード用の行（`apps/ingest/src/optionchan_ingest/jscc.py`、`jscc_var_scenario_factor.json`（#168）は `jscc_factor.py`）と 1 対 1 |
 | `schema/ohlc/atm_ohlc.json` | `infra/prod/sq.tf` | 1 時間足の表の列 |
 | `schema/cm/atm_cm_iv.json` | `infra/prod/sq.tf` | 30 日固定の ATM IV の表の列 |
 | `sql/latest/*.sql` | `infra/prod/data.tf` | テーブル関数（最新版の選択）の本文 |
