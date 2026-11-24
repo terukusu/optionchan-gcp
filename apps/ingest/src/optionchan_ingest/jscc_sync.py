@@ -8,7 +8,8 @@ JSCC の一覧のページから 1600 版の BPF_IDX（zip）・VaRParameter・A
 - 手動: python -m optionchan_ingest.jscc_sync [--dry-run] [--date YYYY-MM-DD ...]
   引数なし: settings.JSCC_START_DATE 以降で jscc_ingest_runs に succeeded の行が無い日（3 つのファイルが揃った日）を
       古い順に最大 settings.JSCC_MAX_DATES_PER_RUN 日（trigger = auto）。対象が無ければ何もしない（祝日など）
-  --date: 指定の日を取り直す（成功済みでも。パーティションの置き換えなので重複しない。trigger = manual）
+  --date: 指定の日を取り直す（成功済みでも。パーティションの置き換えなので重複しない。trigger = manual）。
+      JSCC_START_DATE より前の日（一覧の archive にある日）も入れられる。自動の対象にはならない（#165）
   --dry-run: 取得・解析・照合・当てはめまでしてログに出すだけ（BigQuery に書かない。取引カレンダーは読む）
   終了コード: 0 = すべて成功・対象なし・dry-run、1 = 1 日でも失敗（一覧・クエリを含む）、2 = 引数の誤り・一覧に無い日
 
@@ -270,6 +271,7 @@ def read_bpf(
             raise jscc.JsccFormatError(f"zip の中の CSV が上限 {settings.JSCC_MAX_MEMBER_BYTES} を超える")
         computed: dict[str, tuple[int, int]] = {}
         stress: dict[str, tuple[float, int]] = {}
+        short_floor = business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM
         with z.open(infos[0]) as raw:
             lines = io.TextIOWrapper(raw, encoding="utf-8", newline="")
             reader = jscc.BpfReader(lines, product_group=settings.JSCC_PRODUCT_GROUP, business_date=business_date)
@@ -281,7 +283,9 @@ def read_bpf(
                 if group not in stress:
                     stress[group] = jscc.stress_params(records, group)
                 confidence, n_stress = stress[group]
-                computed[inst.instrument_code] = jscc.instrument_margins(inst, is_hist, confidence, n_stress)
+                computed[inst.instrument_code] = jscc.instrument_margins(
+                    inst, is_hist, confidence, n_stress, short_floor=short_floor
+                )
                 out.write(
                     jscc.scenario_row(
                         inst,
@@ -452,11 +456,12 @@ def process_day(
 
 
 def _factor(collector, summary, records, reference, business_date, holidays, run_id, deadline):
-    """限月ごとの r・g を当てはめて NDJSON に書く。(NDJSON, FactorResult, 秒)。期限は限月ごとに見る"""
+    """限月ごとの r・g を当てはめて NDJSON に書く。(NDJSON, FactorResult, 秒)。期限は限月ごとに見る（後のロードと
+    記録の分 settings.JSCC_FACTOR_MIN_REMAINING_SECONDS を残す）"""
     started = time.monotonic()
 
     def check() -> None:
-        if deadline.remaining() < settings.MIN_REMAINING_SECONDS:
+        if deadline.remaining() < settings.JSCC_FACTOR_MIN_REMAINING_SECONDS:
             raise DeadlineExceeded("jscc_factor")
 
     stress = {group: jscc.stress_params(records, group) for group in sorted(collector.groups)}

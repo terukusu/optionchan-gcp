@@ -174,6 +174,25 @@ def var_parameter(confidence="97.5", stress="2", extra=()):
     return "".join(line + "\r\n" for line in lines)
 
 
+def var_parameter_global(confidence="97.5", stress="2", extra0=(), extra=()):
+    """古い形（2024-06-07 まで。#165）の VaRParameter: レコード 0 が Level・Aggregation Group の無い 4 列の 1 行
+    （全体に効く信頼水準・本数）。レコード 1・2 は今の形と同じ。extra0 はレコード 0 のブロックに足す行"""
+    lines = [
+        "#Record ID,Record Name,Confidence Level,Stress Scenario Number",
+        f"0,VAR,{confidence},{stress}",
+        *extra0,
+        "#Record ID,Record Name,Level,Aggregation Group,Parent Aggregation Group,Type,Number of Param,"
+        "Param Name 01,Param Value 01,Param Name 02,Param Value 02",
+        "1,HSRATIO,L01,IDX,,GROUP,0,,,,",
+        "1,HSRATIO,L01,JGB,,GROUP,0,,,,",
+        "#Record ID,Record Name,Level,Aggregation Group,Parent Aggregation Group,Type,Number of Param,"
+        "Param Name 01,Param Value 01,Param Name 02,Param Value 02",
+        "2,ASRATIO,L01,JGB,,OFFSET_LIMIT,1,a,1.0,,",
+        *extra,
+    ]
+    return "".join(line + "\r\n" for line in lines)
+
+
 AIV_HEADER = (
     "Instrument Code,Product Group Code,Product Code,Product Type,Put/Call,Contract Month,Strike Price,"
     "Margin for 1 Short,Margin for 1 Long"

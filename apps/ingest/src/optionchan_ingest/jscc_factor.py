@@ -127,7 +127,8 @@ def implied_vol(
     is_call: bool, F: float, K: float, T: float, price: float, rate: float, guess: float | None = None
 ) -> float | None:
     """price の Black-76 の IV（Newton + 二分の安全策。区間 [IV_MIN, IV_MAX]）。
-    price が (black76(IV_MIN) + 1e-9, black76(IV_MAX)) の外・F・K・T が正でない・非有限なら None"""
+    price が (black76(IV_MIN) + 1e-9, black76(IV_MAX)) の外・F・K・T が正でない・非有限・IV_MAX_ITER 回で
+    収束しない（価格の差・区間の幅が許容に入らない）なら None"""
     if not (F > 0 and K > 0 and T > 0 and math.isfinite(F) and math.isfinite(K) and math.isfinite(price)):
         return None
     lo_price = black76(is_call, F, K, T, IV_MIN, rate)
@@ -163,7 +164,7 @@ def implied_vol(
         vega = df * F * math.exp(-0.5 * d1 * d1) / _SQRT2PI * sqt
         n = s - f / vega if vega > 0 else 0.5 * (a + b)
         s = n if a < n < b else 0.5 * (a + b)
-    return s
+    return None
 
 
 # ---- 折れ線・リッジ ----
@@ -314,6 +315,7 @@ def _fit_month(
     is_hist: list[bool],
     stress: dict[str, tuple[float, int]],
     reference: dict[str, tuple[int, int]],
+    short_floor: bool = True,
 ) -> dict:
     """σ₀・z・g・質の列。戻り値は {atm_iv, g, nodes, n_fit, fit_rmse, check_*, reason, empty}"""
     nodes = settings.JSCC_FACTOR_NODES
@@ -407,7 +409,7 @@ def _fit_month(
             side=-1,
             confidence=confidence,
             n_stress=n_stress,
-            floor=jscc.option_short_floor(inst),
+            floor=jscc.option_short_floor(inst) if short_floor else 0,
         )
         rel.append(abs(es - ref[0]) / ref[0])
     out.update(
@@ -524,6 +526,7 @@ def factor_rows(
                 is_hist=is_hist,
                 stress=stress,
                 reference=reference,
+                short_floor=business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM,
             )
             if fit["reason"]:
                 skip(fit["reason"], product, period)

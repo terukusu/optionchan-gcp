@@ -168,6 +168,17 @@ def test_implied_vol_none(is_call, F, K, T, price):
     assert implied_vol(is_call, F, K, T, price, RATE) is None
 
 
+def test_implied_vol_not_converged_is_none(monkeypatch):
+    """IV_MAX_ITER 回で収束しなければ None（区間の中の途中の値を返さない。#165・#168 のレビュー）"""
+    F, K, T, s = 50000.0, 52000.0, 0.1, 0.25
+    price = black76(True, F, K, T, s, RATE)
+    assert implied_vol(True, F, K, T, price, RATE, 4.0) == pytest.approx(s, abs=1e-9)
+    monkeypatch.setattr(jscc_factor, "IV_MAX_ITER", 1)
+    assert implied_vol(True, F, K, T, price, RATE, 4.0) is None
+    # 1 回で収束する（推測が答え）なら値を返す
+    assert implied_vol(True, F, K, T, price, RATE, s) == pytest.approx(s, abs=1e-12)
+
+
 # ---- 折れ線・リッジ・分位点 ----
 
 
@@ -248,7 +259,8 @@ def test_quantile():
 
 
 def collect(instruments, business_date=BD):
-    """合成の銘柄を BPF の行にして読み、(collector, scenarios, stress, reference) を返す"""
+    """合成の銘柄を BPF の行にして読み、(collector, scenarios, stress, reference) を返す。reference の売りの下限は
+    営業日が settings.JSCC_OPTION_SHORT_FLOOR_FROM 以降のときだけ（JSCC と同じ）"""
     reader = jscc.BpfReader(
         Bpf(business_date=business_date, instruments=instruments).lines(),
         product_group="NK225",
@@ -261,7 +273,12 @@ def collect(instruments, business_date=BD):
     for inst in reader:
         is_hist = [t == "H" for _, t in reader.scenarios]
         stress.setdefault(inst.aggregation_group, jscc.stress_params(records, inst.aggregation_group))
-        reference[inst.instrument_code] = jscc.instrument_margins(inst, is_hist, *stress[inst.aggregation_group])
+        reference[inst.instrument_code] = jscc.instrument_margins(
+            inst,
+            is_hist,
+            *stress[inst.aggregation_group],
+            short_floor=business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM,
+        )
         collector.add(inst)
     return collector, reader.scenarios, stress, reference
 
@@ -530,3 +547,66 @@ def test_no_values_in_skipped():
     text = json.dumps(result.skipped)
     assert "50000" not in text and "47500" not in text
     assert settings.JSCC_FACTOR_MIN_OPTIONS == 5
+
+
+def test_fifth_week_rows():
+    """第 5 週の週次（NK225W5・NK225C5。#165）も当てはめる。SQ は 5 番目の金曜・水曜"""
+    bd = date(2026, 1, 23)
+    w5 = factor_month(
+        business_date=bd,
+        product="NK225W5",
+        period="2026015",
+        sq=date(2026, 1, 30),
+        future_product=None,
+        h_days=4,
+        seed=30,
+        cs=100,
+        code_start=550000001,
+    )
+    c5 = factor_month(
+        business_date=bd,
+        product="NK225C5",
+        period="2025125",  # 2025-12 の水曜は 5 回（31 日）。営業日より前の SQ → 行なし
+        sq=date(2025, 12, 31),
+        future_product=None,
+        seed=31,
+        cs=100,
+        code_start=560000001,
+    )
+    assert {"NK225W5", "NK225C5"} <= settings.JSCC_FACTOR_PRODUCTS
+    result = run([*w5.instruments, *c5.instruments], business_date=bd, holidays=frozenset())
+    [row] = result.rows
+    assert (row["product_code"], row["contract_period_code"]) == ("NK225W5", "2026015")
+    assert row["t_years"] == pytest.approx(w5.t0, abs=1e-15) and row["horizon_days"] == 4
+    assert row["r"] == pytest.approx(w5.r, abs=1e-6) and row["g"]
+    assert result.skipped == {jscc_factor.EXPIRED: ["NK225C5:2025125"]}
+
+
+def test_check_uses_short_floor_only_from_switch_date(monkeypatch):
+    """当て直しの check の売りの下限は JSCC_OPTION_SHORT_FLOOR_FROM 以降の営業日だけ（#165）"""
+    calls = []
+    real = jscc.option_short_floor
+
+    def spy(inst):
+        calls.append(inst.instrument_code)
+        return real(inst)
+
+    month = factor_month(seed=32)
+    collector, scenarios, stress, ref = collect(month.instruments)
+    monkeypatch.setattr(jscc, "option_short_floor", spy)
+    for switch, expect_calls in ((BD, True), (BD + timedelta(days=1), False)):
+        calls.clear()
+        monkeypatch.setattr(settings, "JSCC_OPTION_SHORT_FLOOR_FROM", switch)
+        [row] = factor_rows(
+            collector,
+            scenarios=scenarios,
+            stress=stress,
+            reference=ref,
+            business_date=BD,
+            holidays=HOL,
+            file_version="1600",
+            run_id="run-1",
+            rate=RATE,
+        ).rows
+        assert row["check_n"] > 0
+        assert bool(calls) is expect_calls

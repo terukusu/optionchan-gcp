@@ -4,12 +4,14 @@
 - BPF_IDX_YYYYMMDD_<版>.zip: 1 メンバーの CSV。レコード 0 DATE → 1 INSTRUMENT → 2 PRICE → 3 HSPL（銘柄 × シナリオの
   1 枚あたりの値）→ 6 SFR → 7 ASPL の順で、ブロックの前に # の見出し行。展開すると 800MB 超なので行を順に読む
 - VaRParameter_YYYYMMDD_<版>.csv: Aggregation Group ごとの信頼水準・ストレスのシナリオの本数（レコード 0）と
-  相殺の係数（レコード 1・2）
+  相殺の係数（レコード 1・2）。2024-06-07 までのファイルのレコード 0 は Level・Aggregation Group の無い 4 列の 1 行
+  （全体に効く 1 つの信頼水準・本数。#165）で、level・aggregation_group を空文字列（GLOBAL_GROUP）にして読む
 - All-Instruments-VaR_YYYYMMDD_<版>.csv: 銘柄ごとの 1 枚の売り・買いの証拠金（照合の基準）
 
 1 枚の証拠金（margin_one_lot）: v = 売買の向き × 値、H の全部 + S の損失の大きい方から n 本の期待ショートフォール
 （信頼水準 97.5% なら損失の大きい方から 2.5%）を円に切り上げ、0 未満は 0。OP の売りは清算値段 × Contract Size を
-下回らない（2026-11-16〜20 の All-Instruments-VaR と全件一致。Phase 2 の実測）。
+下回らない（2026-11-16〜20 の All-Instruments-VaR と全件一致。Phase 2 の実測）。この下限は 2025-02-10 の営業日から
+（それより前の JSCC の計算には無い。#165。いつから効かせるかは呼び出し側が short_floor で渡す）
 
 例外は JsccFormatError（ValueError の派生）だけ。メッセージに価格・損益の値を入れない（行番号・列名・銘柄コードまで）
 """
@@ -293,6 +295,12 @@ class ParamRecord:
     params: tuple[tuple[str, float], ...]
 
 
+# 古い形（4 列）のレコード 0 の level・aggregation_group。どの Aggregation Group にも効く 1 行（#165）
+GLOBAL_GROUP = ""
+PARAM0_COLUMNS = 6  # #Record ID,Record Name,Level,Aggregation Group,Confidence Level,Stress Scenario Number
+PARAM0_GLOBAL_COLUMNS = 4  # #Record ID,Record Name,Confidence Level,Stress Scenario Number（2024-06-07 まで）
+
+
 def _lines(text: str) -> Iterator[tuple[int, list[str]]]:
     """# の見出し行・空行を除いた行を (1 始まりの番号, 列) で"""
     n = 0
@@ -305,23 +313,33 @@ def _lines(text: str) -> Iterator[tuple[int, list[str]]]:
 
 
 def parse_var_parameter(text: str) -> list[ParamRecord]:
+    """レコード 0 は今の形（6 列。Aggregation Group ごと）か古い形（4 列。全体で 1 行、level・aggregation_group は
+    GLOBAL_GROUP）。1 つのファイルで形が混ざっていれば JsccFormatError"""
     records = []
+    widths: set[int] = set()
     for n, p in _lines(text):
         if p[0] not in ("0", "1", "2"):
             _fail(n, "Record ID が 0・1・2 以外")
         rid = int(p[0])
         if rid == 0:
-            if len(p) != 6:
+            if len(p) == PARAM0_COLUMNS:
+                level, group, conf_text, stress_text = p[2], p[3], p[4], p[5]
+                if not group:
+                    _fail(n, "Aggregation Group が空")
+            elif len(p) == PARAM0_GLOBAL_COLUMNS:
+                level, group, conf_text, stress_text = GLOBAL_GROUP, GLOBAL_GROUP, p[2], p[3]
+            else:
                 _fail(n, "レコード 0 の列の数が違う")
-            if not p[3]:
-                _fail(n, "Aggregation Group が空")
+            widths.add(len(p))
+            if len(widths) > 1:
+                _fail(n, "レコード 0 の形（4 列と 6 列）が混ざっている")
             try:
-                conf, stress = float(p[4]), int(p[5])
+                conf, stress = float(conf_text), int(stress_text)
             except ValueError:
                 _fail(n, "Confidence Level・Stress Scenario Number が読めない")
             if not math.isfinite(conf):
                 _fail(n, "Confidence Level が読めない")
-            records.append(ParamRecord(n, 0, p[1], p[2], p[3], None, None, conf, stress, ()))
+            records.append(ParamRecord(n, 0, p[1], level, group, None, None, conf, stress, ()))
             continue
         if len(p) < 7:
             _fail(n, f"レコード {rid} の列の数が足りない")
@@ -353,8 +371,11 @@ def parse_var_parameter(text: str) -> list[ParamRecord]:
 
 
 def stress_params(records: list[ParamRecord], aggregation_group: str) -> tuple[float, int]:
-    """(信頼水準（% 表記）, ストレスの本数)。レコード 0 の aggregation_group の行がちょうど 1 つ"""
+    """(信頼水準（% 表記）, ストレスの本数)。レコード 0 の aggregation_group の行がちょうど 1 つ。
+    その行が無ければ古い形の全体の行（aggregation_group = GLOBAL_GROUP）がちょうど 1 つ"""
     rows = [r for r in records if r.record_id == 0 and r.aggregation_group == aggregation_group]
+    if not rows:
+        rows = [r for r in records if r.record_id == 0 and r.aggregation_group == GLOBAL_GROUP]
     if len(rows) != 1:
         raise JsccFormatError(f"VaRParameter のレコード 0 に Aggregation Group {aggregation_group} が {len(rows)} 行")
     return rows[0].confidence_level, rows[0].stress_scenario_number
@@ -400,12 +421,11 @@ def option_short_floor(inst: BpfInstrument) -> int:
 
 
 def instrument_margins(
-    inst: BpfInstrument, is_hist: Sequence[bool], confidence: float, n_stress: int
+    inst: BpfInstrument, is_hist: Sequence[bool], confidence: float, n_stress: int, *, short_floor: bool = True
 ) -> tuple[int, int]:
-    """(1 枚の売り, 1 枚の買い)。OP の売りだけ清算値段 × Contract Size を下限にする"""
-    short = margin_one_lot(
-        inst.pnl, is_hist, side=-1, confidence=confidence, n_stress=n_stress, floor=option_short_floor(inst)
-    )
+    """(1 枚の売り, 1 枚の買い)。short_floor なら OP の売りだけ清算値段 × Contract Size を下限にする"""
+    floor = option_short_floor(inst) if short_floor else 0
+    short = margin_one_lot(inst.pnl, is_hist, side=-1, confidence=confidence, n_stress=n_stress, floor=floor)
     long = margin_one_lot(inst.pnl, is_hist, side=1, confidence=confidence, n_stress=n_stress)
     return short, long
 
