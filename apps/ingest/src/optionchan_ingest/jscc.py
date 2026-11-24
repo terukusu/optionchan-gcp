@@ -9,9 +9,9 @@
 - All-Instruments-VaR_YYYYMMDD_<版>.csv: 銘柄ごとの 1 枚の売り・買いの証拠金（照合の基準）
 
 1 枚の証拠金（margin_one_lot）: v = 売買の向き × 値、H の全部 + S の損失の大きい方から n 本の期待ショートフォール
-（信頼水準 97.5% なら損失の大きい方から 2.5%）を円に切り上げ、0 未満は 0。OP の売りは清算値段 × Contract Size を
-下回らない（2026-11-16〜20 の All-Instruments-VaR と全件一致。Phase 2 の実測）。この下限は 2025-02-10 の営業日から
-（それより前の JSCC の計算には無い。#165。いつから効かせるかは呼び出し側が short_floor で渡す）
+（信頼水準 97.5% なら損失の大きい方から 2.5%）を円に切り上げ、0 未満は 0。OP の売りの JSCC の値は、清算値段 ×
+Contract Size を下限にしたもの（下限あり）と下限を掛けないもの（下限なし）の両方がある。期限の近い限月で下限が
+外れる例がある（#171）。どちらになるかの条件は決まっていないので、照合（compare_margins）は両方を候補にする
 
 例外は JsccFormatError（ValueError の派生）だけ。メッセージに価格・損益の値を入れない（行番号・列名・銘柄コードまで）
 """
@@ -423,7 +423,8 @@ def option_short_floor(inst: BpfInstrument) -> int:
 def instrument_margins(
     inst: BpfInstrument, is_hist: Sequence[bool], confidence: float, n_stress: int, *, short_floor: bool = True
 ) -> tuple[int, int]:
-    """(1 枚の売り, 1 枚の買い)。short_floor なら OP の売りだけ清算値段 × Contract Size を下限にする"""
+    """(1 枚の売り, 1 枚の買い)。short_floor なら OP の売りだけ清算値段 × Contract Size を下限にする（下限あり）。
+    JSCC の OP の売りは下限あり・下限なしのどちらもある（#171。モジュールの説明）"""
     floor = option_short_floor(inst) if short_floor else 0
     short = margin_one_lot(inst.pnl, is_hist, side=-1, confidence=confidence, n_stress=n_stress, floor=floor)
     long = margin_one_lot(inst.pnl, is_hist, side=1, confidence=confidence, n_stress=n_stress)
@@ -471,24 +472,41 @@ class MarginCheck:
     ref_only: int
     bpf_only: int
     mismatched_codes: tuple[str, ...]
+    floor_applied: tuple[str, ...] = ()  # 下限あり・なしで分かれ、JSCC が下限ありに一致した銘柄（全件。コード順）
+    floor_not_applied: tuple[str, ...] = ()  # 同じく下限なしに一致した銘柄
 
 
-def compare_margins(computed: dict[str, tuple[int, int]], reference: dict[str, tuple[int, int]]) -> MarginCheck:
-    """両方にある銘柄の売り・買いを別々に数える。片側だけの銘柄は不一致に数えない"""
+def compare_margins(
+    computed: dict[str, tuple[int, int]],
+    reference: dict[str, tuple[int, int]],
+    no_floor: dict[str, int] | None = None,
+) -> MarginCheck:
+    """両方にある銘柄の売り・買いを別々に数える。片側だけの銘柄は不一致に数えない。
+    computed の売りは下限あり。no_floor は下限なしの売りが下限ありと違う銘柄（OP の売り）の下限なしの値で、
+    その銘柄の売りは JSCC がどちらかに一致すれば一致（#171）。どちらにも合わなければ不一致（分かれた件数に入れない）"""
+    no_floor = no_floor or {}
     matched = mismatched = 0
     codes = []
+    applied, not_applied = [], []
     for code in sorted(set(computed) & set(reference)):
-        same = sum(a == b for a, b in zip(computed[code], reference[code], strict=True))
+        (short, long), (ref_short, ref_long) = computed[code], reference[code]
+        alt = no_floor.get(code)
+        short_ok = ref_short == short or (alt is not None and ref_short == alt)
+        same = short_ok + (ref_long == long)
         matched += same
         mismatched += 2 - same
         if same != 2:
             codes.append(code)
+        if alt is not None and short_ok:
+            (applied if ref_short == short else not_applied).append(code)
     return MarginCheck(
         matched=matched,
         mismatched=mismatched,
         ref_only=len(set(reference) - set(computed)),
         bpf_only=len(set(computed) - set(reference)),
         mismatched_codes=tuple(codes[:MISMATCH_CODES_MAX]),
+        floor_applied=tuple(applied),
+        floor_not_applied=tuple(not_applied),
     )
 
 

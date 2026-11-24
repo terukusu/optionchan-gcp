@@ -303,7 +303,7 @@
 | `check_n` | INTEGER | NULLABLE | 照合した OP の数（使う OP のうち `margin_short_jscc` があるもの）。g が空なら NULL |
 | `check_median_rel` / `check_p90_rel` | FLOAT | NULLABLE | 基準の状態で当て直した 1 枚の売りの ES と `margin_short_jscc` の相対誤差の中央値・90 パーセンタイル（線形補間）。`check_n` が 0・NULL なら NULL |
 
-`jscc_ingest_runs`（1 行 = 取り込みの実行 × 営業日。追記のみ）: `jscc_run_id`（STRING REQUIRED）、`business_date`、`file_version`、`trigger`（STRING REQUIRED。`auto` = 引数なしの実行が選んだ日 / `manual` = `--date` の指定）、`execution`（STRING NULLABLE。Cloud Run ジョブの実行名）、`status`（STRING REQUIRED。`succeeded` / `failed`）、`stage`・`detail`（STRING NULLABLE。失敗の段階と理由）、`started_at`・`finished_at`（TIMESTAMP REQUIRED）、`rows_scenario`・`rows_parameter`・`scenarios`・`scenarios_h`・`scenarios_s`・`margin_matched`・`margin_mismatched`・`margin_ref_only`・`margin_bpf_only`・`bpf_bytes`（INTEGER NULLABLE。行数・シナリオの本数・照合の件数（売り・買いを別々に数える）・All-Instruments-VaR にだけある銘柄の数・BPF にだけある銘柄の数・zip の大きさ）、`rows_factor`・`rows_factor_fitted`（INTEGER NULLABLE。#168。`jscc_var_scenario_factor` に書いた行数とそのうち g が空でない行の数。それより前の行は NULL）。
+`jscc_ingest_runs`（1 行 = 取り込みの実行 × 営業日。追記のみ）: `jscc_run_id`（STRING REQUIRED）、`business_date`、`file_version`、`trigger`（STRING REQUIRED。`auto` = 引数なしの実行が選んだ日 / `manual` = `--date` の指定）、`execution`（STRING NULLABLE。Cloud Run ジョブの実行名）、`status`（STRING REQUIRED。`succeeded` / `failed`）、`stage`・`detail`（STRING NULLABLE。失敗の段階と理由）、`started_at`・`finished_at`（TIMESTAMP REQUIRED）、`rows_scenario`・`rows_parameter`・`scenarios`・`scenarios_h`・`scenarios_s`・`margin_matched`・`margin_mismatched`・`margin_ref_only`・`margin_bpf_only`・`bpf_bytes`（INTEGER NULLABLE。行数・シナリオの本数・照合の件数（売り・買いを別々に数える。OP の売りは JSCC の値が下限あり・なしのどちらかに一致すれば一致。#171）・All-Instruments-VaR にだけある銘柄の数・BPF にだけある銘柄の数・zip の大きさ）、`rows_factor`・`rows_factor_fitted`（INTEGER NULLABLE。#168。`jscc_var_scenario_factor` に書いた行数とそのうち g が空でない行の数。それより前の行は NULL）。
 
 ## 時刻
 
@@ -424,9 +424,10 @@ JSCC が公開する VaR 証拠金計算用パラメータファイル（1600 �
 
 - **`jscc_ingest_runs` が `status = 'succeeded'` の日だけを使う**。1 日の 4 表は別々のロード（パーティションの置き換え）なので、失敗した日は表の間で中身がずれていることがある。失敗した日は次の実行が取り直す
 - 1 日 1 版で銘柄は一意（置き換えなので、同じ日を取り直しても重複しない）
-- 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは清算値段 × `contract_size` を下回らない（2025-02-10 の営業日から。下の古い時期の項）。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
+- 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは、JSCC の値が清算値段 × `contract_size` を下限にしたもの（下限あり。`max(ES, ceil(清算値段 × contract_size))`）の銘柄と、下限を掛けない ES（下限なし）の銘柄がある（下の「OP の売りの下限あり・なし（#171）」の項）。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
 - **古い形の VaRParameter（2024-06-07 まで。#165）**: レコード 0 が `#Record ID,Record Name,Confidence Level,Stress Scenario Number` の 4 列の 1 行で、Aggregation Group ごとの行が無い（全体で 1 つの信頼水準・本数。2024-06-10 から今の 6 列の形）。`jscc_var_parameter` にはファイルのまま 1 行で、`level`・`aggregation_group` を空文字列 `''` にして書く（列・型・モードは変えない。REQUIRED なので NULL にしない）。銘柄の `aggregation_group` の行が無い日は `aggregation_group = ''` の行を使う（取り込みの照合・当てはめも同じ。`jscc.stress_params`）。1 つのファイルに 2 つの形が混ざることは無い（混ざれば取り込みが `stage=parse_parameter` で失敗する）。レコード 1・2（HSRATIO・ASRATIO）と BPF・All-Instruments-VaR の形は 2023-12 のファイルでも今と同じ（2023-12-22・2024-08-05 で確かめた）。古い時期の NK225 の銘柄の `aggregation_group` は `IDX`（今は `IDX_IDX`）
-- **OP の売りの下限は 2025-02-10 の営業日から（#165）**: それより前の JSCC の計算には OP の売りの下限（清算値段 × `contract_size`）が無く、ES が下限より小さい銘柄（清算値段 1〜2 円の遠い OTM。1 日 数件〜数十件）は JSCC の値が ES のまま。取り込みの照合・当てはめの `check_*` も、営業日が `settings.JSCC_OPTION_SHORT_FLOOR_FROM`（2025-02-10）より前なら下限を付けない。切り替わりの日の確かめ方: archive の All-Instruments-VaR を二分し、NK225 の OP（取引単位 1000）の 1 枚の売りが 1000 円（下限の最小）未満の銘柄がある最後の日が 2025-02-07、無い最初の日が 2025-02-10。同じ日から BPF のシナリオ後の OP の値も 1 単位 1 円を下回らなくなった（2023-12-22・2024-08-05 は下回る銘柄が千前後、2025-02-10 は 0）。2025-02-10 以降で下限が実際に効いた銘柄を見たのは 2026-11-16 の 1 件（#164）だけで、2025-02-10 〜 2026-11-13 の間の日の下限は、その間に All-Instruments-VaR の標本で 1000 円未満が無いことからの推定
+- **OP の売りの下限あり・なし（#171）**: JSCC の 1 枚の売りが下限あり・下限なしのどちらになるかの条件は決まっていない。下限なしの例は、取引最終日まで 1〜3 営業日の NK225E の当月限の深い OTM のプット（2025-02-10 以降の取り込み済みの日で 3 日 20 件）と、2025-02-07 までの日の ES が下限より小さい銘柄（清算値段 1〜2 円の遠い OTM。1 日 数件〜数十件）。下限ありの例は、ES が下限より小さい 1〜2 年先の限月（2026-11 に 2 件）。取り込みの照合は日付によらず両方を候補にし、売りは JSCC の値がどちらかに一致すれば一致（`jscc_ingest_runs.margin_matched` はどちらかに一致した数）。答えが分かれた銘柄（ES < 下限で JSCC がどちらかに一致）は、ログ INFO `jscc_margin_floor_split` に件数・銘柄コード・限月・取引最終日までの営業日数を出す（境目を探す手がかり。runbook の「JSCC の VaR パラメータ（#164）」）。当てはめの `check_*` は、JSCC の売りが下限以上の銘柄だけに下限を掛ける
+- **2025-02-10 の JSCC の変更はシナリオの値の下限（#171）**: JSCC のお知らせ「VaR証拠金計算におけるオプション取引のシナリオ損益額に下限値を設定します」は、BPF のシナリオの値（オプション価値）が 0 円になる場合に呼値の最小単位 × 取引単位（日経225 オプションで 1,000 円）を下限にするもので、1 枚の証拠金の下限ではない。BPF の値には反映済みで、シナリオ後の OP の値が 1 単位 1 円を下回る銘柄は 2023-12-22・2024-08-05 に千前後、2025-02-10 に 0。All-Instruments-VaR の NK225 の OP の 1 枚の売りが 1000 円未満の銘柄が 2025-02-07 まであり 2025-02-10 から無いのも、この変更の効果（シナリオの値が下がりきらなくなった）と見られる。#165 で「2025-02-10 から 1 枚の売りに下限」としたのはこの取り違えで、#171 で日付による切り替えをやめた
 - ポートフォリオの証拠金は、銘柄ごとの v（向き × 枚数 × `pnl`。`pnl` は 1 枚あたりなので `contract_size` は掛けない）をシナリオごとに足してから同じ計算をする（相殺の制限・Aggregation Group をまたぐ計算は `jscc_var_parameter` のレコード 1・2 の係数を使う。ここでは扱わない）
 - 1 銘柄の行は `pnl` が 1,422 個（2026-11 時点）で約 11KB。1 日分の全銘柄は約 131MiB（論理）。1 日のパーティションはクラスタの絞り込みが効くほど大きくないので、銘柄で絞っても課金されるバイト数は 1 日分の全部（`pnl` を読む場合）になる。何度も読むなら 1 日・1 限月ごとに手元に持つ
 - 翌日に新しくできる銘柄は 1600 版の BPF に無い（All-Instruments-VaR には載るので、`jscc_ingest_runs.margin_ref_only` に数だけ出る）
@@ -485,9 +486,11 @@ es AS (  -- t = n × q / 10^6、k = floor(t)。ES = −(10^6 × Σ_{rn ≤ k} v 
   FROM r GROUP BY instrument_code, side
 )
 SELECT i.instrument_code,
-  -- 切り上げ（DIV は 0 の方へ切り捨てるので num + den − 1）、0 未満は 0。OP の売りは清算値段 × Contract Size が下限（2025-02-10 から）
+  -- 切り上げ（DIV は 0 の方へ切り捨てるので num + den − 1）、0 未満は 0。OP の売りは清算値段 × Contract Size を下限にした値（下限あり）と
+  -- 下限なしの値の 2 列。JSCC の売りはどちらか（#171）
   GREATEST(0, DIV(s.num + s.den - 1, s.den),
-    IF(i.contract_type = 'OOP' AND @d >= DATE '2025-02-10', CAST(CEIL(CAST(i.price AS NUMERIC) * i.contract_size) AS INT64), 0)) AS margin_short,
+    IF(i.contract_type = 'OOP', CAST(CEIL(CAST(i.price AS NUMERIC) * i.contract_size) AS INT64), 0)) AS margin_short,
+  GREATEST(0, DIV(s.num + s.den - 1, s.den)) AS margin_short_no_floor,
   GREATEST(0, DIV(l.num + l.den - 1, l.den)) AS margin_long,
   i.margin_short_jscc, i.margin_long_jscc
 FROM inst AS i
@@ -508,7 +511,7 @@ JOIN es AS l ON l.instrument_code = i.instrument_code AND l.side = 1
 - **点**: y_ij = ln σ′_ij − ln σ₀_i。σ′_ij は V′_ij を (F′_j, K, T₁) で逆算した IV。V′ が 1 円以下（下限）か逆算できない（σ = 1e-4 の値 + 1e-9 以下・σ = 5 の値以上）点はそのシナリオの当てはめから除く
 - **当てはめ**: 節点 −5, −4, −3, −2, −1.5, −1, −0.5, 0, 0.5, 1, 1.5, 2, 3 の折れ線（hat の基底。z は端で切る）を y にリッジ 1e-4 の最小二乗で（シナリオごと。正規方程式は 3 重対角）。点が 0 個のシナリオは g_j = 0（件数はログの `factor_empty_scenarios`）。Black-76 の割引は e^{−rate·T}、IV の逆算は区間 [1e-4, 5] の Newton と二分法
 - **g が空**: T₁ ≤ 0（h の間に SQ）、使う OP が 5 本未満、非有限の値が出た限月。r は入る。`atm_iv` は σ₀ が求まれば入る
-- **質の列**: 使う OP のうち `margin_short_jscc` があるものを、基準の状態に r・g を当てて値を作り直し（V̂_ij = max(1, round(Black-76(F₀ e^{r_j}, K, T₁, σ₀_i e^{g_j(z_i)})))、四捨五入は .5 を上へ）、1 枚の売りの ES（上の「JSCC の VaR パラメータの読み方（#164）」と同じ計算・同じ下限）と `margin_short_jscc` の相対誤差を見る
+- **質の列**: 使う OP のうち `margin_short_jscc` があるものを、基準の状態に r・g を当てて値を作り直し（V̂_ij = max(1, round(Black-76(F₀ e^{r_j}, K, T₁, σ₀_i e^{g_j(z_i)})))、四捨五入は .5 を上へ）、1 枚の売りの ES（上の「JSCC の VaR パラメータの読み方（#164）」と同じ計算。売りの下限は `margin_short_jscc` が下限以上の銘柄だけに掛ける。#171）と `margin_short_jscc` の相対誤差を見る
 - 1 行は最大 約 160KB（`g` が 13 × 1,422 個）、1 日 約 40 行・約 6MB。シミュレーターは 1 日分を 1 回で読む
 
 1 日の限月ごとの長さと質（`bq query --parameter=d:DATE:2026-11-20 ...`。値は貼らず件数・有無を見る）:

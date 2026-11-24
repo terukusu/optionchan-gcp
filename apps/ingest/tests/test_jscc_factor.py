@@ -259,8 +259,7 @@ def test_quantile():
 
 
 def collect(instruments, business_date=BD):
-    """合成の銘柄を BPF の行にして読み、(collector, scenarios, stress, reference) を返す。reference の売りの下限は
-    営業日が settings.JSCC_OPTION_SHORT_FLOOR_FROM 以降のときだけ（JSCC と同じ）"""
+    """合成の銘柄を BPF の行にして読み、(collector, scenarios, stress, reference) を返す。reference の売りは下限あり"""
     reader = jscc.BpfReader(
         Bpf(business_date=business_date, instruments=instruments).lines(),
         product_group="NK225",
@@ -273,12 +272,7 @@ def collect(instruments, business_date=BD):
     for inst in reader:
         is_hist = [t == "H" for _, t in reader.scenarios]
         stress.setdefault(inst.aggregation_group, jscc.stress_params(records, inst.aggregation_group))
-        reference[inst.instrument_code] = jscc.instrument_margins(
-            inst,
-            is_hist,
-            *stress[inst.aggregation_group],
-            short_floor=business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM,
-        )
+        reference[inst.instrument_code] = jscc.instrument_margins(inst, is_hist, *stress[inst.aggregation_group])
         collector.add(inst)
     return collector, reader.scenarios, stress, reference
 
@@ -582,26 +576,19 @@ def test_fifth_week_rows():
     assert result.skipped == {jscc_factor.EXPIRED: ["NK225C5:2025125"]}
 
 
-def test_check_uses_short_floor_only_from_switch_date(monkeypatch):
-    """当て直しの check の売りの下限は JSCC_OPTION_SHORT_FLOOR_FROM 以降の営業日だけ（#165）"""
-    calls = []
-    real = jscc.option_short_floor
-
-    def spy(inst):
-        calls.append(inst.instrument_code)
-        return real(inst)
-
+def test_check_floor_follows_reference(monkeypatch):
+    """当て直しの check の売りの下限は、JSCC の売りが下限以上の銘柄だけに掛ける（日付によらない。#171）"""
+    big = 10**9  # どの当て直しの ES よりも大きい下限
+    monkeypatch.setattr(jscc, "option_short_floor", lambda inst: big)
     month = factor_month(seed=32)
     collector, scenarios, stress, ref = collect(month.instruments)
-    monkeypatch.setattr(jscc, "option_short_floor", spy)
-    for switch, expect_calls in ((BD, True), (BD + timedelta(days=1), False)):
-        calls.clear()
-        monkeypatch.setattr(settings, "JSCC_OPTION_SHORT_FLOOR_FROM", switch)
+
+    def check_rel(short):
         [row] = factor_rows(
             collector,
             scenarios=scenarios,
             stress=stress,
-            reference=ref,
+            reference={code: (short, long) for code, (_, long) in ref.items()},
             business_date=BD,
             holidays=HOL,
             file_version="1600",
@@ -609,4 +596,24 @@ def test_check_uses_short_floor_only_from_switch_date(monkeypatch):
             rate=RATE,
         ).rows
         assert row["check_n"] > 0
-        assert bool(calls) is expect_calls
+        return row["check_median_rel"], row["check_p90_rel"]
+
+    # JSCC = 下限 → 下限を掛けた ES も下限で、誤差 0
+    assert check_rel(big) == (0.0, 0.0)
+    # JSCC < 下限 → 下限を掛けない（下限を掛けていれば誤差はほぼ 0 のまま）
+    median, p90 = check_rel(big - 1)
+    assert median > 0.99 and p90 > 0.99
+
+
+def test_last_trading_day_and_business_days_after():
+    hol = frozenset({date(2026, 12, 9)})
+    assert jscc_factor.last_trading_day("NK225E", "202612", frozenset()) == date(2026, 12, 10)
+    assert jscc_factor.last_trading_day("NK225E", "202612", frozenset({date(2026, 12, 10)})) == date(2026, 12, 9)
+    assert jscc_factor.last_trading_day("NK225W2", "2026122", frozenset()) == date(2026, 12, 10)
+    assert jscc_factor.last_trading_day("NK225E", "2026XX", frozenset()) is None
+    # 翌営業日から end まで（両端を含む）。週末・休日を数えない
+    assert jscc_factor.business_days_after(date(2026, 12, 9), date(2026, 12, 10), frozenset()) == 1
+    assert jscc_factor.business_days_after(date(2026, 12, 4), date(2026, 12, 10), frozenset()) == 4
+    assert jscc_factor.business_days_after(date(2026, 12, 4), date(2026, 12, 10), hol) == 3
+    assert jscc_factor.business_days_after(date(2026, 12, 10), date(2026, 12, 10), hol) == 0
+    assert jscc_factor.business_days_after(date(2026, 12, 11), date(2026, 12, 10), hol) == 0

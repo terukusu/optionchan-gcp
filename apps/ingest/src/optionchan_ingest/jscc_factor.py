@@ -7,7 +7,8 @@
 - T₀ = (SQ の 09:00 − 営業日の 15:45) / 365、h = 営業日から 2 営業日後までの暦日、T₁ = T₀ − h / 365
 - σ₀ = 清算値段の IV、σ′_ij = シナリオ後の 1 単位の値 pnl_ij / contract_size の (F′_j, T₁) での IV。
   y_ij = ln σ′_ij − ln σ₀_i を z の折れ線（hat の基底）にリッジ付きの最小二乗で当てはめる（正規方程式は 3 重対角）
-- check_*: 基準の状態で当て直した 1 枚の売りの ES と All-Instruments-VaR の 1 枚の売りの相対誤差
+- check_*: 基準の状態で当て直した 1 枚の売りの ES と All-Instruments-VaR の 1 枚の売りの相対誤差。売りの下限
+  （清算値段 × Contract Size）は JSCC の値が下限以上の銘柄だけに掛ける（#171）
 
 numpy は使わない。時計・I/O を持たない（期限は呼び出し側の check で見る）。ログ・例外のメッセージに値を入れない
 （商品・限月コードと件数まで）
@@ -91,6 +92,23 @@ def sq_date(product_code: str, contract_period_code: str, holidays: frozenset[da
     if d is None:
         return None
     return previous_business_day(d, holidays)
+
+
+def last_trading_day(product_code: str, contract_period_code: str, holidays: frozenset[date]) -> date | None:
+    """取引最終日 = SQ の日（sq_date）の前の営業日。SQ が決まらなければ None"""
+    sq = sq_date(product_code, contract_period_code, holidays)
+    if sq is None:
+        return None
+    return previous_business_day(sq - timedelta(days=1), holidays)
+
+
+def business_days_after(start: date, end: date, holidays: frozenset[date]) -> int:
+    """start の翌日から end まで（両端を含む）の営業日の数。end ≤ start なら 0"""
+    n, d = 0, start
+    while d < end:
+        d += timedelta(days=1)
+        n += is_business_day(d, holidays)
+    return n
 
 
 def horizon_days(business_date: date, holidays: frozenset[date], n: int = 2) -> int:
@@ -315,7 +333,6 @@ def _fit_month(
     is_hist: list[bool],
     stress: dict[str, tuple[float, int]],
     reference: dict[str, tuple[int, int]],
-    short_floor: bool = True,
 ) -> dict:
     """σ₀・z・g・質の列。戻り値は {atm_iv, g, nodes, n_fit, fit_rmse, check_*, reason, empty}"""
     nodes = settings.JSCC_FACTOR_NODES
@@ -403,13 +420,15 @@ def _fit_month(
             v = black76(is_call, F0 * growth[j], K, T1, s0 * math.exp(gz), rate)
             values.append(max(1, math.floor(v + 0.5)) * cs)
         confidence, n_stress = stress[inst.aggregation_group]
+        # JSCC の値が下限を下回るのは下限を掛けなかったときだけ。照合と同じく JSCC の値で下限の有無を決める（#171）
+        fl = jscc.option_short_floor(inst)
         es = jscc.margin_one_lot(
             values,
             is_hist,
             side=-1,
             confidence=confidence,
             n_stress=n_stress,
-            floor=jscc.option_short_floor(inst) if short_floor else 0,
+            floor=fl if ref[0] >= fl else 0,
         )
         rel.append(abs(es - ref[0]) / ref[0])
     out.update(
@@ -526,7 +545,6 @@ def factor_rows(
                 is_hist=is_hist,
                 stress=stress,
                 reference=reference,
-                short_floor=business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM,
             )
             if fit["reason"]:
                 skip(fit["reason"], product, period)
