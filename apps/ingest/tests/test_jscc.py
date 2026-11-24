@@ -466,7 +466,7 @@ def test_instrument_margins_floor_only_for_option_short():
     hist = [t == "H" for _, t in SCENARIOS]
     assert jscc.instrument_margins(insts[0], hist, 50, 2) == (24500, 1)
     assert jscc.instrument_margins(insts[1], hist, 50, 2) == (1, 1)
-    # 下限なし（2025-02-10 より前の JSCC の計算。#165）: 売りは ES のまま
+    # 下限なし（JSCC の値が下限を掛けない銘柄。#171）: 売りは ES のまま
     no_floor = jscc.margin_one_lot(insts[0].pnl, hist, side=-1, confidence=50, n_stress=2)
     assert no_floor < 24500
     assert jscc.instrument_margins(insts[0], hist, 50, 2, short_floor=False) == (no_floor, 1)
@@ -505,12 +505,34 @@ def test_compare_margins():
     assert (check.matched, check.mismatched, check.ref_only, check.bpf_only) == (3, 3, 1, 1)
     assert check.mismatched_codes == ("b", "c")
     assert check.matched + check.mismatched == 2 * 3
+    assert check.floor_applied == check.floor_not_applied == ()
+
+
+def test_compare_margins_floor_either():
+    """OP の売りは下限あり・なしのどちらかに一致すれば一致。どちらにも合わない銘柄は不一致で、分かれた件数に入れない。
+    no_floor に無い銘柄（先物・下限が効かない OP）の売りの候補は 1 つ（#171）"""
+    computed = {"near": (24500, 1), "far": (24500, 1), "odd": (24500, 1), "fut": (5, 5)}
+    no_floor = {"near": 7, "far": 7, "odd": 7}
+    reference = {"near": (7, 1), "far": (24500, 1), "odd": (9, 1), "fut": (5, 5)}
+    check = jscc.compare_margins(computed, reference, no_floor)
+    assert (check.matched, check.mismatched) == (7, 1)
+    assert check.mismatched_codes == ("odd",)
+    assert check.floor_applied == ("far",)
+    assert check.floor_not_applied == ("near",)
+    # 下限なしの候補を持たない銘柄は、その値に合っても不一致
+    check = jscc.compare_margins(computed, {**reference, "fut": (7, 5)}, no_floor)
+    assert check.mismatched_codes == ("fut", "odd")
+    # 買いの不一致は売りの判定と別に数える（売りが下限なしに一致していれば分かれた件数に入る）
+    check = jscc.compare_margins(computed, {**reference, "near": (7, 2)}, no_floor)
+    assert (check.matched, check.mismatched) == (6, 2)
+    assert check.mismatched_codes == ("near", "odd")
+    assert check.floor_not_applied == ("near",)
 
 
 def test_compare_margins_codes_capped():
     computed = {f"{i:03d}": (1, 1) for i in range(30)}
     reference = {f"{i:03d}": (2, 2) for i in range(30)}
-    check = jscc.compare_margins(computed, reference)
+    check = jscc.compare_margins(computed, reference, {f"{i:03d}": 3 for i in range(30)})
     assert check.mismatched == 60
     assert check.mismatched_codes == tuple(f"{i:03d}" for i in range(20))
 

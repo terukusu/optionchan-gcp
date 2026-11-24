@@ -16,6 +16,7 @@ from jsccgen import (
     all_instruments_var,
     default_instruments,
     factor_month,
+    future,
     listing_html,
     var_parameter,
     var_parameter_global,
@@ -40,18 +41,17 @@ def schema(table):
         return json.load(f)
 
 
-def expected_margins(bpf: Bpf, param_text: str | None = None, short_floor: bool | None = None):
+def expected_margins(bpf: Bpf, param_text: str | None = None, short_floor: bool = True, no_floor_codes=()):
     """合成の BPF から計算した 1 枚の証拠金（照合の基準を合成する。計算の正しさは test_jscc の手計算で検査）。
-    short_floor が None なら JSCC と同じく営業日が JSCC_OPTION_SHORT_FLOOR_FROM 以降のときだけ OP の売りに下限"""
-    if short_floor is None:
-        short_floor = bpf.business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM
+    OP の売りは short_floor なら下限あり。no_floor_codes の銘柄だけ下限なし（JSCC は銘柄ごとにどちらか。#171）"""
     reader = jscc.BpfReader(bpf.lines(), product_group="NK225", business_date=bpf.business_date)
     records = jscc.parse_var_parameter(param_text or var_parameter())
     out = {}
     for inst in reader:
         hist = [t == "H" for _, t in reader.scenarios]
         conf, n = jscc.stress_params(records, inst.aggregation_group)
-        out[inst.instrument_code] = jscc.instrument_margins(inst, hist, conf, n, short_floor=short_floor)
+        floor = short_floor and inst.instrument_code not in no_floor_codes
+        out[inst.instrument_code] = jscc.instrument_margins(inst, hist, conf, n, short_floor=floor)
     return out
 
 
@@ -919,25 +919,124 @@ def test_manual_past_day_is_not_auto_target(capsys):
     assert ("download", names(OLD)[0]) not in fake.calls
 
 
-@pytest.mark.parametrize(
-    "day, floor_in_reference, mismatched",
-    [
-        (OLD, False, 0),  # 下限の前: JSCC は ES のまま → 一致
-        (OLD, True, None),  # 下限の前に下限を付けた基準 → 不一致（下限を効かせていないことの確かめ）
-        (D3, True, 0),
-        (D3, False, None),
-    ],
-)
-def test_option_short_floor_switch_date(day, floor_in_reference, mismatched, capsys):
-    """OP の売りの下限は JSCC_OPTION_SHORT_FLOOR_FROM（2025-02-10）以降の営業日だけ（#165）"""
-    assert OLD < settings.JSCC_OPTION_SHORT_FLOOR_FROM <= D3
-    bpf = Bpf(business_date=day)  # 既定の OP は清算値段 10 円 × 1000 が ES より大きい（下限が効く）
-    ref = expected_margins(bpf, var_parameter(), short_floor=floor_in_reference)
-    assert ref != expected_margins(bpf, var_parameter(), short_floor=not floor_in_reference)
+# ---- OP の売りの下限あり・なし（#171） ----
+
+NEAR_DAY = date(2026, 12, 7)  # 月曜。202612 の SQ は 12-11（金）、取引最終日は 12-10（木）
+NEAR_NOW = jst(2026, 12, 7, 18, 30)
+SPLIT_KEYS = {
+    "severity",
+    "message",
+    "event",
+    "floor_applied",
+    "floor_not_applied",
+    "applied",
+    "not_applied",
+    "business_date",
+    "jscc_run_id",
+    "execution",
+    "trigger",
+}
+
+
+def floor_bpf(day=NEAR_DAY, pnl=None):
+    """OP の売り 3 銘柄（期限の近い限月・遠い限月・取引カレンダー（偽物は 2027-06-30 まで）の外の限月）と先物。
+    既定の pnl なら OP の下限（清算値段 10 円 × 1000）が ES より大きい（下限あり・なしで売りが分かれる）"""
+    return Bpf(
+        business_date=day,
+        instruments=[
+            Inst("100000001", put_call="P", period="202612", strike="29500.0000", pnl=pnl),
+            Inst("100000002", put_call="P", period="202703", underlying="202703", strike="29500.0000", pnl=pnl),
+            Inst("100000003", put_call="C", period="202812", underlying="202812", pnl=pnl),
+            future("100000004", price="38000.0"),
+            *default_instruments()[4:],
+        ],
+    )
+
+
+def split_logs(records):
+    return [r for r in records if r["event"] == "jscc_margin_floor_split"]
+
+
+def test_option_short_floor_either(capsys):
+    """期限の近い限月は JSCC = 下限なし、遠い限月は下限あり: どちらも一致で、分かれた銘柄を INFO に出す"""
+    bpf = floor_bpf()
+    ref = expected_margins(bpf, no_floor_codes={"100000001"})
+    with_floor = expected_margins(bpf)
+    assert ref["100000001"][0] < with_floor["100000001"][0]
+    assert ref["100000002"] == with_floor["100000002"]
+    fake = FakeJscc(days=(NEAR_DAY,), bpfs={NEAR_DAY: bpf}, margins={NEAR_DAY: ref})
+    fake.holidays = frozenset({date(2026, 12, 9)})
+    result = sync(fake, now=NEAR_NOW, dates=[NEAR_DAY])
+    assert result.outcome == "ok"
+    [run] = fake.runs()
+    assert run["margin_mismatched"] == 0 and run["margin_matched"] == 8
+    records = logs(capsys)
+    assert not [r for r in records if r["severity"] == "ERROR"]
+    [split] = split_logs(records)
+    assert split["severity"] == "INFO"
+    assert set(split) == SPLIT_KEYS
+    assert (split["floor_applied"], split["floor_not_applied"]) == (2, 1)
+    # 取引最終日（12-10）まで: 12-08・12-10（12-09 は休日）
+    assert split["not_applied"] == [{"code": "100000001", "period": "NK225E:202612", "bdays_to_last_trading_day": 2}]
+    # 202703 の取引最終日は 2027-03-11（SQ 03-12 の前の営業日）。202812 は取引カレンダーの外なので null
+    assert split["applied"] == [
+        {"code": "100000002", "period": "NK225E:202703", "bdays_to_last_trading_day": 67},
+        {"code": "100000003", "period": "NK225E:202812", "bdays_to_last_trading_day": None},
+    ]
+
+
+def test_option_short_floor_neither_is_mismatch(capsys):
+    """下限あり・なしのどちらにも合わない売りは不一致（ERROR）で、分かれた件数に入れない"""
+    bpf = floor_bpf()
+    ref = expected_margins(bpf, no_floor_codes={"100000001"})
+    ref["100000001"] = (ref["100000001"][0] + 1, ref["100000001"][1])
+    fake = FakeJscc(days=(NEAR_DAY,), bpfs={NEAR_DAY: bpf}, margins={NEAR_DAY: ref})
+    sync(fake, now=NEAR_NOW, dates=[NEAR_DAY])
+    [run] = fake.runs()
+    assert (run["margin_matched"], run["margin_mismatched"]) == (7, 1)
+    records = logs(capsys)
+    [err] = [r for r in records if r["event"] == "jscc_margin_mismatch"]
+    assert err["severity"] == "ERROR" and err["codes"] == ["100000001"]
+    [split] = split_logs(records)
+    assert (split["floor_applied"], split["floor_not_applied"]) == (2, 0)
+    assert split["not_applied"] == []
+    assert "100000001" not in {x["code"] for x in split["applied"]}
+
+
+@pytest.mark.parametrize("day", [OLD, D3])
+@pytest.mark.parametrize("floor_in_reference", [True, False])
+def test_option_short_floor_does_not_depend_on_date(day, floor_in_reference, capsys):
+    """2025-02-10 の前後で照合を切り替えない（どの日も下限あり・なしの両方を候補にする）"""
+    bpf = Bpf(business_date=day)  # 既定の OP は清算値段 × 1000 が ES より大きい（下限が効く）
+    ref = expected_margins(bpf, short_floor=floor_in_reference)
+    assert ref != expected_margins(bpf, short_floor=not floor_in_reference)
     fake = FakeJscc(days=(day,), bpfs={day: bpf}, margins={day: ref})
     sync(fake, dates=[day])
     [run] = fake.runs()
-    if mismatched == 0:
-        assert run["margin_mismatched"] == 0 and run["margin_matched"] == 8
-    else:
-        assert run["margin_mismatched"] > 0
+    assert run["margin_mismatched"] == 0 and run["margin_matched"] == 8
+    [split] = split_logs(logs(capsys))
+    assert (split["floor_applied"], split["floor_not_applied"]) == ((3, 0) if floor_in_reference else (0, 3))
+
+
+def test_no_floor_split_log_when_es_above_floor(capsys):
+    """下限が ES 以下の銘柄だけなら売りは分かれない（INFO を出さない）"""
+    bpf = floor_bpf(pnl=[50000, 60000, 70000, 80000, 90000, 100000, 110000])
+    assert expected_margins(bpf) == expected_margins(bpf, short_floor=False)
+    fake = FakeJscc(days=(NEAR_DAY,), bpfs={NEAR_DAY: bpf})
+    sync(fake, now=NEAR_NOW, dates=[NEAR_DAY])
+    [run] = fake.runs()
+    assert run["margin_mismatched"] == 0
+    assert split_logs(logs(capsys)) == []
+
+
+def test_floor_split_items_capped_and_unknown_period():
+    codes = [f"{i:03d}" for i in range(25)]
+    periods = {code: ("NK225E", "202612") for code in codes}
+    periods["000"] = ("NK225E", "2026XX")  # SQ が決まらない
+    items = jscc_sync.floor_split_items(codes, periods, NEAR_DAY, frozenset(), None)
+    assert len(items) == jscc.MISMATCH_CODES_MAX
+    assert items[0] == {"code": "000", "period": "NK225E:2026XX", "bdays_to_last_trading_day": None}
+    assert items[1]["bdays_to_last_trading_day"] == 3
+    # 営業日が取引最終日なら 0
+    [item] = jscc_sync.floor_split_items(["001"], periods, date(2026, 12, 10), frozenset(), None)
+    assert item["bdays_to_last_trading_day"] == 0

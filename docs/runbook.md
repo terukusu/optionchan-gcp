@@ -3761,7 +3761,8 @@ xargs -n 5 < dates.txt | while read -r line; do
   args=$(printf -- '--date=%s,' $line); args=${args%,}
   gcloud run jobs execute jscc-sync --region $L --project $P --wait --args="$args" < /dev/null || echo "失敗: $line"
 done
-# 3. 入った日と照合（日ごとの最新の succeeded。dates.txt の日数と n_days が同じで、mismatched = 0）
+# 3. 入った日と照合（日ごとの最新の succeeded。dates.txt の日数と n_days が同じで、mismatched = 0。
+#    2025-04-07・2025-04-09・2026-03-11 の 3 日は #171 の前の記録で、合わせて 20 と出る。取り直せば 0。取り直しは不要）
 bq query --location=$L --use_legacy_sql=false --format=pretty '
 WITH latest AS (
   SELECT business_date, ARRAY_AGG(STRUCT(jscc_run_id, margin_matched, margin_mismatched, rows_factor, rows_factor_fitted)
@@ -3780,7 +3781,7 @@ GROUP BY 1 HAVING COUNTIF(status = "succeeded") = 0 ORDER BY 1'
 ```
 
 - r・g の表は下の「確認」の Q3 の `business_date >= "2026-11-16"`（2 か所）を `business_date < "2026-11-16"` に変えて流す（各日 `same_run = n_rows`）
-- 照合の不一致があれば、その日の `jscc_margin_mismatch` の `codes` と下の「ERROR を受けたとき」の手順で原因を見る（Issue に書くのは原因だけ。値は書かない）。OP の売りの下限は 2025-02-10 の営業日からで、それより前の日は下限を付けずに照合する（[data.md](data.md) の「JSCC の VaR パラメータの読み方（#164）」）。不一致が出たら、まず切り替わりの日（`settings.JSCC_OPTION_SHORT_FLOOR_FROM`）の前後かを見る
+- 照合の不一致があれば、その日の `jscc_margin_mismatch` の `codes` と下の「ERROR を受けたとき」の手順で原因を見る（Issue に書くのは原因だけ。値は書かない）。OP の売りは、日付によらず JSCC の値が下限あり・下限なしのどちらかに一致すれば一致とする（#171。[data.md](data.md) の「JSCC の VaR パラメータの読み方（#164）」）
 - 入れ終えたら、入れた範囲（局面ごとの最初と最後の日・日数）を依頼元に知らせる
 
 ### 確認
@@ -3789,7 +3790,7 @@ GROUP BY 1 HAVING COUNTIF(status = "succeeded") = 0 ORDER BY 1'
 # ログ（取り込んだ日・行数・照合の件数）
 gcloud logging read 'resource.type="cloud_run_job" AND resource.labels.job_name="jscc-sync" AND jsonPayload.event:"jscc_"' \
   --project $P --freshness=1d --limit 20 --format=json \
-  | jq -c '.[] | {t: .timestamp, s: .severity, e: .jsonPayload.event, d: .jsonPayload.business_date, stage: .jsonPayload.stage, rows: .jsonPayload.rows_scenario, ok: .jsonPayload.margin_matched, ng: .jsonPayload.margin_mismatched, ref_only: .jsonPayload.margin_ref_only, sec: .jsonPayload.elapsed_seconds}'
+  | jq -c '.[] | {t: .timestamp, s: .severity, e: .jsonPayload.event, d: .jsonPayload.business_date, stage: .jsonPayload.stage, rows: .jsonPayload.rows_scenario, ok: .jsonPayload.margin_matched, ng: .jsonPayload.margin_mismatched, ref_only: .jsonPayload.margin_ref_only, sec: .jsonPayload.elapsed_seconds, floor: .jsonPayload.floor_applied, no_floor: .jsonPayload.floor_not_applied, not_applied: .jsonPayload.not_applied}'
 # Q1: 日ごとの行数（= NK225 の銘柄数）・シナリオの本数がそろっているか・銘柄の重複が無いか
 bq query --location=$L --use_legacy_sql=false --format=pretty '
 SELECT business_date, COUNT(*) n, COUNTIF(ARRAY_LENGTH(pnl) = 1422) full_len, COUNT(DISTINCT instrument_code) d
@@ -3814,6 +3815,7 @@ FROM latest AS l LEFT JOIN f USING (business_date) GROUP BY 1 ORDER BY 1'
 gcloud scheduler jobs describe jscc-sync --location $L --project $P --format='value(schedule,timeZone,state)'
 ```
 
+- ログの INFO `jscc_margin_floor_split`（#171）: OP の売りが下限あり・なしで分かれ（ES < 清算値段 × Contract Size）、JSCC がどちらかに一致した銘柄。`floor_applied`・`floor_not_applied` は JSCC が下限あり・下限なしだった件数、`applied`・`not_applied` は銘柄ごとの `code`・`period`（`商品:限月`）・`bdays_to_last_trading_day`（営業日の翌営業日から取引最終日まで（両端を含む）の営業日の数。取引最終日 = SQ の前の営業日。取引カレンダーの範囲の外・決まらない限月は null）を最大 20 件。下限が外れる条件の境目を探す手がかりで、ERROR ではない。これまでの例は、下限なしが取引最終日まで 1〜3 営業日の当月限、下限ありが 1〜2 年先の限月。下限ありの近い限月・下限なしの遠い限月が出たら、依頼元（option-simulator）に件数・限月・営業日数を知らせる（値は書かない）
 - Q1: `full_len = n`・`d = n`。1,422 はシナリオの本数（H 1,250 + S 172。2026-11 時点。変われば Q2 の `scenarios` と同じなら正常）
 - Q2: `margin_mismatched = 0`、`margin_matched = 2 × (rows_scenario − margin_bpf_only)`。`margin_ref_only`（All-Instruments-VaR にだけある銘柄。翌日に新しくできる銘柄で 1600 版の BPF に入らない）は 0〜数件が普通
 - Q3: 各日 `n_rows > 0`・`same_run = n_rows`・`nk225e` = その日の `NK225E` の限月数（Q1 を `product_code = "NK225E"` で限月ごとに数える）・`has_check > 0`。`fitted` が `nk225e` より少ないのは SQ が 2 営業日以内の限月（g 空）。質（`check_median_rel`・`check_p90_rel` の分布）は手元で見るだけ
@@ -3835,7 +3837,7 @@ M2（「新しい取り込みの監視（#35）」）で届く。ジョブのロ
 | `jscc_sync_failed`（`stage=deadline` / `unexpected`） | 期限切れ・想定外の例外。`detail` を見る。期限なら 1 回の日数を減らして手動で流す |
 | WARNING `jscc_factor_incomplete` | 月次の `NK225E`・先物の限月で行が無い・T₁ ≤ 0 以外の理由で g が空（`periods` に限月、`reasons` に理由ごとの件数: `no_parity`・`few_options`・`no_sq`・`nonfinite_*` など）。データは書かれている。続くなら [data.md](data.md) の当てはめの条件と BPF の銘柄を見比べ、シミュレーターに知らせる |
 | WARNING `jscc_calendar_outdated` | 取引カレンダーの確定の範囲（`covered_until`）が営業日 + 7 日より前。SQ・h が土日だけで決まりうる。「取引カレンダー（#63）」の節の版の更新を確かめる（止めない） |
-| `jscc_margin_mismatch` | 計算した 1 枚の証拠金が All-Instruments-VaR と合わない（`codes` に銘柄コードを最大 20 件）。データは書かれている（`status = succeeded`）。JSCC の計算方法の変更か、取り込みの誤り。下のクエリで銘柄の値と JSCC の値を見比べ、[data.md](data.md) の計算（`apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`）を見直す。読み手（simulator）に知らせる |
+| `jscc_margin_mismatch` | 計算した 1 枚の証拠金が All-Instruments-VaR と合わない（`codes` に銘柄コードを最大 20 件。OP の売りは下限あり・なしのどちらにも合わない銘柄）。データは書かれている（`status = succeeded`）。JSCC の計算方法の変更か、取り込みの誤り。下のクエリで銘柄の値と JSCC の値を見比べ、[data.md](data.md) の計算（`apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`）を見直す。読み手（simulator）に知らせる |
 | Scheduler の失敗（`cloud_scheduler_job` の `jscc-sync`） | ジョブを起動できない（`PERMISSION_DENIED` なら `infra/prod/jscc.tf` の起動の権限）。翌平日に取り直される |
 
 ```sh

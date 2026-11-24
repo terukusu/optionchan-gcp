@@ -19,8 +19,10 @@ NK225 の銘柄を NDJSON に書きながら照合し、当てはめに要る銘
 jscc_factor.py。ロードの前なので、当てはめの失敗ではどの表も書かない）→ ロード（jscc_var_parameter →
 jscc_var_scenario_set → jscc_var_scenario → jscc_var_scenario_factor、どれも WRITE_TRUNCATE で <表>$YYYYMMDD）→
 jscc_ingest_runs に succeeded を追記 → NOTICE jscc_ingested。
-照合の不一致は ERROR jscc_margin_mismatch（書き込みは行う）。失敗は ERROR jscc_sync_failed（stage 付き）と
-jscc_ingest_runs の failed の行で、次の日へ進む。4 表は別々のロードなので、読み手は succeeded の日だけを使う。
+照合の不一致は ERROR jscc_margin_mismatch（書き込みは行う）。OP の売りは下限あり・なしのどちらかに一致すれば一致で、
+答えが分かれた銘柄は INFO jscc_margin_floor_split（件数・銘柄コード・限月・取引最終日までの営業日数。#171）。
+失敗は ERROR jscc_sync_failed（stage 付き）と jscc_ingest_runs の failed の行で、次の日へ進む。4 表は別々のロード
+なので、読み手は succeeded の日だけを使う。
 ダウンロードしたファイルは信頼しない: 大きさの上限、zip は期待する 1 メンバーだけを読む、一覧の href は同じ
 ディレクトリのファイル名だけ。ログには件数・銘柄コードまでを出し、価格・損益の値を出さない
 """
@@ -260,8 +262,10 @@ def read_bpf(
     out: _Ndjson,
     collector: jscc_factor.FactorCollector | None = None,
 ) -> tuple:
-    """zip の中の CSV を読み、NK225 の銘柄の行を out に書く。(BpfSummary, 計算した 1 枚の証拠金) を返す。
-    collector があれば各銘柄を渡す（当てはめに要るものだけを残す）"""
+    """zip の中の CSV を読み、NK225 の銘柄の行を out に書く。(BpfSummary, 計算した 1 枚の証拠金（売りは下限あり）,
+    下限なしの売り, 限月) を返す。下限なしの売り・限月は下限あり・なしで売りが分かれる銘柄（OP）だけ
+    （銘柄コード → 値・(product_code, contract_period_code)）。collector があれば各銘柄を渡す
+    （当てはめに要るものだけを残す）"""
     expected = f"BPF_IDX_{business_date:%Y%m%d}_{settings.JSCC_FILE_VERSION}.csv"
     with zipfile.ZipFile(zfile) as z:
         infos = z.infolist()
@@ -270,8 +274,9 @@ def read_bpf(
         if infos[0].file_size > settings.JSCC_MAX_MEMBER_BYTES:
             raise jscc.JsccFormatError(f"zip の中の CSV が上限 {settings.JSCC_MAX_MEMBER_BYTES} を超える")
         computed: dict[str, tuple[int, int]] = {}
+        no_floor: dict[str, int] = {}
+        periods: dict[str, tuple[str, str]] = {}
         stress: dict[str, tuple[float, int]] = {}
-        short_floor = business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM
         with z.open(infos[0]) as raw:
             lines = io.TextIOWrapper(raw, encoding="utf-8", newline="")
             reader = jscc.BpfReader(lines, product_group=settings.JSCC_PRODUCT_GROUP, business_date=business_date)
@@ -283,9 +288,12 @@ def read_bpf(
                 if group not in stress:
                     stress[group] = jscc.stress_params(records, group)
                 confidence, n_stress = stress[group]
-                computed[inst.instrument_code] = jscc.instrument_margins(
-                    inst, is_hist, confidence, n_stress, short_floor=short_floor
-                )
+                short, long = jscc.instrument_margins(inst, is_hist, confidence, n_stress, short_floor=False)
+                floor = jscc.option_short_floor(inst)
+                computed[inst.instrument_code] = (max(short, floor), long)
+                if short < floor:
+                    no_floor[inst.instrument_code] = short
+                    periods[inst.instrument_code] = (inst.product_code, inst.contract_period_code)
                 out.write(
                     jscc.scenario_row(
                         inst,
@@ -297,7 +305,24 @@ def read_bpf(
                 )
                 if collector is not None:
                     collector.add(inst)
-    return reader.summary, computed
+    return reader.summary, computed, no_floor, periods
+
+
+def floor_split_items(
+    codes, periods: dict, business_date: date, holidays: frozenset[date], covered_until: date | None
+) -> list[dict]:
+    """jscc_margin_floor_split の銘柄（先頭 jscc.MISMATCH_CODES_MAX 件）: 銘柄コード・限月・取引最終日までの営業日数
+    （営業日の翌営業日から取引最終日まで。両端を含む。取引最終日 = SQ の前の営業日）。取引最終日が決まらない・
+    取引カレンダーの範囲（covered_until）の外なら営業日数は null"""
+    out = []
+    for code in codes[: jscc.MISMATCH_CODES_MAX]:
+        product, period = periods[code]
+        last = jscc_factor.last_trading_day(product, period, holidays)
+        bdays = None
+        if last is not None and (covered_until is None or last <= covered_until):
+            bdays = jscc_factor.business_days_after(business_date, last, holidays)
+        out.append({"code": code, "period": f"{product}:{period}", "bdays_to_last_trading_day": bdays})
+    return out
 
 
 def process_day(
@@ -311,9 +336,11 @@ def process_day(
     execution: str | None,
     dry_run: bool,
     holidays: frozenset[date] = frozenset(),
+    covered_until: date | None = None,
 ) -> DayResult:
     """1 営業日を取り込む。想定した失敗も想定外の例外もログ（と jscc_ingest_runs の failed の行）にして返す。
-    holidays は取引カレンダーの営業日でない平日（当てはめの SQ・h）"""
+    holidays は取引カレンダーの営業日でない平日（当てはめの SQ・h、取引最終日までの営業日数）、covered_until は
+    取引カレンダーが分かっている最後の日"""
     run_id = deps.new_id()
     started_at = deps.clock()
     ctx = {"business_date": business_date, "jscc_run_id": run_id, "dry_run": dry_run or None, **common}
@@ -344,10 +371,12 @@ def process_day(
         scenario_out = _Ndjson()
         files.append(scenario_out)
         collector = jscc_factor.FactorCollector()
-        summary, computed = read_bpf(zfile, business_date, records, reference, run_id, scenario_out, collector)
+        summary, computed, no_floor, periods = read_bpf(
+            zfile, business_date, records, reference, run_id, scenario_out, collector
+        )
         files.remove(zfile)
         zfile.close()  # メモリ（Cloud Run の /tmp）を先に空ける
-        check = jscc.compare_margins(computed, reference)
+        check = jscc.compare_margins(computed, reference, no_floor)
         set_out = _Ndjson()
         files.append(set_out)
         set_out.write(jscc.scenario_set_row(summary, business_date=business_date, file_version=version, run_id=run_id))
@@ -450,6 +479,22 @@ def process_day(
             mismatched=check.mismatched,
             matched=check.matched,
             codes=list(check.mismatched_codes),
+            **ctx,
+        )
+    if check.floor_applied or check.floor_not_applied:
+        try:  # 手がかりのログだけなので、失敗しても日の結果は変えない
+            applied = floor_split_items(check.floor_applied, periods, business_date, holidays, covered_until)
+            not_applied = floor_split_items(check.floor_not_applied, periods, business_date, holidays, covered_until)
+        except Exception as e:  # noqa: BLE001
+            log("WARNING", "jscc_margin_floor_split_failed", detail=f"{type(e).__name__}: {e}", **ctx)
+            applied = not_applied = None
+        log(
+            "INFO",
+            "jscc_margin_floor_split",
+            floor_applied=len(check.floor_applied),
+            floor_not_applied=len(check.floor_not_applied),
+            applied=applied,
+            not_applied=not_applied,
             **ctx,
         )
     return DayResult(business_date, "dry_run" if dry_run else "succeeded", None, stats)
@@ -669,6 +714,7 @@ def run_sync(
                 execution=execution,
                 dry_run=dry_run,
                 holidays=holidays,
+                covered_until=covered_until,
             )
         )
     failed = failed or any(r.status == "failed" for r in results)
