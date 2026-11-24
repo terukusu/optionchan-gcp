@@ -266,7 +266,7 @@
 |---|---|---|---|
 | `instrument_code` | STRING | REQUIRED | 銘柄コード（Instrument Code）。1 日 1 版で一意 |
 | `product_group_code` | STRING | REQUIRED | `NK225` |
-| `product_code` | STRING | REQUIRED | `NK225E`（OP）・`NK225W1`〜`W4`・`NK225C1`〜`C4`（週次の OP）・`NK225F`・`NK225MF`・`NK225MCF`（先物）など。クラスタの列 |
+| `product_code` | STRING | REQUIRED | `NK225E`（OP）・`NK225W1`〜`W5`・`NK225C1`〜`C5`（週次の OP。5 は第 5 週）・`NK225F`・`NK225MF`・`NK225MCF`（先物）など。クラスタの列 |
 | `contract_type` | STRING | REQUIRED | `FUT`（先物）/ `OOP`（オプション） |
 | `put_call_type` | STRING | NULLABLE | `C` / `P`。先物は NULL。クラスタの列 |
 | `contract_period_code` | STRING | REQUIRED | 限月（`YYYYMM`、週次は `YYYYMMW` の 7 桁）。クラスタの列 |
@@ -281,13 +281,13 @@
 
 `jscc_var_scenario_set`（1 行 = 営業日 × 版）: `file_type`（STRING REQUIRED。`S`）、`scenarios`（RECORD REPEATED。`scenario_id` STRING REQUIRED・`scenario_type` STRING REQUIRED（`H` = ヒストリカル / `S` = ストレス））、`scenarios_h` / `scenarios_s`（INTEGER REQUIRED。本数）。`scenarios` の 0 始まりの添字（`UNNEST(scenarios) WITH OFFSET`）が `pnl` の添字。Scenario ID は H と S で同じものがあるので、`scenario_type` と組で使う。
 
-`jscc_var_parameter`（1 行 = VaRParameter の 1 行。他の商品の行も全部）: `line_no`（INTEGER REQUIRED。ファイルの中の順）、`record_id`（INTEGER REQUIRED。0 = VAR / 1 = HSRATIO / 2 = ASRATIO）、`record_name`・`level`・`aggregation_group`（STRING REQUIRED）、`parent_aggregation_group`・`type`（STRING NULLABLE。レコード 1・2）、`confidence_level`（FLOAT NULLABLE。% 表記の信頼水準、レコード 0）、`stress_scenario_number`（INTEGER NULLABLE。ストレスのうち損失の大きい方から使う本数、レコード 0）、`params`（RECORD REPEATED。`name` STRING REQUIRED・`value` FLOAT REQUIRED。レコード 1・2 の係数）。
+`jscc_var_parameter`（1 行 = VaRParameter の 1 行。他の商品の行も全部）: `line_no`（INTEGER REQUIRED。ファイルの中の順）、`record_id`（INTEGER REQUIRED。0 = VAR / 1 = HSRATIO / 2 = ASRATIO）、`record_name`・`level`・`aggregation_group`（STRING REQUIRED）、`parent_aggregation_group`・`type`（STRING NULLABLE。レコード 1・2）、`confidence_level`（FLOAT NULLABLE。% 表記の信頼水準、レコード 0）、`stress_scenario_number`（INTEGER NULLABLE。ストレスのうち損失の大きい方から使う本数、レコード 0）、`params`（RECORD REPEATED。`name` STRING REQUIRED・`value` FLOAT REQUIRED。レコード 1・2 の係数）。2024-06-07 までのファイル（#165 で入れた過去の日）のレコード 0 は Level・Aggregation Group の無い 1 行（全体に効く信頼水準・本数）で、`level`・`aggregation_group` を空文字列 `''` で書く（下の「JSCC の VaR パラメータの読み方（#164）」）。
 
 `jscc_var_scenario_factor`（1 行 = 営業日 × 版 × 商品 × 限月。(`product_code`, `contract_period_code`) は 1 日 1 版で一意。作り方は下の「JSCC のシナリオの r・g の当てはめ（#168）」）:
 
 | 列 | 型 | モード | 説明 |
 |---|---|---|---|
-| `product_code` | STRING | REQUIRED | `NK225E`（月次の OP の限月）・`NK225W1`〜`W4`（金曜の週次）・`NK225C1`〜`C4`（水曜の週次）。OP の無い先物だけの限月はその先物の商品（`NK225F` など） |
+| `product_code` | STRING | REQUIRED | `NK225E`（月次の OP の限月）・`NK225W1`〜`W5`（金曜の週次）・`NK225C1`〜`C5`（水曜の週次。第 5 週の W5・C5 は #165 から）。OP の無い先物だけの限月はその先物の商品（`NK225F` など） |
 | `contract_period_code` | STRING | REQUIRED | 限月（月次・先物は `YYYYMM`、週次は `YYYYMMn` の 7 桁）。クラスタの列 |
 | `forward_source` | STRING | REQUIRED | F₀・F′ の出どころ。`NK225F` / `NK225MF` / `NK225MCF`（同じ限月の先物。この順に優先）/ `parity`（プットコール・パリティ。先物の無い月次の限月と週次） |
 | `forward` | FLOAT | REQUIRED | F₀（基準の先物の値段。円） |
@@ -420,11 +420,13 @@ ATM IV（その時点で `is_atm` の put の IV）は、原資産が動いて A
 
 ## JSCC の VaR パラメータの読み方（#164）
 
-JSCC が公開する VaR 証拠金計算用パラメータファイル（1600 版 = 清算値段の確定後）のうち日経225 の分を、毎平日 18:30 JST に取り込む（runbook の「JSCC の VaR パラメータ（#164）」）。2026-11-16 の営業日から。
+JSCC が公開する VaR 証拠金計算用パラメータファイル（1600 版 = 清算値段の確定後）のうち日経225 の分を、毎平日 18:30 JST に取り込む（runbook の「JSCC の VaR パラメータ（#164）」）。2026-11-16 の営業日から。それより前は検証に要る局面の日だけを手で入れる（#165。runbook の「過去の日の取り込み（#165）」。どの日があるかは `jscc_ingest_runs` の `succeeded` の日）。
 
 - **`jscc_ingest_runs` が `status = 'succeeded'` の日だけを使う**。1 日の 4 表は別々のロード（パーティションの置き換え）なので、失敗した日は表の間で中身がずれていることがある。失敗した日は次の実行が取り直す
 - 1 日 1 版で銘柄は一意（置き換えなので、同じ日を取り直しても重複しない）
-- 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは清算値段 × `contract_size` を下回らない。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
+- 1 枚の証拠金（JSCC の HS-VaR と同じ計算。2026-11-16〜20 の All-Instruments-VaR と全件一致）: 売り・買いの向き（売り −1・買い +1）× `pnl` を v として、H のシナリオの v の全部と、S のシナリオの v のうち小さい方から `stress_scenario_number` 本を集め（n 本）、小さい方から t = n × (1 − 信頼水準 / 100) 本の平均（端数の本は按分）の符号を変えたもの（期待ショートフォール）を円に切り上げる。0 未満は 0（OP の買いは値が評価額なので 0 になる）。OP の売りは清算値段 × `contract_size` を下回らない（2025-02-10 の営業日から。下の古い時期の項）。信頼水準・本数はその銘柄の `aggregation_group` の `jscc_var_parameter` のレコード 0 の行から取る。実装は `apps/ingest/src/optionchan_ingest/jscc.py` の `margin_one_lot`（端数は分数で計算する。浮動小数で計算すると切り上げで 1 円ずれることがある）
+- **古い形の VaRParameter（2024-06-07 まで。#165）**: レコード 0 が `#Record ID,Record Name,Confidence Level,Stress Scenario Number` の 4 列の 1 行で、Aggregation Group ごとの行が無い（全体で 1 つの信頼水準・本数。2024-06-10 から今の 6 列の形）。`jscc_var_parameter` にはファイルのまま 1 行で、`level`・`aggregation_group` を空文字列 `''` にして書く（列・型・モードは変えない。REQUIRED なので NULL にしない）。銘柄の `aggregation_group` の行が無い日は `aggregation_group = ''` の行を使う（取り込みの照合・当てはめも同じ。`jscc.stress_params`）。1 つのファイルに 2 つの形が混ざることは無い（混ざれば取り込みが `stage=parse_parameter` で失敗する）。レコード 1・2（HSRATIO・ASRATIO）と BPF・All-Instruments-VaR の形は 2023-12 のファイルでも今と同じ（2023-12-22・2024-08-05 で確かめた）。古い時期の NK225 の銘柄の `aggregation_group` は `IDX`（今は `IDX_IDX`）
+- **OP の売りの下限は 2025-02-10 の営業日から（#165）**: それより前の JSCC の計算には OP の売りの下限（清算値段 × `contract_size`）が無く、ES が下限より小さい銘柄（清算値段 1〜2 円の遠い OTM。1 日 数件〜数十件）は JSCC の値が ES のまま。取り込みの照合・当てはめの `check_*` も、営業日が `settings.JSCC_OPTION_SHORT_FLOOR_FROM`（2025-02-10）より前なら下限を付けない。切り替わりの日の確かめ方: archive の All-Instruments-VaR を二分し、NK225 の OP（取引単位 1000）の 1 枚の売りが 1000 円（下限の最小）未満の銘柄がある最後の日が 2025-02-07、無い最初の日が 2025-02-10。同じ日から BPF のシナリオ後の OP の値も 1 単位 1 円を下回らなくなった（2023-12-22・2024-08-05 は下回る銘柄が千前後、2025-02-10 は 0）。2025-02-10 以降で下限が実際に効いた銘柄を見たのは 2026-11-16 の 1 件（#164）だけで、2025-02-10 〜 2026-11-13 の間の日の下限は、その間に All-Instruments-VaR の標本で 1000 円未満が無いことからの推定
 - ポートフォリオの証拠金は、銘柄ごとの v（向き × 枚数 × `pnl`。`pnl` は 1 枚あたりなので `contract_size` は掛けない）をシナリオごとに足してから同じ計算をする（相殺の制限・Aggregation Group をまたぐ計算は `jscc_var_parameter` のレコード 1・2 の係数を使う。ここでは扱わない）
 - 1 銘柄の行は `pnl` が 1,422 個（2026-11 時点）で約 11KB。1 日分の全銘柄は約 131MiB（論理）。1 日のパーティションはクラスタの絞り込みが効くほど大きくないので、銘柄で絞っても課金されるバイト数は 1 日分の全部（`pnl` を読む場合）になる。何度も読むなら 1 日・1 限月ごとに手元に持つ
 - 翌日に新しくできる銘柄は 1600 版の BPF に無い（All-Instruments-VaR には載るので、`jscc_ingest_runs.margin_ref_only` に数だけ出る）
@@ -443,7 +445,7 @@ inst AS (
   WHERE business_date = @d AND product_code = 'NK225E' AND contract_period_code = '202612' AND put_call_type = 'P'
     AND strike_price = 50000 AND (SELECT succeeded FROM done)
 ),
-param AS (  -- q = (100 − 信頼水準) × 10^4（97.5 → 25000）、n_stress = ストレスの本数
+param AS (  -- q = (100 − 信頼水準) × 10^4（97.5 → 25000）、n_stress = ストレスの本数。古い形の日は aggregation_group = '' の 1 行
   SELECT aggregation_group, CAST(ROUND((100 - confidence_level) * 10000) AS INT64) AS q,
     stress_scenario_number AS n_stress
   FROM `<PROJECT_ID>.optionchan_tokyo.jscc_var_parameter`
@@ -463,7 +465,7 @@ vals AS (  -- side = -1（売り）/ 1（買い）。v = side × 値
 ),
 x AS (  -- H の全部と、S の小さい方から n_stress 本
   SELECT instrument_code, side, v, q
-  FROM vals JOIN param USING (aggregation_group)
+  FROM vals JOIN param ON param.aggregation_group IN (vals.aggregation_group, '')
   WHERE TRUE
   QUALIFY scenario_type = 'H'
     OR ROW_NUMBER() OVER (PARTITION BY instrument_code, side, scenario_type ORDER BY v) <= n_stress
@@ -483,9 +485,9 @@ es AS (  -- t = n × q / 10^6、k = floor(t)。ES = −(10^6 × Σ_{rn ≤ k} v 
   FROM r GROUP BY instrument_code, side
 )
 SELECT i.instrument_code,
-  -- 切り上げ（DIV は 0 の方へ切り捨てるので num + den − 1）、0 未満は 0。OP の売りは清算値段 × Contract Size が下限
+  -- 切り上げ（DIV は 0 の方へ切り捨てるので num + den − 1）、0 未満は 0。OP の売りは清算値段 × Contract Size が下限（2025-02-10 から）
   GREATEST(0, DIV(s.num + s.den - 1, s.den),
-    IF(i.contract_type = 'OOP', CAST(CEIL(CAST(i.price AS NUMERIC) * i.contract_size) AS INT64), 0)) AS margin_short,
+    IF(i.contract_type = 'OOP' AND @d >= DATE '2025-02-10', CAST(CEIL(CAST(i.price AS NUMERIC) * i.contract_size) AS INT64), 0)) AS margin_short,
   GREATEST(0, DIV(l.num + l.den - 1, l.den)) AS margin_long,
   i.margin_short_jscc, i.margin_long_jscc
 FROM inst AS i
@@ -498,7 +500,7 @@ JOIN es AS l ON l.instrument_code = i.instrument_code AND l.side = 1
 シミュレーターが JSCC のシナリオを「動かした先の状態」に当て直せるように、jscc-sync が同じ取り込みで BPF から限月ごとの先物のリターン r と IV の対数変化 g(z) を当てはめて `jscc_var_scenario_factor` に書く（ロードは他の 3 表の後、`jscc_ingest_runs` の `succeeded` の前。当てはめで失敗した日はどの表も置き換えない）。実装は `apps/ingest/src/optionchan_ingest/jscc_factor.py`（純 Python）。
 
 - **読み方**: `jscc_ingest_runs` の最新の `succeeded` の `jscc_run_id` と同じ行だけを使う（他の 3 表と同じ）。r・g の添字 j は同じ日の `jscc_var_scenario_set.scenarios` の添字
-- **対象**: 月次の `NK225E` の限月（同じ限月の先物 `NK225F` > `NK225MF` > `NK225MCF` があればその清算値段が F₀、無ければパリティ）、週次の `NK225W1`〜`W4`・`NK225C1`〜`C4`（いつもパリティ）、OP の無い先物だけの限月（r だけ。`product_code` = `forward_source` = その先物の商品で 1 行）
+- **対象**: 月次の `NK225E` の限月（同じ限月の先物 `NK225F` > `NK225MF` > `NK225MCF` があればその清算値段が F₀、無ければパリティ）、週次の `NK225W1`〜`W5`・`NK225C1`〜`C5`（いつもパリティ。SQ は n 番目の金曜・水曜、休業日なら前の営業日。第 5 週は #165 から）、OP の無い先物だけの限月（r だけ。`product_code` = `forward_source` = その先物の商品で 1 行）
 - **値の意味**（`pnl` の説明と同じ。上の `jscc_var_scenario`）: 先物 F′_j = F₀ + `pnl_j` / `contract_size`（`pnl` は 1 枚の損益）、OP のシナリオ後の 1 単位の値 V′_ij = `pnl_ij` / `contract_size`（`pnl` は 1 枚の評価額）。r_j = ln(F′_j / F₀)
 - **パリティ**: 状態（基準と各シナリオ）ごとに、C・P がそろい両方の 1 単位の値が 1 円より大きい行使価格のうち |C − P| の小さい 3 本で F = K + (C − P) / e^{−rate·T} を求めた中央値（2 本・1 本ならその中央値・その値）。基準は清算値段と T₀、シナリオは V′ と max(T₁, 0)。基準か 1 本のシナリオでも組が無い限月は**行なし**（週次で T₁ ≤ 0 の限月は片側が 1 円の下限に張り付くので多くは行なし）
 - **時間**: 営業日 = 土日でなく `trading_calendar_latest` の行（休業日・祝日取引の日の両方）に無い日（上の「30 日固定の ATM IV の計算」の満期 T と同じ）。月次・先物の SQ = 第 2 金曜、週次は `YYYYMMn` の n 番目の金曜（W）/ 水曜（C）。営業日でなければ前の営業日。n 番目が月に無い・商品の数字と n が違う限月は行なし。T₀ =（SQ − 営業日の暦日 − 6.75/24）/ 365、h = 営業日から 2 営業日後までの暦日、T₁ = T₀ − h / 365。カレンダーの `listed_until` より後の SQ は土日だけで決まる（T₀ の誤差は数日 / 365）

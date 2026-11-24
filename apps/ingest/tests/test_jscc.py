@@ -10,7 +10,17 @@ from decimal import Decimal
 
 import pytest
 from conftest import REPO_ROOT
-from jsccgen import SCENARIOS, Bpf, Inst, all_instruments_var, default_instruments, future, listing_html, var_parameter
+from jsccgen import (
+    SCENARIOS,
+    Bpf,
+    Inst,
+    all_instruments_var,
+    default_instruments,
+    future,
+    listing_html,
+    var_parameter,
+    var_parameter_global,
+)
 
 from optionchan_ingest import jscc
 from optionchan_ingest.jscc import BpfReader, JsccFormatError
@@ -322,6 +332,50 @@ def test_stress_params():
         jscc.stress_params(dup, "IDX_IDX")
 
 
+def test_parse_var_parameter_global_form():
+    """古い形（2024-06-07 まで。#165）: レコード 0 は 4 列の 1 行。level・aggregation_group は空文字列"""
+    records = jscc.parse_var_parameter(var_parameter_global("99.0", "3"))
+    assert [r.record_id for r in records] == [0, 1, 1, 2]
+    r0 = records[0]
+    assert (r0.line_no, r0.record_name, r0.level, r0.aggregation_group) == (1, "VAR", "", "")
+    assert r0.aggregation_group == jscc.GLOBAL_GROUP
+    assert (r0.confidence_level, r0.stress_scenario_number) == (99.0, 3)
+    assert r0.params == () and r0.parent_aggregation_group is None and r0.type is None
+    assert records[1].aggregation_group == "IDX" and records[3].params == (("a", 1.0),)
+
+
+def test_stress_params_global_form_applies_to_every_group():
+    records = jscc.parse_var_parameter(var_parameter_global("99.0", "3"))
+    for group in ("IDX", "IDX_IDX", "JGB", "ANY"):
+        assert jscc.stress_params(records, group) == (99.0, 3)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        var_parameter_global(extra0=["0,VAR,99.0,3"]),  # 全体の行が 2 つ
+        var_parameter_global(extra0=["0,VAR,L01,IDX,97.5,2"]),  # 4 列と 6 列が混ざる
+        var_parameter(extra=["0,VAR,97.5,2"]),  # 6 列の後に 4 列
+        var_parameter_global(confidence="x"),
+        var_parameter_global(stress="x"),
+        var_parameter_global(confidence="nan"),
+        "0,VAR,97.5\r\n",  # 3 列
+        "0,VAR,97.5,2,9\r\n",  # 5 列
+    ],
+)
+def test_parse_var_parameter_global_form_errors(text):
+    with pytest.raises(JsccFormatError):
+        records = jscc.parse_var_parameter(text)
+        jscc.stress_params(records, "IDX")
+
+
+def test_stress_params_group_row_is_not_overridden():
+    """今の形: グループの行が無ければ失敗（全体の行に落ちない）"""
+    records = jscc.parse_var_parameter(var_parameter())
+    with pytest.raises(JsccFormatError):
+        jscc.stress_params(records, "IDX_REIT")
+
+
 # ---- margin_one_lot（手で計算した値） ----
 
 H = [-10, -20, 5, 7]
@@ -412,6 +466,11 @@ def test_instrument_margins_floor_only_for_option_short():
     hist = [t == "H" for _, t in SCENARIOS]
     assert jscc.instrument_margins(insts[0], hist, 50, 2) == (24500, 1)
     assert jscc.instrument_margins(insts[1], hist, 50, 2) == (1, 1)
+    # 下限なし（2025-02-10 より前の JSCC の計算。#165）: 売りは ES のまま
+    no_floor = jscc.margin_one_lot(insts[0].pnl, hist, side=-1, confidence=50, n_stress=2)
+    assert no_floor < 24500
+    assert jscc.instrument_margins(insts[0], hist, 50, 2, short_floor=False) == (no_floor, 1)
+    assert jscc.instrument_margins(insts[1], hist, 50, 2, short_floor=False) == (1, 1)
     assert math.ceil(Decimal("24.5") * 1000) == 24500
 
 
@@ -501,4 +560,15 @@ def test_parameter_rows_match_schema():
         assert list(row) == schema_names("jscc_var_parameter")
     assert rows[3]["params"] == [{"name": "a", "value": 0.5}, {"name": "b", "value": 0.25}]
     assert rows[0]["params"] == []
+    json.dumps(rows)
+
+
+def test_parameter_rows_global_form():
+    """古い形のレコード 0 は level・aggregation_group を空文字列で書く（スキーマの REQUIRED を満たす）"""
+    records = jscc.parse_var_parameter(var_parameter_global("99.0", "3"))
+    rows = jscc.parameter_rows(records, business_date=DAY, file_version="1600", run_id="r1")
+    assert list(rows[0]) == schema_names("jscc_var_parameter")
+    assert (rows[0]["level"], rows[0]["aggregation_group"]) == ("", "")
+    assert (rows[0]["confidence_level"], rows[0]["stress_scenario_number"]) == (99.0, 3)
+    assert rows[0]["params"] == [] and rows[0]["parent_aggregation_group"] is None
     json.dumps(rows)

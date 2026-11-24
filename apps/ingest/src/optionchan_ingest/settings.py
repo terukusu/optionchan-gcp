@@ -195,6 +195,13 @@ JSCC_PRODUCT_GROUP = "NK225"
 # 1 回最大 JSCC_MAX_DATES_PER_RUN 日（1 日 約 6〜8 分。#168 の当てはめを含む）
 JSCC_START_DATE = date(2026, 11, 16)
 JSCC_MAX_DATES_PER_RUN = 5
+# OP の売りの 1 枚の証拠金の下限（清算値段 × Contract Size）を効かせる最初の営業日（#165。data.md「JSCC の VaR
+# パラメータの読み方（#164）」）。確かめ方（2026-11-24）: archive の All-Instruments-VaR を 2024-08-05〜2026-11-13 で
+# 二分し、NK225 の OP（取引単位 1000）の 1 枚の売りが 1000 円（清算値段の最小 1 円 × 1000 = 下限の最小）未満の銘柄が
+# ある最後の日が 2025-02-07（1 日 5〜51 銘柄）、無い最初の日が 2025-02-10（その後の 4 日の標本も 0）。
+# 同じ日に BPF も変わった: 2023-12-22・2024-08-05 はシナリオ後の OP の値が 1 単位 1 円を下回る銘柄が千前後あるが、
+# 2025-02-10 は 0。2023-12-22・2024-08-05 の「下限なしの ES < 下限」の銘柄は JSCC の値が全件 ES（下限なし）
+JSCC_OPTION_SHORT_FLOOR_FROM = date(2025, 2, 10)
 # ジョブの期限（タスクのタイムアウト 3600 秒より前に止める）と、1 日を始める残り時間の下限
 JSCC_JOB_DEADLINE_SECONDS = 3300
 JSCC_MIN_REMAINING_SECONDS = 900
@@ -233,10 +240,10 @@ JSCC_RUNS_TABLE = "jscc_ingest_runs"
 # シナリオの r・g の当てはめ（#168。jscc_factor.py、data.md「JSCC のシナリオの r・g の当てはめ（#168）」）。
 # ロードは上の 3 表の後（取り込みの記録の前）
 JSCC_FACTOR_TABLE = "jscc_var_scenario_factor"
-# 当てはめる OP の商品（月次の大型 + 週次の金曜 W1〜W4・水曜 C1〜C4）と、F₀ を取る先物（前ほど優先）
+# 当てはめる OP の商品（月次の大型 + 週次の金曜 W1〜W5・水曜 C1〜C5。第 5 週は #165）と、F₀ を取る先物（前ほど優先）
 JSCC_FACTOR_MONTHLY_PRODUCT = "NK225E"
 JSCC_FACTOR_PRODUCTS = frozenset(
-    {JSCC_FACTOR_MONTHLY_PRODUCT, *(f"NK225W{n}" for n in range(1, 5)), *(f"NK225C{n}" for n in range(1, 5))}
+    {JSCC_FACTOR_MONTHLY_PRODUCT, *(f"NK225W{n}" for n in range(1, 6)), *(f"NK225C{n}" for n in range(1, 6))}
 )
 JSCC_FACTOR_FUTURES = ("NK225F", "NK225MF", "NK225MCF")
 # 割引の金利（rate の列に記録）、h（営業日から何営業日後までの暦日）、使う OP の清算値段の下限（円）と最少の本数
@@ -247,6 +254,9 @@ JSCC_FACTOR_MIN_OPTIONS = 5
 # g の折れ線の節点（z）とリッジの係数
 JSCC_FACTOR_NODES = (-5.0, -4.0, -3.0, -2.0, -1.5, -1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 2.0, 3.0)
 JSCC_FACTOR_RIDGE = 1e-4
+# 当てはめの限月を始める残り時間の下限。後に続く 4 表のロードと取り込みの記録の分を残す（下回れば stage=deadline で
+# その日はどの表も書かない。1 日を始める下限 JSCC_MIN_REMAINING_SECONDS の中で、取得・解析・当てはめの後に残る見込み）
+JSCC_FACTOR_MIN_REMAINING_SECONDS = 300
 
 
 @dataclass(frozen=True)

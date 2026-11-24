@@ -3745,6 +3745,44 @@ gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--date=
 - 当てはめは 1 日 約 4 万 × 1,422 回の IV の逆算などで、手元の見積もりは 1 vCPU で 1 日 約 4〜5 分（取り込みと合わせて 1 日 約 6 分）。1 回 5 日で期限 3300 秒に収まる見込み。手順 1 の `factor_seconds` が大きければ `JSCC_MAX_DATES_PER_RUN` を下げる
 - メモリは残す銘柄の分（最大 約 130MiB）が増える。`max_rss_mb` が 1Gi に近ければジョブのメモリを上げる
 
+### 過去の日の取り込み（#165）
+
+2026-11-16 より前は、依頼元（option-simulator）の検証に要る局面の日だけを手で入れる（全部の 808 日は入れない。要るとわかったら別 Issue）。一覧の archive に 2023-07-31 からある。手で入れた日は `JSCC_START_DATE` より前なので、自動の実行（引数なし）の対象にならない（失敗した日も自動では取り直さない。下の手順 3 で拾う）。
+
+- 2024-06-07 までの VaRParameter はレコード 0 が古い形（4 列の 1 行。全体の信頼水準・本数）。`level`・`aggregation_group` を空文字列で書き、照合・当てはめはその値を使う（[data.md](data.md) の「JSCC の VaR パラメータの読み方（#164）」）
+- SQ・h は取引カレンダーの最新版（2018 年からの行がある。#67）で決まるので、過去の年末年始・連休もそのまま扱える
+- 1 回 5 日まで（期限 3300 秒。1 日 約 6〜8 分）。対象の日を 1 行 1 日のファイル（例 `dates.txt`。リポジトリに置かない）にして 5 日ずつ順に流す。取り込み済みの日を流し直しても置き換えなので重複しない
+
+```sh
+# 1. 書かずに古い形の日を 1 日（ログの jscc_ingested の margin_mismatched = 0・rows_factor_fitted > 0、ERROR が無い）
+gcloud run jobs execute jscc-sync --region $L --project $P --wait --args=--dry-run,--date=2023-12-22
+# 2. 5 日ずつ書く（gcloud が標準入力を読まないように < /dev/null）
+xargs -n 5 < dates.txt | while read -r line; do
+  args=$(printf -- '--date=%s,' $line); args=${args%,}
+  gcloud run jobs execute jscc-sync --region $L --project $P --wait --args="$args" < /dev/null || echo "失敗: $line"
+done
+# 3. 入った日と照合（日ごとの最新の succeeded。dates.txt の日数と n_days が同じで、mismatched = 0）
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+WITH latest AS (
+  SELECT business_date, ARRAY_AGG(STRUCT(jscc_run_id, margin_matched, margin_mismatched, rows_factor, rows_factor_fitted)
+    ORDER BY finished_at DESC LIMIT 1)[OFFSET(0)] AS r
+  FROM `optionchan_tokyo.jscc_ingest_runs`
+  WHERE business_date < "2026-11-16" AND status = "succeeded" AND file_version = "1600" GROUP BY 1
+)
+SELECT COUNT(*) AS n_days, SUM(r.margin_mismatched) AS mismatched, MIN(r.margin_matched) AS min_matched,
+  COUNTIF(r.rows_factor_fitted = 0) AS days_without_fit, MIN(business_date) AS first_day, MAX(business_date) AS last_day
+FROM latest'
+# 4. 失敗の行しか無い日（あれば stage・detail を見て、直してから手順 2 でその日だけ流す）
+bq query --location=$L --use_legacy_sql=false --format=pretty '
+SELECT business_date, ANY_VALUE(stage) AS stage, ANY_VALUE(detail) AS detail
+FROM `optionchan_tokyo.jscc_ingest_runs` WHERE business_date < "2026-11-16" AND file_version = "1600"
+GROUP BY 1 HAVING COUNTIF(status = "succeeded") = 0 ORDER BY 1'
+```
+
+- r・g の表は下の「確認」の Q3 の `business_date >= "2026-11-16"`（2 か所）を `business_date < "2026-11-16"` に変えて流す（各日 `same_run = n_rows`）
+- 照合の不一致があれば、その日の `jscc_margin_mismatch` の `codes` と下の「ERROR を受けたとき」の手順で原因を見る（Issue に書くのは原因だけ。値は書かない）。OP の売りの下限は 2025-02-10 の営業日からで、それより前の日は下限を付けずに照合する（[data.md](data.md) の「JSCC の VaR パラメータの読み方（#164）」）。不一致が出たら、まず切り替わりの日（`settings.JSCC_OPTION_SHORT_FLOOR_FROM`）の前後かを見る
+- 入れ終えたら、入れた範囲（局面ごとの最初と最後の日・日数）を依頼元に知らせる
+
 ### 確認
 
 ```sh

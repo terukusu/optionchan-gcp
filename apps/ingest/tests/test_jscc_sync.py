@@ -10,7 +10,16 @@ from urllib.parse import urljoin
 import pytest
 import requests
 from conftest import REPO_ROOT
-from jsccgen import Bpf, Inst, all_instruments_var, default_instruments, factor_month, listing_html, var_parameter
+from jsccgen import (
+    Bpf,
+    Inst,
+    all_instruments_var,
+    default_instruments,
+    factor_month,
+    listing_html,
+    var_parameter,
+    var_parameter_global,
+)
 
 from optionchan_ingest import bq_proto, jscc, jscc_factor, jscc_sync, settings
 from optionchan_ingest.io_bq import LoadFailed, QueryFailed, WriteFailed
@@ -31,15 +40,18 @@ def schema(table):
         return json.load(f)
 
 
-def expected_margins(bpf: Bpf):
-    """合成の BPF から計算した 1 枚の証拠金（照合の基準を合成する。計算の正しさは test_jscc の手計算で検査）"""
+def expected_margins(bpf: Bpf, param_text: str | None = None, short_floor: bool | None = None):
+    """合成の BPF から計算した 1 枚の証拠金（照合の基準を合成する。計算の正しさは test_jscc の手計算で検査）。
+    short_floor が None なら JSCC と同じく営業日が JSCC_OPTION_SHORT_FLOOR_FROM 以降のときだけ OP の売りに下限"""
+    if short_floor is None:
+        short_floor = bpf.business_date >= settings.JSCC_OPTION_SHORT_FLOOR_FROM
     reader = jscc.BpfReader(bpf.lines(), product_group="NK225", business_date=bpf.business_date)
-    records = jscc.parse_var_parameter(var_parameter())
+    records = jscc.parse_var_parameter(param_text or var_parameter())
     out = {}
     for inst in reader:
         hist = [t == "H" for _, t in reader.scenarios]
         conf, n = jscc.stress_params(records, inst.aggregation_group)
-        out[inst.instrument_code] = jscc.instrument_margins(inst, hist, conf, n)
+        out[inst.instrument_code] = jscc.instrument_margins(inst, hist, conf, n, short_floor=short_floor)
     return out
 
 
@@ -49,7 +61,7 @@ def names(day):
 
 
 class FakeJscc:
-    def __init__(self, days=(D2, D3), succeeded=(), bpfs=None, margins=None):
+    def __init__(self, days=(D2, D3), succeeded=(), bpfs=None, margins=None, params=None):
         self.files: dict[str, bytes] = {}
         self.errors: dict[str, Exception] = {}
         self.succeeded = set(succeeded)
@@ -69,8 +81,9 @@ class FakeJscc:
             weekday += [bpf_name, param_name]
             im.append(aiv_name)
             self.files[urljoin(WEEKDAY, bpf_name)] = bpf.zip_bytes()
-            self.files[urljoin(WEEKDAY, param_name)] = var_parameter().encode()
-            ref = (margins or {}).get(day) or expected_margins(bpf)
+            param_text = (params or {}).get(day) or var_parameter()
+            self.files[urljoin(WEEKDAY, param_name)] = param_text.encode()
+            ref = (margins or {}).get(day) or expected_margins(bpf, param_text)
             self.files[urljoin(IM, aiv_name)] = all_instruments_var(ref).encode()
         self.files[WEEKDAY] = listing_html(weekday).encode()
         self.files[IM] = listing_html(im).encode()
@@ -728,7 +741,7 @@ def test_factor_deadline(monkeypatch, capsys):
     real = jscc_factor.factor_rows
 
     def late(*args, **kwargs):
-        monkeypatch.setattr(settings, "MIN_REMAINING_SECONDS", 10**9)  # 当てはめの途中で期限
+        monkeypatch.setattr(settings, "JSCC_FACTOR_MIN_REMAINING_SECONDS", 10**9)  # 当てはめの途中で期限
         return real(*args, **kwargs)
 
     monkeypatch.setattr(jscc_factor, "factor_rows", late)
@@ -836,3 +849,95 @@ def test_load_calendar_uses_all_rows(monkeypatch):
     holidays, covered = jscc_sync.load_calendar(FakeCalendarQuery([]), "p", "d", 30)
     assert holidays == frozenset({date(2026, 11, 23), date(2027, 1, 11)})
     assert covered == date(2027, 6, 30)
+
+
+def test_factor_deadline_keeps_room_for_load_and_record(monkeypatch, capsys):
+    """当てはめは残りが JSCC_FACTOR_MIN_REMAINING_SECONDS（ロードと記録の分）を切ったら止める。
+    呼び出しの下限 MIN_REMAINING_SECONDS より上でも止め、どの表も書かない（#165。#168 のレビュー）"""
+    assert settings.JSCC_FACTOR_MIN_REMAINING_SECONDS > settings.MIN_REMAINING_SECONDS
+    _, bpf = factor_bpf()
+    fake = FakeJscc(days=(D3,), bpfs={D3: bpf})
+    left = {"value": 3300.0}
+    deadline = Deadline(3300, lambda: 3300.0 - left["value"])
+    real = jscc_sync._factor
+
+    def at_factor(*args, **kwargs):
+        left["value"] = settings.JSCC_FACTOR_MIN_REMAINING_SECONDS - 1  # 呼び出しはできるが、ロードの分が無い
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(jscc_sync, "_factor", at_factor)
+    result = sync(fake, deadline=deadline, dates=[D3])
+    assert [(d.status, d.stage) for d in result.days] == [("failed", "deadline")]
+    assert fake.loads == []
+    [err] = failures(logs(capsys))
+    assert err["detail"] == "deadline_exceeded at jscc_factor"
+
+
+# ---- 古い形の VaRParameter（2024-06-07 まで。#165） ----
+
+OLD = date(2023, 12, 22)
+
+
+def test_global_form_parameter_is_used_for_check_and_factor(monkeypatch, capsys):
+    """レコード 0 が 4 列の 1 行（全体の信頼水準・本数）の日: 照合も当てはめもその値を使い、不一致 0 で書く"""
+    month, bpf = factor_bpf(day=OLD, sq=date(2024, 1, 12), h_days=4)
+    for inst in bpf.instruments:
+        inst.agg = "IDX"  # 古いファイルの NK225 の Aggregation Group
+    param = var_parameter_global("99.0", "0")
+    seen = []
+    real = jscc_factor.factor_rows
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs["stress"])
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(jscc_factor, "factor_rows", spy)
+    fake = FakeJscc(days=(OLD,), bpfs={OLD: bpf}, params={OLD: param})
+    result = sync(fake, now=jst(2026, 11, 24, 18, 30), dates=[OLD])
+    assert result.outcome == "ok"
+    assert seen == [{"IDX": (99.0, 0)}]
+    [run] = fake.runs()
+    assert run["status"] == "succeeded" and run["trigger"] == "manual"
+    assert run["margin_mismatched"] == 0 and run["margin_matched"] > 0
+    assert run["rows_factor_fitted"] == 1
+    # ストレスの本数が違えば基準が変わる（この合成で全体の行の値が効いていることの確かめ）
+    other = expected_margins(bpf, var_parameter_global("99.0", "2"))
+    assert other != expected_margins(bpf, param)
+    [x] = [x for x in fake.loads if x["table"] == settings.JSCC_PARAMETER_TABLE]
+    assert (x["rows"][0]["level"], x["rows"][0]["aggregation_group"]) == ("", "")
+    assert not [r for r in logs(capsys) if r["severity"] in ("ERROR", "WARNING")]
+
+
+def test_manual_past_day_is_not_auto_target(capsys):
+    """手で入れた過去の日（JSCC_START_DATE より前）は、成功していても失敗していても自動の対象にならない"""
+    fake = FakeJscc(days=(OLD, D3), params={OLD: var_parameter_global()})
+    sync(fake, dates=[OLD])
+    fake.calls.clear()
+    result = sync(fake)
+    assert [d.business_date for d in result.days] == [D3]
+    assert ("query", settings.JSCC_START_DATE) in fake.calls
+    assert ("download", names(OLD)[0]) not in fake.calls
+
+
+@pytest.mark.parametrize(
+    "day, floor_in_reference, mismatched",
+    [
+        (OLD, False, 0),  # 下限の前: JSCC は ES のまま → 一致
+        (OLD, True, None),  # 下限の前に下限を付けた基準 → 不一致（下限を効かせていないことの確かめ）
+        (D3, True, 0),
+        (D3, False, None),
+    ],
+)
+def test_option_short_floor_switch_date(day, floor_in_reference, mismatched, capsys):
+    """OP の売りの下限は JSCC_OPTION_SHORT_FLOOR_FROM（2025-02-10）以降の営業日だけ（#165）"""
+    assert OLD < settings.JSCC_OPTION_SHORT_FLOOR_FROM <= D3
+    bpf = Bpf(business_date=day)  # 既定の OP は清算値段 10 円 × 1000 が ES より大きい（下限が効く）
+    ref = expected_margins(bpf, var_parameter(), short_floor=floor_in_reference)
+    assert ref != expected_margins(bpf, var_parameter(), short_floor=not floor_in_reference)
+    fake = FakeJscc(days=(day,), bpfs={day: bpf}, margins={day: ref})
+    sync(fake, dates=[day])
+    [run] = fake.runs()
+    if mismatched == 0:
+        assert run["margin_mismatched"] == 0 and run["margin_matched"] == 8
+    else:
+        assert run["margin_mismatched"] > 0
